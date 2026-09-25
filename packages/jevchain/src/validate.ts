@@ -98,11 +98,20 @@ type Ids = ReadonlyMap<string, string>;
  * sees everything under steps 0..N-1. A `parallel` branch may see its
  * siblings (a fast one can finish first), so they count too. Ancestors are
  * still running.
+ *
+ * `{{answers.*}}` sees the same finished nodes, plus the route, gate and
+ * cascade ancestors that decided the way here: their calls have come back.
  */
 interface ResultScope {
   readonly finished: Ids;
   readonly running: Ids;
+  readonly decided: Ids;
 }
+
+/** For `{{answers.*}}`: the answer keys each id's calls produce, and where it first asks. */
+type Asked = ReadonlyMap<string, { readonly keys: ReadonlySet<string>; readonly path: string }>;
+
+const DECIDES = new Set(["route", "gate", "cascade"]);
 
 /**
  * Holes that can only ever come up empty: an unknown root (`{{inptu}}`), a
@@ -114,16 +123,18 @@ function templateIssues(root: AnyNode): string[] {
   const issues: string[] = [];
   const all = new Map<string, string>();
   collectIds(root, ROOT_PATH, all);
+  const known = { all, asked: askedIds(root), kinds: kindsById(root) };
   const go = (node: AnyNode, path: string, scope: ResultScope) => {
     const n = node as AnyJevNode;
     const at = `${path} (${n.kind} "${n.id}")`;
-    for (const [where, template] of templatesOf(n)) {
+    for (const [where, template, tier] of templatesOf(n)) {
       for (const hole of new Set(templatePaths(template))) {
-        const problem = holeProblem(hole, n.id, scope, all);
+        const problem = holeProblem(hole, n.id, scope, known, tier);
         if (problem) issues.push(`${at}${where}: "{{${hole}}}" ${problem}`);
       }
     }
     const running = withId(scope.running, n.id, path);
+    const decided = DECIDES.has(n.kind) ? withId(scope.decided, n.id, path) : scope.decided;
     const children = childrenOf(node);
     children.forEach((c, i) => {
       const before = n.kind === "chain" ? children.slice(0, i) : n.kind === "parallel" ? children.filter((other) => other !== c) : [];
@@ -133,32 +144,123 @@ function templateIssues(root: AnyNode): string[] {
         for (const prev of before) collectIds(prev.node, childPath(path, prev.edge), done);
         finished = done;
       }
-      go(c.node, childPath(path, c.edge), { finished, running });
+      go(c.node, childPath(path, c.edge), { finished, running, decided });
     });
   };
-  go(root, ROOT_PATH, { finished: new Map(), running: new Map() });
+  go(root, ROOT_PATH, { finished: new Map(), running: new Map(), decided: new Map() });
   return issues;
 }
 
 /** Why a hole can never resolve, or undefined if it might. */
-function holeProblem(hole: string, selfId: string, scope: ResultScope, all: Ids): string | undefined {
-  const [head = "", id] = hole.split(".");
+function holeProblem(
+  hole: string,
+  selfId: string,
+  scope: ResultScope,
+  known: { all: Ids; asked: Asked; kinds: ReadonlyMap<string, string> },
+  tier?: TierAt,
+): string | undefined {
+  const { all } = known;
+  const [head = "", id, key] = hole.split(".");
   if (!(TEMPLATE_ROOTS as readonly string[]).includes(head)) {
     return `reads "${head}", which templates don't have; start with ${TEMPLATE_ROOTS.join(", ")}${didYouMean(head, TEMPLATE_ROOTS)}`;
   }
+  if (head === "answers" && id !== undefined) return answersProblem(id, key, selfId, scope, known, tier);
   if (head !== "results" || id === undefined || scope.finished.has(id)) return undefined;
   const what = `reads results of "${id}"`;
   if (id === selfId) return `${what}, this node's own output, which doesn't exist until it finishes`;
   const ancestor = scope.running.get(id);
-  if (ancestor) return `${what}, which is still running at ${ancestor} (results are set when a node finishes)`;
+  if (ancestor) {
+    // A branch reading the route/gate/cascade above it almost always wants what Jev said there.
+    const instead = scope.decided.has(id) ? `; what Jev answered it is in {{answers.${id}}}` : "";
+    return `${what}, which is still running at ${ancestor} (results are set when a node finishes${instead})`;
+  }
   const elsewhere = all.get(id);
   if (elsewhere) return `${what}, which is at ${elsewhere} and never finishes before this node runs`;
   return `${what}, but no node has that id${didYouMean(id, [...all.keys()])}`;
 }
 
+/** Why `{{answers.<id>.<key>}}` can never resolve, or undefined if it might. */
+function answersProblem(
+  id: string,
+  key: string | undefined,
+  selfId: string,
+  scope: ResultScope,
+  { all, asked, kinds }: { all: Ids; asked: Asked; kinds: ReadonlyMap<string, string> },
+  tier?: TierAt,
+): string | undefined {
+  const what = `reads answers of "${id}"`;
+  const mine = asked.get(id);
+  if (!mine) {
+    if (!all.has(id)) return `${what}, but no node has that id${didYouMean(id, [...asked.keys()])}`;
+    const kind = kinds.get(id);
+    const inside = kind === "chain" || kind === "parallel" ? `; read the ask, route, gate or cascade inside it` : "";
+    return `${what}, a ${kind}, which doesn't ask Jev itself${inside}`;
+  }
+  if (!scope.finished.has(id) && !scope.decided.has(id)) {
+    // A cascade tier's state is rendered after the tiers before it have answered.
+    if (id === selfId && tier?.earlier.length) {
+      if (key === undefined || tier.earlier.includes(key)) return undefined;
+      if (mine.keys.has(key)) {
+        return `${what}, whose tier "${key}" hasn't answered when tier "${tier.id}" renders its state (only ${tier.earlier.map((t) => `"${t}"`).join(", ")} have)`;
+      }
+    } else if (id === selfId) {
+      return `${what}, this node's own, which don't exist until its call comes back`;
+    } else {
+      return `${what}, which is at ${mine.path} and never asks Jev before this node runs`;
+    }
+  }
+  if (key !== undefined && !mine.keys.has(key)) {
+    const has = [...mine.keys].map((k) => `"${k}"`).join(", ");
+    return `${what}, which has no "${key}" (it has ${has})${didYouMean(key, [...mine.keys])}`;
+  }
+  return undefined;
+}
+
+/** Every id that asks Jev, with the answer keys its calls produce (merged across nodes sharing the id). */
+function askedIds(root: AnyNode): Asked {
+  const out = new Map<string, { keys: Set<string>; path: string }>();
+  walk(root, (node, { path }) => {
+    const n = node as AnyJevNode;
+    let keys: string[];
+    switch (n.kind) {
+      case "ask":
+        keys = Object.keys(n.questions ?? {});
+        break;
+      case "route":
+      case "gate":
+        keys = [DECISION_KEY, ...Object.keys(n.alsoAsk ?? {})];
+        break;
+      case "cascade":
+        keys = (n.tiers ?? []).map((t) => t.id);
+        break;
+      default:
+        return;
+    }
+    const entry = out.get(n.id) ?? { keys: new Set<string>(), path };
+    for (const k of keys) entry.keys.add(k);
+    out.set(n.id, entry);
+  });
+  return out;
+}
+
+/** Each id's kind, where it first appears. */
+function kindsById(root: AnyNode): Map<string, string> {
+  const out = new Map<string, string>();
+  walk(root, (n) => {
+    if (!out.has(n.id)) out.set(n.id, n.kind);
+  });
+  return out;
+}
+
+/** For a cascade tier's state: which tier it is, and the tiers that have answered before it renders. */
+interface TierAt {
+  readonly id: string;
+  readonly earlier: readonly string[];
+}
+
 /** Every template in a node, with where it lives (appended to the issue's location). */
-function templatesOf(n: AnyJevNode): [string, string][] {
-  const out: [string, string][] = [];
+function templatesOf(n: AnyJevNode): [string, string, TierAt?][] {
+  const out: [string, string, TierAt?][] = [];
   switch (n.kind) {
     case "ask":
     case "route":
@@ -166,7 +268,9 @@ function templatesOf(n: AnyJevNode): [string, string][] {
       if (typeof n.state === "string") out.push([".state", n.state]);
       break;
     case "cascade":
-      for (const t of n.tiers ?? []) if (typeof t.state === "string") out.push([`.tiers.${t.id}.state`, t.state]);
+      (n.tiers ?? []).forEach((t, i, tiers) => {
+        if (typeof t.state === "string") out.push([`.tiers.${t.id}.state`, t.state, { id: t.id, earlier: tiers.slice(0, i).map((e) => e.id) }]);
+      });
       break;
     case "emit":
       stringsIn(n.value, ".value", out);
@@ -175,7 +279,7 @@ function templatesOf(n: AnyJevNode): [string, string][] {
   return out;
 }
 
-function stringsIn(value: unknown, where: string, out: [string, string][]) {
+function stringsIn(value: unknown, where: string, out: [string, string, TierAt?][]) {
   if (typeof value === "string") out.push([where, value]);
   else if (Array.isArray(value)) value.forEach((v, i) => stringsIn(v, `${where}.${i}`, out));
   else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) stringsIn(v, `${where}.${k}`, out);

@@ -11,6 +11,7 @@
  * fits `b`'s input.
  */
 import type {
+  Answer,
   AnswerOf,
   Answers,
   ChoiceQuestion,
@@ -64,6 +65,13 @@ export interface StepContext {
   readonly runInput: unknown;
   /** Outputs of every node that has finished so far, by node id. */
   readonly results: Readonly<Record<string, unknown>>;
+  /**
+   * Jev's answers from every call that has come back so far, by node id: an
+   * ask's questions, a route or gate's `decision` plus its `alsoAsk`, a
+   * cascade's tiers by tier id. Set when the call returns, not when the node
+   * finishes, so a branch can read the answers that routed it.
+   */
+  readonly answers: Readonly<Record<string, Readonly<Record<string, Answer>>>>;
   /** Cancelled when the run is aborted or times out. */
   readonly signal: AbortSignal;
   /** The Jev client running this chain, for ad-hoc calls. */
