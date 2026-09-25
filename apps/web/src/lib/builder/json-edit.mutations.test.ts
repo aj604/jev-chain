@@ -22,6 +22,7 @@ import { TraceNode } from "@/components/trace/graph-node";
 import { resolveChain } from "@/lib/trace/chain-source";
 import { layoutGraph, nodeSize, vertexHints } from "@/lib/trace/layout";
 import { pasteAt } from "./clipboard";
+import { convertKind } from "./convert-kind";
 import { flowWarnings, inputAt } from "./data-flow";
 import {
   allIds,
@@ -35,7 +36,6 @@ import {
   moveStep,
   removeAt,
   renameNode,
-  replaceKind,
   subtreeSize,
   template,
   updateAt,
@@ -176,7 +176,10 @@ function exercise(doc: ChainDocument) {
     insertBeforePath(root, p, template("emit"));
     if (canDuplicate(root, p)) duplicateAt(root, p);
     if (canMove(root, p, 1)) moveStep(root, p, 1);
-    replaceKind(root, p, "gate");
+    for (const k of ["ask", "route", "gate", "parallel", "cascade", "step", "emit", "chain"] as const) {
+      // a kind change must hand the canvas a document the json tab would take too
+      if (!readDocumentEdit(JSON.stringify(withRoot(doc, convertKind(root, p, k).root)), doc).ok) throw new Error(`changing ${p} into a ${k} made a document the json tab refuses`);
+    }
     renameNode(root, p, "renamed");
     pasteAt(root, p, root, "replace");
     subtreeSize(root);

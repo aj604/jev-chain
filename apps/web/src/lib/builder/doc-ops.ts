@@ -469,11 +469,6 @@ export function duplicateAt(root: NodeJson, path: string, taken: Set<string> = a
   return null;
 }
 
-/** Swap the node at `path` for a fresh template of another kind. */
-export function replaceKind(root: NodeJson, path: string, kind: BuilderKind, taken: Set<string> = allIds(root)): NodeJson {
-  return updateAt(root, path, template(kind, taken));
-}
-
 // ---------------------------------------------------------------------------
 // Documents
 // ---------------------------------------------------------------------------

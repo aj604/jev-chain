@@ -31,7 +31,6 @@ import {
   moveStep,
   removeAt,
   renameTyped,
-  replaceKind,
   subtreeSize,
   template,
   updateAt,
@@ -41,13 +40,14 @@ import {
   type NodeJson,
 } from "@/lib/builder/doc-ops";
 import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
+import { convertKind, describeChange, losesWork } from "@/lib/builder/convert-kind";
 import { flowWarnings, inputAt, type FlowFix, type FlowWarning } from "@/lib/builder/data-flow";
 import { issueTarget } from "@/lib/builder/question-ops";
 import { editTarget, selectionAfterRemove, vertexFor } from "@/lib/builder/selection";
 import { CodeDrawer, type JsonDraft } from "./code-drawer";
 import { ConfirmDialog, type ConfirmRequest } from "./confirm-dialog";
 import { IssuesPanel } from "./issues-panel";
-import { ContextMenu, KindGrid, KindMenu } from "./kind-menu";
+import { ContextMenu, KindGrid, KindMenu, KINDS, type KindHints } from "./kind-menu";
 import { DocumentEditor, PropertyEditor, type Update } from "./property-editor";
 import type { Builder } from "./use-builder";
 
@@ -150,32 +150,57 @@ export function useBuildMode({
     [target, root, commitRoot, setSelected],
   );
 
+  // a kind change keeps what the new kind has room for (id, questions, paths) and says up front what it can't
   const changeKind = useCallback(
     (kind: BuilderKind) => {
       if (!target) return;
+      const change = convertKind(root, target.path, kind);
       const go = () => {
-        const next = replaceKind(root, target.path, kind);
-        commitRoot(next);
-        setSelected(vertexFor(next, target.path));
+        commitRoot(change.root);
+        setSelected(vertexFor(change.root, change.path));
       };
       setMenu(null);
       setCtx(null);
-      const size = subtreeSize(target.node);
-      if (size > 1)
-        setConfirm({
-          title: `turn this ${target.node.kind} into a ${kind}?`,
-          body: (
-            <>
-              <span className="font-mono text-ink">{target.node.title || target.node.id}</span> and the {count(size - 1, "node")} under it get replaced by a fresh {kind}. undo brings them back.
-            </>
-          ),
-          confirmLabel: `replace ${count(size, "node")}`,
-          onConfirm: go,
-        });
-      else go();
+      if (!losesWork(change)) return go();
+      const nodes = change.dropped.reduce((n, d) => n + d.nodes, 0);
+      setConfirm({
+        title: `turn this ${target.node.kind} into a ${kind}?`,
+        body: (
+          <>
+            {change.kept.length > 0 && (
+              <span className="mb-2 block">
+                <span className="font-mono text-ink">{target.node.title || target.node.id}</span> keeps {change.kept.join(", ")}.
+              </span>
+            )}
+            <span className="block">a {kind} has nowhere to put:</span>
+            <ul className="mb-2 space-y-0.5 font-mono text-[12px] text-ink">
+              {change.dropped.map((d) => (
+                <li key={d.what}>
+                  − {d.what}
+                  {d.nodes > 0 && <span className="text-ink-3"> ({count(d.nodes, "node")})</span>}
+                </li>
+              ))}
+            </ul>
+            undo brings {change.dropped.length === 1 ? "it" : "them"} back.
+          </>
+        ),
+        confirmLabel: nodes ? `drop ${count(nodes, "node")}` : `make it a ${kind}`,
+        onConfirm: go,
+      });
     },
     [target, root, commitRoot, setSelected],
   );
+  // what each kind in the menu would keep and drop, worked out only while a kind menu can be open
+  const kindHints = useMemo((): KindHints | undefined => {
+    if (!target || isPlaceholder(target.node) || (menu !== "kind" && !ctx)) return undefined;
+    const out: KindHints = {};
+    for (const { kind } of KINDS) {
+      if (kind === target.node.kind) continue;
+      const c = convertKind(root, target.path, kind);
+      out[kind] = { text: describeChange(c), loses: losesWork(c) };
+    }
+    return out;
+  }, [target, root, menu, ctx]);
 
   const remove = useCallback(() => {
     if (!target) return;
@@ -396,6 +421,7 @@ export function useBuildMode({
         addAfter={addAfter}
         addBefore={addBefore}
         changeKind={changeKind}
+        kindHints={kindHints}
         duplicate={duplicate}
         dupOk={dupOk}
         remove={remove}
@@ -537,6 +563,7 @@ export function useBuildMode({
           onAdd={addAfter}
           onAddBefore={addBefore}
           onChangeKind={changeKind}
+          kindHints={kindHints}
           onClose={() => setCtx(null)}
           actions={[
             ...((upOk || downOk) && !isPlaceholder(target.node)
@@ -641,6 +668,7 @@ function Toolbar({
   addAfter,
   addBefore,
   changeKind,
+  kindHints,
   duplicate,
   dupOk,
   remove,
@@ -652,6 +680,7 @@ function Toolbar({
   addAfter: (k: BuilderKind) => void;
   addBefore: (k: BuilderKind) => void;
   changeKind: (k: BuilderKind) => void;
+  kindHints?: KindHints;
   duplicate: () => void;
   dupOk: boolean;
   remove: () => void;
@@ -682,7 +711,7 @@ function Toolbar({
             kind ▾
           </button>
         </Tooltip>
-        {menu === "kind" && target && <KindMenu title="change kind to" current={target.node.kind} onPick={changeKind} onClose={() => setMenu(null)} />}
+        {menu === "kind" && target && <KindMenu title="change kind to" current={target.node.kind} hints={kindHints} onPick={changeKind} onClose={() => setMenu(null)} />}
       </div>
       <Tooltip label="duplicate · d">
         <button type="button" disabled={!dupOk} className={cn(btn, "border-soft-l")} onClick={duplicate}>
