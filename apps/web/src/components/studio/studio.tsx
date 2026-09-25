@@ -23,6 +23,11 @@
  * stacks another what-if on top of b's (the chain of forks can be undone one
  * at a time), which is how you reach decisions that only exist on a road
  * run a never took.
+ *
+ * Sweep (`w`) runs every sample, your input and any extra lines through the
+ * chain one after another (see `lib/trace/sweep`): the graph shows how many
+ * inputs went down each road, the panel how each decision split them and
+ * which roads none of them reach. Click an input to open its run.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -45,6 +50,7 @@ import { parseInput, toEditor } from "@/lib/trace/input";
 import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
+import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
 import type { Fork } from "@/lib/trace/what-if";
 import { ChainPicker } from "./chain-picker";
 import { ExportMenu } from "./export-menu";
@@ -52,7 +58,9 @@ import { ImportDialog } from "./import-dialog";
 import { InputEditor, type InputValue } from "./input-editor";
 import { IssueActions } from "./issue-actions";
 import { SavedRunsList } from "./saved-runs-list";
+import { SweepPanel, SweepSummary } from "./sweep-panel";
 import { sharePayload, useShare } from "./use-share";
+import { useSweep } from "./use-sweep";
 import { Workbench, type Target } from "./workbench";
 
 export type StudioMode = "run" | "build";
@@ -158,6 +166,8 @@ export function Studio(props: StudioProps) {
   const [inputA, setInputA] = useState<InputValue>(() => (props.initialInput ? editorFromDeepLink(props.initialInput) : sampleEditor(chain, 0)));
   const [inputB, setInputB] = useState<InputValue>(() => sampleEditor(chain, 1));
   const [comparing, setComparing] = useState(false);
+  const [sweeping, setSweeping] = useState(false);
+  const [sweepExtra, setSweepExtra] = useState("");
   const [rehearsing, setRehearsing] = useState(Boolean(props.initialRehearse));
   const [selected, setSelected] = useState<string | null>(null);
   const [target, setTarget] = useState<Target>("a");
@@ -191,21 +201,34 @@ export function Studio(props: StudioProps) {
   }, []);
   const runA = useChainRun({ onFinish: onFinishA });
   const runB = useChainRun({ onFinish: onFinishB });
-  const running = runA.phase === "running" || runB.phase === "running";
+  const sweep = useSweep();
+  const running = runA.phase === "running" || runB.phase === "running" || sweep.phase === "running";
   const nowA = useRunClock(runA.phase === "running", runA.startedAtPerf, runA.trace?.durationMs);
   const nowB = useRunClock(runB.phase === "running", runB.startedAtPerf, runB.trace?.durationMs);
 
   const parsedA = parseInput(inputA.text, inputA.mode);
   const parsedB = parseInput(inputB.text, inputB.mode);
   const runnable = building ? (buildResolved.ok ? buildResolved.chain : undefined) : chain;
-  const canRun = Boolean(runnable) && parsedA.ok && (!comparing || parsedB.ok);
+  // Sweep mode (run mode only): the samples, the editor's input if it parses, and the extra lines.
+  const sweepMode = sweeping && !building;
+  const parsedExtra = parseSweepLines(sweepExtra);
+  const queued = sweepInputs(chain?.inputs ?? [], parsedA.ok ? parsedA.value : undefined, parsedExtra.ok ? parsedExtra.values : []);
+  const canRun = sweepMode
+    ? Boolean(chain) && parsedExtra.ok && queued.inputs.length > 0
+    : Boolean(runnable) && parsedA.ok && (!comparing || parsedB.ok);
   const runBlocker = !runnable
     ? building
       ? `fix ${buildIssues.length} broken link${buildIssues.length === 1 ? "" : "s"} first`
       : "this chain doesn't load"
-    : !parsedA.ok || (comparing && !parsedB.ok)
-      ? "the input isn't valid json"
-      : null;
+    : sweepMode
+      ? !parsedExtra.ok
+        ? parsedExtra.error
+        : queued.inputs.length === 0
+          ? "nothing to sweep"
+          : null
+      : !parsedA.ok || (comparing && !parsedB.ok)
+        ? "the input isn't valid json"
+        : null;
 
   // Keep the URL shareable: /studio?example=<slug>, plus &mode=build.
   useEffect(() => {
@@ -235,13 +258,24 @@ export function Studio(props: StudioProps) {
     else runB.reset();
   }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source, forgetWhatIfs]);
 
-  const run = useCallback(() => pull(rehearsing), [pull, rehearsing]);
+  /** Sweep every queued input through the chain on screen. */
+  const startSweep = useCallback(
+    (rehearse: boolean) => {
+      if (!chain || queued.inputs.length === 0) return;
+      setSelected(null);
+      void sweep.start(chain.node, queued.inputs, { rehearse });
+    },
+    [chain, queued, sweep],
+  );
+
+  const run = useCallback(() => (sweepMode ? startSweep(rehearsing) : pull(rehearsing)), [sweepMode, startSweep, pull, rehearsing]);
 
   /** From a missing-key dead end: turn rehearsal on and pull again. */
   const rehearseNow = useCallback(() => {
     setRehearsing(true);
-    pull(true);
-  }, [pull]);
+    if (sweepMode) startSweep(true);
+    else pull(true);
+  }, [pull, sweepMode, startSweep]);
 
   /** Run `request` as run b and open the a-vs-b diff. */
   const startWhatIf = useCallback(
@@ -296,12 +330,14 @@ export function Studio(props: StudioProps) {
   const stop = useCallback(() => {
     runA.stop();
     runB.stop();
-  }, [runA, runB]);
+    sweep.stop();
+  }, [runA, runB, sweep]);
 
   const switchTo = useCallback(
     (next: ChainSource) => {
       runA.reset();
       runB.reset();
+      sweep.reset();
       forgetWhatIfs();
       setSource(next);
       const r = resolveChain(next);
@@ -312,7 +348,7 @@ export function Studio(props: StudioProps) {
       setActiveSavedId(null);
       setTarget("a");
     },
-    [runA, runB, forgetWhatIfs],
+    [runA, runB, sweep, forgetWhatIfs],
   );
 
   const pickExample = useCallback((slug: string) => switchTo({ kind: "example", slug }), [switchTo]);
@@ -393,6 +429,7 @@ export function Studio(props: StudioProps) {
       if (saved.source.kind === "doc") setCustomDoc(saved.source.doc);
       setInputA(toEditor(saved.input));
       setComparing(false);
+      setSweeping(false);
       setTarget("a");
       setSelected(null);
       runA.show(saved.trace, saved.input);
@@ -408,8 +445,38 @@ export function Studio(props: StudioProps) {
       forgetWhatIfs();
       setTarget("a");
     }
+    setSweeping(false);
     setComparing(!comparing);
   }, [comparing, resetB, forgetWhatIfs]);
+
+  /** Sweep mode on/off. Results stay until the chain changes, so you can step into a run and back. */
+  const toggleSweep = useCallback(() => {
+    if (!sweeping && comparing) {
+      resetB();
+      forgetWhatIfs();
+      setComparing(false);
+      setTarget("a");
+    }
+    setSelected(null);
+    setSweeping(!sweeping);
+  }, [sweeping, comparing, resetB, forgetWhatIfs]);
+
+  /** A sweep row → a normal run a, ready for "why did it go here?" and what-ifs. */
+  const openSweepRow = useCallback(
+    (row: SweepRow) => {
+      if (!row.trace) return;
+      forgetWhatIfs();
+      setInputA(toEditor(row.value));
+      setSweeping(false);
+      setTarget("a");
+      setSelected(null);
+      setActiveSavedId(null);
+      runA.show(row.trace, row.value);
+    },
+    [runA, forgetWhatIfs],
+  );
+  const sweepTraces = useMemo(() => finishedTraces(sweep.rows), [sweep.rows]);
+  const traffic = useMemo(() => trafficOf(graph, sweepTraces), [graph, sweepTraces]);
 
   // What's on screen right now, for share / step-through.
   const view = building ? buildView : chain;
@@ -417,11 +484,11 @@ export function Studio(props: StudioProps) {
   const focus = comparing && target === "b" ? runB : runA;
   const order = useMemo(() => visitOrder(viewGraph, focus.trace), [viewGraph, focus.trace]);
   const { state: shareState, share } = useShare();
-  const canShare = Boolean(focus.trace && focus.trace.status !== "running" && focus.input !== undefined);
+  const canShare = Boolean(!sweepMode && focus.trace && focus.trace.status !== "running" && focus.input !== undefined);
   const doShare = useCallback(() => {
-    if (!focus.trace || focus.input === undefined || focus.trace.status === "running") return;
+    if (sweepMode || !focus.trace || focus.input === undefined || focus.trace.status === "running") return;
     void share(sharePayload(source, focus.input, focus.trace));
-  }, [focus.trace, focus.input, source, share]);
+  }, [sweepMode, focus.trace, focus.input, source, share]);
 
   const sampleValue = parsedA.ok && inputA.text.trim() ? parsedA.value : undefined;
   const build = useBuildMode({
@@ -447,6 +514,7 @@ export function Studio(props: StudioProps) {
   useHotkey("b", toggleMode, { description: "switch between run and build mode", group: "studio" });
   useHotkey("r", () => setRehearsing((r) => !r), { description: "toggle rehearsal (made-up answers, no key)", group: "studio", enabled: !running });
   useHotkey("c", toggleCompare, { description: "toggle compare mode", group: "studio", enabled: !building });
+  useHotkey("w", toggleSweep, { description: "toggle sweep: run every sample and see where each goes", group: "studio", enabled: !building && !running });
   useHotkey("s", doShare, { description: "copy a share link to this run", group: "studio", enabled: !building });
   useHotkey("]", () => setSelected((s) => stepSelection(order, s, 1)), { description: "next visited node", group: "studio", enabled: !building });
   useHotkey("[", () => setSelected((s) => stepSelection(order, s, -1)), { description: "previous visited node", group: "studio", enabled: !building });
@@ -569,7 +637,13 @@ export function Studio(props: StudioProps) {
             compare
           </Button>
         </Tooltip>
-        <Tooltip label={canShare ? "copy share link · s" : "run it first"}>
+        <Tooltip label="run every sample and see where each goes · w">
+          <Button variant={sweeping ? "solid" : "ghost"} size="sm" onClick={toggleSweep} aria-pressed={sweeping} disabled={running}>
+            <span aria-hidden className="font-mono text-[10px]">⋔</span>
+            sweep
+          </Button>
+        </Tooltip>
+        <Tooltip label={sweepMode ? "open one input's run to share it" : canShare ? "copy share link · s" : "run it first"}>
           <Button variant="ghost" size="sm" onClick={doShare} disabled={!canShare || shareState === "working"}>
             <span aria-live="polite">
               {shareState === "copied" ? "link copied ✓" : shareState === "error" ? "couldn't copy" : shareState === "working" ? "packing…" : "share"}
@@ -609,7 +683,15 @@ export function Studio(props: StudioProps) {
           <svg aria-hidden viewBox="0 0 10 10" className="size-2.5">
             <path d="M1 0.5 L9.5 5 L1 9.5 z" fill="currentColor" />
           </svg>
-          {rehearsing ? (comparing ? "rehearse both" : "rehearse the chain") : comparing ? "pull both" : "pull the chain"}
+          {sweepMode
+            ? `${rehearsing ? "rehearse" : "sweep"} ${queued.inputs.length} input${queued.inputs.length === 1 ? "" : "s"}`
+            : rehearsing
+              ? comparing
+                ? "rehearse both"
+                : "rehearse the chain"
+              : comparing
+                ? "pull both"
+                : "pull the chain"}
           <KbdCombo combo="mod+enter" className="ml-auto" />
         </Button>
       )}
@@ -622,11 +704,11 @@ export function Studio(props: StudioProps) {
   );
 
   const inputSection = railSection(
-    comparing ? "inputs" : "input",
+    comparing || sweepMode ? "inputs" : "input",
     <div className="space-y-4 px-3 pb-3">
       <InputEditor
-        label={comparing ? "input a" : "input"}
-        hideLabel={!comparing}
+        label={comparing ? "input a" : sweepMode ? "your input" : "input"}
+        hideLabel={!comparing && !sweepMode}
         tone={comparing ? "a" : undefined}
         value={inputA}
         onChange={setInputA}
@@ -635,6 +717,30 @@ export function Studio(props: StudioProps) {
         rows={comparing ? 4 : 6}
       />
       {comparing && <InputEditor label="input b" tone="b" value={inputB} onChange={setInputB} samples={view.inputs} disabled={running} rows={4} />}
+      {sweepMode && (
+        <label className="block">
+          <span className="mb-1 flex items-baseline justify-between font-mono text-[10px] lowercase text-ink-3">
+            <span>more inputs · one per line</span>
+            <span className="tabular-nums">
+              {queued.inputs.length} to sweep{queued.dropped > 0 ? ` · ${queued.dropped} over the cap` : ""}
+            </span>
+          </span>
+          <textarea
+            value={sweepExtra}
+            onChange={(e) => setSweepExtra(e.target.value)}
+            disabled={running}
+            rows={4}
+            spellCheck={false}
+            placeholder={'text, or one json value per line\n{"message": "..."}'}
+            aria-invalid={!parsedExtra.ok || undefined}
+            className={cn(
+              "block w-full resize-y border-hard bg-paper px-2 py-1.5 font-mono text-[12px] leading-relaxed text-ink placeholder:text-ink-3 focus:outline-2 focus:outline-offset-2 focus:outline-ink disabled:opacity-60",
+              !parsedExtra.ok && "border-fail",
+            )}
+          />
+          <span className="mt-1 block font-mono text-[10px] leading-relaxed text-ink-3">every sample and your input are swept too, one at a time, up to {MAX_SWEEP}.</span>
+        </label>
+      )}
       {runControls}
     </div>,
     building && build.canSaveSample ? (
@@ -729,6 +835,28 @@ export function Studio(props: StudioProps) {
         issue={showTrace ? runA.issue : null}
         now={nowA}
         {...(comparing && !building ? { compare: { trace: runB.trace, issue: runB.issue, now: nowB } } : {})}
+        {...(sweepMode
+          ? {
+              sweep: {
+                traffic,
+                summary: <SweepSummary rows={sweep.rows} running={sweep.phase === "running"} rehearsed={sweep.rehearsed} />,
+                aside: (
+                  <SweepPanel
+                    graph={graph}
+                    rows={sweep.rows}
+                    running={sweep.phase === "running"}
+                    rehearsed={sweep.rehearsed}
+                    {...(sweep.stoppedBy ? { stoppedBy: sweep.stoppedBy } : {})}
+                    queued={queued.inputs}
+                    selected={selected}
+                    onSelect={setSelected}
+                    onOpen={openSweepRow}
+                    issueAction={<IssueActions issue={sweep.stoppedBy ?? null} onRetry={run} onRehearse={rehearseNow} />}
+                  />
+                ),
+              },
+            }
+          : {})}
         target={target}
         onTarget={setTarget}
         selected={selected}
@@ -744,7 +872,7 @@ export function Studio(props: StudioProps) {
       {building && build.portals}
       <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onLoad={loadDoc} starter={() => (building ? builder.doc : documentOf(view))} />
       <span className="sr-only" aria-live="polite">
-        {runA.phase === "running" ? "run started" : runA.trace ? `run ${runA.trace.status}` : ""}
+        {sweep.phase === "running" ? "sweep started" : runA.phase === "running" ? "run started" : runA.trace ? `run ${runA.trace.status}` : ""}
       </span>
     </>
   );
