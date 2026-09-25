@@ -37,6 +37,10 @@
  * and then input b (see `lib/trace/split`): the diff then says, per decision,
  * whether the two inputs stayed apart on every ask or one of them goes both
  * ways by itself, so a split on one pull isn't read as the edit's doing.
+ *
+ * Re-asks are real requests, so once they finish they're kept with the run
+ * they asked about: in recent runs (reopening it shows the same verdicts) and
+ * in its share link.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -59,8 +63,8 @@ import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type Resolved
 import { parseInput, toEditor } from "@/lib/trace/input";
 import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
-import { answeredReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
-import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
+import { answeredReasks, keepReasks, readKeptReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
+import { keepReasksWith, saveRun, type SavedRun } from "@/lib/trace/saved-runs";
 import { sameInput, splitsOf } from "@/lib/trace/split";
 import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
 import type { Fork } from "@/lib/trace/what-if";
@@ -73,11 +77,17 @@ import { IssueActions } from "./issue-actions";
 import { SavedRunsList } from "./saved-runs-list";
 import { SweepPanel, SweepSummary } from "./sweep-panel";
 import { sharePayload, useShare } from "./use-share";
-import { useReask } from "./use-reask";
+import { useReask, type ReaskState } from "./use-reask";
 import { useSweep } from "./use-sweep";
 import { Workbench, type Target } from "./workbench";
 
 export type StudioMode = "run" | "build";
+
+/** A finished "ask again" stays with the saved run it asked about (when that run is saved). */
+function keepWithSavedRun(base: Trace, end: ReaskState | undefined) {
+  const kept = end && keepReasks(end.rows, end.stoppedBy);
+  if (kept) keepReasksWith(base.runId, kept);
+}
 
 /** A what-if run: `base` re-run on `input` with `fork` forced. */
 interface WhatIfRequest {
@@ -463,6 +473,8 @@ export function Studio(props: StudioProps) {
       setTarget("a");
       setSelected(null);
       runA.show(saved.trace, saved.input);
+      const kept = readKeptReasks(saved.reasks, saved.trace);
+      if (kept) reask.show(saved.trace, kept);
       setActiveSavedId(saved.id);
     },
     [runA, runB, reask, forgetWhatIfs],
@@ -523,7 +535,7 @@ export function Studio(props: StudioProps) {
   const startReask = useCallback(() => {
     const base = runA.trace;
     if (!chain || !base || runA.input === undefined || running || reaskBlocker(base)) return;
-    void reask.start(chain.node, base, runA.input);
+    void reask.start(chain.node, base, runA.input).then((end) => keepWithSavedRun(base, end));
   }, [chain, runA.trace, runA.input, running, reask]);
   /** An ask that went elsewhere → run b, with the a-vs-b diff open on where they parted. */
   const openReask = useCallback(
@@ -583,10 +595,11 @@ export function Studio(props: StudioProps) {
     // a asked already (say with `a`, before b ran)? Its asks count; don't spend them twice.
     if (!(reaskOn && reask.phase === "done" && !reask.stoppedBy)) {
       const first = await reask.start(chain.node, a, runA.input);
+      keepWithSavedRun(a, first);
       // Stopped by hand, or by something b's asks would hit too (no key, a 429…): don't spend b's.
       if (askBothSeq.current !== mine || !first || first.stoppedBy || first.rows.some((r) => !r.trace || r.trace.status === "aborted")) return;
     }
-    await reaskB.start(chain.node, b, runB.input);
+    keepWithSavedRun(b, await reaskB.start(chain.node, b, runB.input));
   }, [chain, runA.trace, runA.input, runB.trace, runB.input, running, bothBlocker, reaskOn, reask, reaskB]);
   const compareAsk: CompareAskControl = {
     blocker: bothBlocker,
@@ -607,8 +620,11 @@ export function Studio(props: StudioProps) {
   const canShare = Boolean(!sweepMode && focus.trace && focus.trace.status !== "running" && focus.input !== undefined);
   const doShare = useCallback(() => {
     if (sweepMode || !focus.trace || focus.input === undefined || focus.trace.status === "running") return;
-    void share(sharePayload(source, focus.input, focus.trace));
-  }, [sweepMode, focus.trace, focus.input, source, share]);
+    // Its finished re-asks go along (run a's from "ask again", run b's from "ask both again").
+    const asked = [reask, reaskB].find((r) => r.phase === "done" && r.base === focus.trace);
+    const kept = asked && keepReasks(asked.rows, asked.stoppedBy);
+    void share(sharePayload(source, focus.input, focus.trace, kept));
+  }, [sweepMode, focus.trace, focus.input, source, share, reask, reaskB]);
 
   const sampleValue = parsedA.ok && inputA.text.trim() ? parsedA.value : undefined;
   const build = useBuildMode({

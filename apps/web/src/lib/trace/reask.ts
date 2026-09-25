@@ -22,12 +22,18 @@
  *
  * Only real runs can be asked again: a rehearsal's answers are a hash of the
  * input (same every time, so "held" would be a lie), and a what-if's are bent.
+ *
+ * The asks are real requests, so they stay with the run (`keepReasks`): saved
+ * with it in recent runs and packed into its share link, then read back
+ * (`readKeptReasks`, `reaskRows`) into the very same verdicts without asking
+ * Jev anything.
  */
 import { decisions, spanAt, type AnyNode, type Decision, type Json, type Trace } from "jevchain";
 import { fmtNum } from "./format";
 import { flipsOf, fmtBy, measuredAt, type Flip } from "./margin";
 import { isRehearsal } from "./rehearsal";
-import type { SweepInput } from "./sweep";
+import type { RunIssue } from "./run-error";
+import type { SweepInput, SweepRow } from "./sweep";
 import { edgeName, isWhatIf } from "./what-if";
 
 /** How many more times "ask again" asks: enough to catch a coin toss, few enough for the shared key. */
@@ -46,6 +52,72 @@ export function reaskBlocker(trace: Trace | undefined): string | null {
   if (isWhatIf(trace)) return "a what-if bends jev's numbers. ask the run it forked from again instead.";
   if (decisions(trace).length === 0) return "nothing here was decided, so there's no road to hold";
   return null;
+}
+
+/**
+ * A finished "ask again", as kept with its run: each re-ask in order (its
+ * trace, or the issue that stopped it before a trace; empty when it never
+ * started), how many were meant to run, and what stopped them early.
+ */
+export interface KeptReasks {
+  asks: { trace?: Trace; issue?: RunIssue }[];
+  total: number;
+  stoppedBy?: RunIssue;
+}
+
+/**
+ * The re-asks as they ended, ready to save or share, or undefined when Jev
+ * answered none of them (nothing to read). Order is kept, so "open ask 4" is
+ * the same ask later.
+ */
+export function keepReasks(rows: readonly SweepRow[], stoppedBy?: RunIssue, total = REASKS): KeptReasks | undefined {
+  if (answeredReasks(rows.map((r) => r.trace)).length === 0) return undefined;
+  return {
+    asks: rows.map((r) => ({ ...(r.trace ? { trace: r.trace } : {}), ...(r.issue ? { issue: r.issue } : {}) })),
+    total,
+    ...(stoppedBy ? { stoppedBy } : {}),
+  };
+}
+
+/** Kept re-asks back as the rows "ask again" made (asks 2…), for the same input. */
+export function reaskRows(kept: KeptReasks, input: Json): SweepRow[] {
+  return reaskInputs(input, kept.asks.length).map((row, i) => ({ ...row, ...kept.asks[i] }));
+}
+
+/** At most this many kept re-asks are read back: a share link is someone else's data. */
+const MAX_KEPT = 20;
+
+function isIssue(v: unknown): v is RunIssue {
+  const x = v as Partial<RunIssue> | null;
+  return typeof x === "object" && x !== null && typeof x.kind === "string" && typeof x.title === "string" && typeof x.detail === "string";
+}
+
+function isTrace(v: unknown): v is Trace {
+  const x = v as Partial<Trace> | null;
+  return typeof x === "object" && x !== null && Array.isArray(x.spans) && typeof x.status === "string";
+}
+
+/**
+ * Kept re-asks from storage or a share link, or undefined when there are none
+ * or they don't hold together (the run still opens, just not as asked again).
+ * Only a run that could have been asked again keeps them, and only re-asks of
+ * that run's input count.
+ */
+export function readKeptReasks(data: unknown, base: Trace): KeptReasks | undefined {
+  if (!data || typeof data !== "object" || reaskBlocker(base)) return undefined;
+  const { asks, total, stoppedBy } = data as { asks?: unknown; total?: unknown; stoppedBy?: unknown };
+  if (!Array.isArray(asks) || asks.length > MAX_KEPT) return undefined;
+  if (typeof total !== "number" || !Number.isInteger(total) || total < asks.length || total > MAX_KEPT) return undefined;
+  if (stoppedBy !== undefined && !isIssue(stoppedBy)) return undefined;
+  const same = JSON.stringify(base.input);
+  const fits = asks.every((a: unknown) => {
+    if (!a || typeof a !== "object") return false;
+    const { trace, issue } = a as { trace?: unknown; issue?: unknown };
+    if (issue !== undefined && !isIssue(issue)) return false;
+    return trace === undefined || (isTrace(trace) && JSON.stringify(trace.input) === same);
+  });
+  if (!fits || answeredReasks(asks.map((a: { trace?: Trace }) => a.trace)).length === 0) return undefined;
+  return { asks: asks as KeptReasks["asks"], total, ...(stoppedBy ? { stoppedBy: stoppedBy as RunIssue } : {}) };
 }
 
 export type Verdict = "flipped" | "could-flip" | "held";

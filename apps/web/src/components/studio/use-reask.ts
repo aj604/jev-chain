@@ -8,12 +8,13 @@
  *   await reask.start(node, trace, input);   // trace = the run being asked about; resolves with the final state
  *   reask.base, reask.rows, reask.phase, reask.stoppedBy
  *   reask.stop();  reask.reset();
+ *   reask.show(trace, kept);                 // re-asks kept with a saved or shared run: shown, not re-sent
  *
  * Always the real client: a rehearsal would answer the same every time.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnyNode, Json, Trace } from "jevchain";
-import { reaskInputs } from "@/lib/trace/reask";
+import { reaskInputs, reaskRows, type KeptReasks } from "@/lib/trace/reask";
 import type { RunIssue } from "@/lib/trace/run-error";
 import { runSweep, type SweepRow } from "@/lib/trace/sweep";
 import { browserClient, type RunPhase } from "@/components/trace/use-chain-run";
@@ -32,6 +33,8 @@ export interface UseReask extends ReaskState {
   start: (node: AnyNode, base: Trace, input: Json) => Promise<ReaskState | undefined>;
   stop: () => void;
   reset: () => void;
+  /** Show re-asks kept with `base` (see `keepReasks`) as if they had just finished. Asks Jev nothing. */
+  show: (base: Trace, kept: KeptReasks) => void;
 }
 
 export function useReask(): UseReask {
@@ -73,5 +76,11 @@ export function useReask(): UseReask {
     setState({ phase: "idle", rows: [] });
   }, []);
 
-  return { ...state, start, stop, reset };
+  const show = useCallback((base: Trace, kept: KeptReasks) => {
+    controller.current?.abort();
+    seq.current++;
+    setState({ phase: "done", base, rows: reaskRows(kept, base.input), ...(kept.stoppedBy ? { stoppedBy: kept.stoppedBy } : {}) });
+  }, []);
+
+  return { ...state, start, stop, reset, show };
 }

@@ -3,14 +3,21 @@
  * hash. deflate-raw + base64url, so no server storage and nothing to expire.
  * The hash never reaches the server either, which is a nice property for a
  * trace that might contain someone's group chat.
+ *
+ * A run that was asked again carries its re-asks too (`reasks`), so whoever
+ * opens the link sees whether each decision held without asking Jev. Links
+ * without them (older ones included) open as before.
  */
 import type { ChainDocument, Json, Trace } from "jevchain";
+import { readKeptReasks, type KeptReasks } from "./reask";
 
 export interface SharePayload {
   v: 1;
   chain: { example: string } | { doc: ChainDocument };
   input: Json;
   trace: Trace;
+  /** The run's "ask again", when it had one (see `lib/trace/reask`). */
+  reasks?: KeptReasks;
 }
 
 export const SHARE_PATH = "/studio/share";
@@ -65,7 +72,10 @@ function validatePayload(data: unknown): SharePayload {
   }
   const t = d.trace as Partial<Trace> | undefined;
   if (!t || !Array.isArray(t.spans) || typeof t.status !== "string") throw new ShareDecodeError("this link has no trace in it.");
-  return d as SharePayload;
+  // Re-asks that don't hold together are dropped, not fatal: the run itself is still worth opening.
+  const { reasks, ...rest } = d as SharePayload;
+  const kept = reasks === undefined ? undefined : readKeptReasks(reasks, rest.trace);
+  return kept ? { ...rest, reasks: kept } : rest;
 }
 
 async function pipe(bytes: Uint8Array, transform: CompressionStream | DecompressionStream): Promise<Uint8Array> {

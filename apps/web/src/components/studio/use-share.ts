@@ -3,12 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Json, Trace } from "jevchain";
 import type { ChainSource } from "@/lib/trace/chain-source";
+import type { KeptReasks } from "@/lib/trace/reask";
 import { encodeShare, shareUrl, type SharePayload } from "@/lib/trace/share";
 
 export type ShareState = "idle" | "working" | "copied" | "error";
 
-export function sharePayload(source: ChainSource, input: Json, trace: Trace): SharePayload {
-  return { v: 1, chain: source.kind === "example" ? { example: source.slug } : { doc: source.doc }, input, trace };
+/** `reasks`: the run's finished "ask again", so the link shows which decisions held. */
+export function sharePayload(source: ChainSource, input: Json, trace: Trace, reasks?: KeptReasks): SharePayload {
+  return { v: 1, chain: source.kind === "example" ? { example: source.slug } : { doc: source.doc }, input, trace, ...(reasks ? { reasks } : {}) };
 }
 
 /** Encode a run into a link and copy it. `state` drives the button's feedback. */

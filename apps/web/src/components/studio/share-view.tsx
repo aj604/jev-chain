@@ -3,6 +3,10 @@
 /**
  * A shared run, read-only: the exact trace from the link, drawn on the chain
  * it ran on. No API call, no key needed; everything is in the URL hash.
+ *
+ * When the run was asked again before it was shared, its re-asks came along:
+ * the story says which decisions held across every ask, and an ask that went
+ * elsewhere opens next to the run as b, exactly as in the studio.
  */
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { graphOf } from "jevchain";
@@ -12,8 +16,10 @@ import { Button, ButtonLink } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { useHotkey } from "@/lib/hotkeys";
 import { resolveChain, type ChainSource, type ResolvedChain } from "@/lib/trace/chain-source";
+import type { ReaskControl } from "@/components/trace/why-panel";
 import { previewJson } from "@/lib/trace/format";
 import { stepSelection, visitOrder } from "@/lib/trace/order";
+import { answeredReasks, steadinessOf } from "@/lib/trace/reask";
 import { traceIssue } from "@/lib/trace/run-error";
 import { saveRun } from "@/lib/trace/saved-runs";
 import { decodeShare, ShareDecodeError, type SharePayload } from "@/lib/trace/share";
@@ -86,13 +92,45 @@ function SharedRun({ payload, chain }: { payload: SharePayload; chain: ResolvedC
   const order = useMemo(() => visitOrder(graph, payload.trace), [graph, payload.trace]);
   const issue = useMemo(() => traceIssue(payload.trace), [payload.trace]);
 
+  // The run's "ask again", if it came in the link: read, never re-sent.
+  const kept = payload.reasks;
+  const reaskTraces = useMemo(() => kept?.asks.map((a) => a.trace) ?? [], [kept]);
+  const steadiness = useMemo(() => (kept ? steadinessOf(chain.node, payload.trace, reaskTraces) : undefined), [kept, chain, payload.trace, reaskTraces]);
+  // An ask that went elsewhere, opened next to the run as b.
+  const [opened, setOpened] = useState<number | null>(null);
+  const openedTrace = opened === null ? undefined : reaskTraces[opened];
+  const compare = useMemo(() => (openedTrace ? { trace: openedTrace, issue: traceIssue(openedTrace) } : undefined), [openedTrace]);
+  const reask: ReaskControl | undefined =
+    kept && steadiness
+      ? {
+          blocker: "a shared run is read-only. run it yourself to ask jev again.",
+          running: false,
+          done: kept.asks.filter((a) => a.trace || a.issue).length,
+          answered: answeredReasks(reaskTraces).length,
+          total: kept.total,
+          steadiness,
+          ...(kept.stoppedBy ? { stoppedBy: kept.stoppedBy } : {}),
+          start: () => {},
+          open: (index) => {
+            if (!reaskTraces[index]) return;
+            setOpened(index);
+            setTarget("diff");
+            setSelected(null);
+          },
+        }
+      : undefined;
+  const closeAsk = useCallback(() => {
+    setOpened(null);
+    setTarget("a");
+  }, []);
+
   useHotkey("]", () => setSelected((s) => stepSelection(order, s, 1)), { description: "next visited node", group: "studio" });
   useHotkey("[", () => setSelected((s) => stepSelection(order, s, -1)), { description: "previous visited node", group: "studio" });
   useHotkey("f", () => setFitSignal((n) => n + 1), { description: "fit graph to view", group: "studio" });
   useHotkey("escape", () => setSelected(null), { description: "deselect", group: "studio", preventDefault: false });
 
   const keep = useCallback(() => {
-    saveRun({ source: chain.source, chainTitle: chain.title, input: payload.input, trace: payload.trace });
+    saveRun({ source: chain.source, chainTitle: chain.title, input: payload.input, trace: payload.trace, ...(payload.reasks ? { reasks: payload.reasks } : {}) });
     setSaved(true);
   }, [chain, payload]);
 
@@ -116,6 +154,11 @@ function SharedRun({ payload, chain }: { payload: SharePayload; chain: ResolvedC
         </p>
       </div>
       <div className="flex items-center gap-1">
+        {opened !== null && (
+          <Button variant="ghost" size="sm" onClick={closeAsk}>
+            close ask {opened + 2} ✕
+          </Button>
+        )}
         <span className="px-2">
           <CopyButton text={typeof window === "undefined" ? "" : window.location.href} label="copy link" />
         </span>
@@ -143,6 +186,8 @@ function SharedRun({ payload, chain }: { payload: SharePayload; chain: ResolvedC
       onSelect={setSelected}
       fitSignal={fitSignal}
       header={header}
+      {...(compare ? { compare } : {})}
+      {...(reask ? { reask } : {})}
     />
   );
 }

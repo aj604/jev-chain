@@ -4,10 +4,14 @@
  * Recent runs, kept in this browser. Every finished run lands here so you can
  * flip back to it, compare, or share it later. Capped so localStorage stays
  * well under quota even with chatty traces.
+ *
+ * A run that was asked again keeps its re-asks (`keepReasksWith`), so
+ * reopening it shows which decisions held without asking Jev again.
  */
 import { useSyncExternalStore } from "react";
 import type { Json, Trace } from "jevchain";
 import type { ChainSource } from "./chain-source";
+import type { KeptReasks } from "./reask";
 
 export interface SavedRun {
   id: string;
@@ -16,6 +20,8 @@ export interface SavedRun {
   chainTitle: string;
   input: Json;
   trace: Trace;
+  /** Its "ask again", once it had one. Read it back with `readKeptReasks`. */
+  reasks?: KeptReasks;
 }
 
 export const SAVED_RUNS_KEY = "jevchain.studio.runs";
@@ -64,6 +70,14 @@ export function saveRun(run: Omit<SavedRun, "id" | "savedAt">): SavedRun {
   const saved: SavedRun = { ...run, id: run.trace.runId || `run_${Date.now().toString(36)}`, savedAt: new Date().toISOString() };
   write([saved, ...read().filter((r) => r.id !== saved.id)]);
   return saved;
+}
+
+/** Keep a finished "ask again" with the saved run it asked about, where it is in the list. False if that run isn't saved. */
+export function keepReasksWith(id: string, reasks: KeptReasks): boolean {
+  const runs = read();
+  if (!runs.some((r) => r.id === id)) return false;
+  write(runs.map((r) => (r.id === id ? { ...r, reasks } : r)));
+  return true;
 }
 
 export function deleteRun(id: string) {
