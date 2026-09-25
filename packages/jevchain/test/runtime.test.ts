@@ -8,6 +8,7 @@ import {
   createJev,
   emit,
   gate,
+  NodeError,
   noul,
   parallel,
   route,
@@ -175,6 +176,93 @@ describe("parallel", () => {
     expect(r.error?.message).toMatch(/Node "boom" failed: kaboom/);
     expect(sawAbort).toBe(true);
     expect(r.trace.spans.find((s) => s.nodeId === "boom")!.status).toBe("error");
+  });
+});
+
+describe("failure attribution", () => {
+  const boom = step("boom", async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    throw new Error("kaboom");
+  });
+  /** Resolves after `ms` unless its signal fires first. */
+  const waits = (id: string, ms: number) =>
+    step(id, (_: unknown, ctx) => new Promise((res, rej) => {
+      const t = setTimeout(res, ms);
+      ctx.signal.addEventListener("abort", () => { clearTimeout(t); rej(ctx.signal.reason); });
+    }));
+  const spans = (r: { trace: { spans: { path: string; status: string; error?: unknown }[] } }) =>
+    Object.fromEntries(r.trace.spans.map((s) => [s.path, { status: s.status, error: s.error }]));
+
+  it("closes cancelled siblings with a cancelled error, not the sibling's failure", async () => {
+    const p = parallel("p", {
+      branches: {
+        boom,
+        read: ask("read", { questions: { x: noul("?") } }),
+        wait: waits("wait", 200),
+        deaf: step("deaf", () => new Promise((r) => setTimeout(() => r("ignored the signal"), 200))),
+        seq: chain("seq", step("id", (x: unknown) => x), waits("later", 200)),
+      },
+    });
+    const r = await jevWith(fakeFetch(undefined, { latencyMs: 100 })).run(p, "x");
+    expect(r.status).toBe("error");
+    expect(r.error).toBeInstanceOf(NodeError);
+    expect(r.error).toMatchObject({ nodeId: "boom", path: "$/boom" });
+    expect(r.trace.error).toMatchObject({ code: "node_error", nodeId: "boom", path: "$/boom" });
+
+    const s = spans(r);
+    expect(s["$/boom"]!.error).toMatchObject({ message: "kaboom", path: "$/boom" });
+    expect(s["$"]!.error).toMatchObject({ message: "kaboom", path: "$/boom" });
+    const cancelled = { name: "CancelledError", code: "cancelled", message: 'Cancelled because "boom" failed at $/boom' };
+    for (const path of ["$/read", "$/wait", "$/deaf", "$/seq/1"]) {
+      expect(s[path], path).toEqual({ status: "error", error: { ...cancelled, path } });
+    }
+    // An ancestor of a cancelled span points down at where the cancellation landed.
+    expect(s["$/seq"]).toEqual({ status: "error", error: { ...cancelled, path: "$/seq/1" } });
+    expect(s["$/seq/0"]!.status).toBe("ok");
+    // No span but the culprit (and its ancestor) claims the culprit's error.
+    expect(r.trace.spans.filter((x) => x.error?.message === "kaboom").map((x) => x.path).sort()).toEqual(["$", "$/boom"]);
+  });
+
+  it("cascades cancellation into nested parallels", async () => {
+    const p = parallel("outer", {
+      branches: {
+        boom,
+        inner: parallel("inner", { branches: { a: waits("a", 200), b: waits("b", 200) } }),
+      },
+    });
+    const r = await jevWith(fakeFetch()).run(p, "x");
+    expect(r.trace.error).toMatchObject({ nodeId: "boom", path: "$/boom" });
+    const s = spans(r);
+    expect(s["$/inner/a"]!.error).toMatchObject({ code: "cancelled", path: "$/inner/a" });
+    expect(s["$/inner/b"]!.error).toMatchObject({ code: "cancelled", path: "$/inner/b" });
+    expect(s["$/inner"]!.error).toMatchObject({ code: "cancelled" });
+  });
+
+  it("keeps a caller's abort an abort, blamed on the node it interrupted", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 10);
+    const p = parallel("p", { branches: { a: waits("a", 200), b: waits("b", 200) } });
+    const r = await jevWith(fakeFetch()).run(p, "x", { signal: ac.signal });
+    expect(r.status).toBe("aborted");
+    expect(r.trace.error).toMatchObject({ code: "aborted", nodeId: "a", path: "$/a" });
+    for (const path of ["$/a", "$/b"]) expect(spans(r)[path]!.error).toMatchObject({ code: "aborted", path });
+  });
+
+  it("leaves a halting sibling's run halted", async () => {
+    const p = parallel("p", {
+      branches: { g: gate("g", { ask: noul("?"), pass: { min: 0.99 }, then: emit("ok") }), wait: waits("wait", 200) },
+    });
+    const r = await jevWith(fakeFetch()).run(p, "x");
+    expect(r.status).toBe("halted");
+    expect(spans(r)["$/wait"]).toEqual({ status: "halted", error: undefined });
+  });
+
+  it("points ancestors at the path that failed", async () => {
+    const c = chain("c", step("fine", (x: string) => x), chain("inner", step("bad", () => { throw new Error("nope"); })));
+    const r = await jevWith(fakeFetch()).run(c, "x");
+    expect(r.trace.error).toMatchObject({ nodeId: "bad", path: "$/1/0" });
+    const s = spans(r);
+    for (const path of ["$", "$/1", "$/1/0"]) expect(s[path]!.error).toMatchObject({ message: "nope", path: "$/1/0" });
   });
 });
 
