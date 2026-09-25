@@ -1,0 +1,16 @@
+{
+  "name": "jevchain-monorepo",
+  "private": true,
+  "packageManager": "pnpm@10.34.1",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "example": "pnpm --filter jevchain-examples start"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

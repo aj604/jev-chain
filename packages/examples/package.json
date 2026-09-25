@@ -1,0 +1,23 @@
+{
+  "name": "jevchain-examples",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Silly chains that teach serious patterns.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx --env-file-if-exists=../../.env src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'examples are exercised by jevchain live tests and the web app'"
+  },
+  "dependencies": {
+    "jevchain": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "tsx": "^4.21.0",
+    "@types/node": "^24.0.0"
+  }
+}

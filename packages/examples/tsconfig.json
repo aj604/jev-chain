@@ -1,0 +1,4 @@
+{
+  "extends": "../jevchain/tsconfig.json",
+  "include": ["src"]
+}

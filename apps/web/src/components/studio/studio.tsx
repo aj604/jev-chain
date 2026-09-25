@@ -1,0 +1,659 @@
+"use client";
+
+/**
+ * The Studio: pick a chain, feed it input, pull it, and watch Jev decide.
+ * Or flip to build mode (`b`) and make one.
+ *
+ * State lives here; the working area (graph, inspector, timeline) is the
+ * shared <Workbench>. The chain on screen is always a `ChainSource`
+ * (`{ kind: "example", slug } | { kind: "doc", doc, handlers? }`).
+ *
+ * Build mode edits one working document (`useBuilder`: undo stack +
+ * autosaved draft) and draws it on the same canvas. Running from the builder
+ * hands that document to the run pipeline as a doc source, flips back to run
+ * mode, and the trace paints over the graph you just built.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
+import { examples } from "jevchain-examples";
+import { ChainLinks } from "@/components/brand/chain-links";
+import { useBuildMode } from "@/components/builder/build-mode";
+import { DraftsList } from "@/components/builder/drafts-list";
+import { useBuilder, type OpenOptions } from "@/components/builder/use-builder";
+import { Badge } from "@/components/ui/badge";
+import { Button, ButtonLink } from "@/components/ui/button";
+import { KbdCombo } from "@/components/ui/kbd";
+import { Tooltip } from "@/components/ui/tooltip";
+import { useChainRun, useRunClock } from "@/components/trace/use-chain-run";
+import { cn } from "@/lib/cn";
+import { useHotkey } from "@/lib/hotkeys";
+import { newDocument } from "@/lib/builder/doc-ops";
+import { deleteDraft, renameDraft, type Draft } from "@/lib/builder/drafts";
+import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type ResolvedChain } from "@/lib/trace/chain-source";
+import { parseInput, toEditor } from "@/lib/trace/input";
+import { visitOrder, stepSelection } from "@/lib/trace/order";
+import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
+import { ChainPicker } from "./chain-picker";
+import { ExportMenu } from "./export-menu";
+import { ImportDialog } from "./import-dialog";
+import { InputEditor, type InputValue } from "./input-editor";
+import { IssueActions } from "./issue-actions";
+import { SavedRunsList } from "./saved-runs-list";
+import { sharePayload, useShare } from "./use-share";
+import { Workbench, type Target } from "./workbench";
+
+export type StudioMode = "run" | "build";
+
+export interface StudioProps {
+  /** `?example=` deep link. */
+  initialSlug?: string;
+  /** `?input=` deep link (text, or JSON if it parses as an object/array). */
+  initialInput?: string;
+  /** Start from a document instead of an example (it's also opened in the builder). */
+  initialSource?: ChainSource;
+  /** `?mode=build` deep link. */
+  initialMode?: StudioMode;
+}
+
+function initialSourceFrom(props: StudioProps): ChainSource {
+  if (props.initialSource) return props.initialSource;
+  // Gallery slugs and docs ids (`docs-…`) both resolve.
+  if (props.initialSlug && resolveChain({ kind: "example", slug: props.initialSlug }).ok) return { kind: "example", slug: props.initialSlug };
+  return { kind: "example", slug: DEFAULT_SLUG };
+}
+
+/** What the builder opens with: the doc we were handed, a fork of the example in build mode, or nothing yet. */
+function initialBuilderFrom(props: StudioProps, source: ChainSource): OpenOptions | undefined {
+  if (source.kind === "doc") return { doc: source.doc, ...(source.handlers ? { handlers: source.handlers } : {}), persist: true };
+  if (props.initialMode !== "build") return undefined;
+  return forkOptions(source.slug);
+}
+
+/** Fork an example (or docs chain) into the builder, keeping its code bound. */
+function forkOptions(slug: string): OpenOptions | undefined {
+  const r = resolveChain({ kind: "example", slug });
+  if (!r.ok) return undefined;
+  const doc = documentOf(r.chain);
+  return { doc: { ...doc, name: `${r.chain.title} (fork)` }, handlers: handlersOf(r.chain.node), forkedFrom: slug };
+}
+
+function editorFromDeepLink(raw: string): InputValue {
+  try {
+    const v = JSON.parse(raw) as Json;
+    if (v && typeof v === "object") return toEditor(v);
+  } catch {
+    // plain text
+  }
+  return { text: raw, mode: "text" };
+}
+
+function sampleEditor(chain: ResolvedChain | undefined, i: number): InputValue {
+  const s = chain?.inputs[i] ?? chain?.inputs[0];
+  return s ? toEditor(s.value) : { text: "", mode: "text" };
+}
+
+const EMPTY_GRAPH: FlowGraph = { vertices: [], edges: [], entry: "" };
+
+export function Studio(props: StudioProps) {
+  const [source, setSource] = useState<ChainSource>(() => initialSourceFrom(props));
+  const [customDoc, setCustomDoc] = useState<ChainDocument | null>(() => (props.initialSource?.kind === "doc" ? props.initialSource.doc : null));
+  const resolved = useMemo(() => resolveChain(source), [source]);
+  const chain = resolved.ok ? resolved.chain : undefined;
+  const graph = useMemo(() => (chain ? graphOf(chain.node) : EMPTY_GRAPH), [chain]);
+
+  // ── build mode ─────────────────────────────────────────────────────────────
+  const [mode, setMode] = useState<StudioMode>(() => (props.initialMode === "build" ? "build" : "run"));
+  const building = mode === "build";
+  const builder = useBuilder(initialBuilderFrom(props, initialSourceFrom(props)));
+  const buildRoot = builder.doc.root as unknown as AnyNode;
+  // Drawn from the raw document, so the canvas survives invalid states mid-edit.
+  const buildGraph = useMemo(() => {
+    try {
+      return graphOf(buildRoot);
+    } catch {
+      return EMPTY_GRAPH;
+    }
+  }, [buildRoot]);
+  const buildSource = useMemo<ChainSource>(() => ({ kind: "doc", doc: builder.doc, handlers: builder.handlers }), [builder.doc, builder.handlers]);
+  const buildResolved = useMemo(() => resolveChain(buildSource), [buildSource]);
+  const buildIssues = useMemo(() => (buildResolved.ok ? [] : buildResolved.issues), [buildResolved]);
+  const buildView = useMemo<ResolvedChain>(
+    () =>
+      buildResolved.ok
+        ? buildResolved.chain
+        : {
+            source: buildSource,
+            node: buildRoot,
+            title: builder.doc.name || "untitled chain",
+            inputs: (builder.doc.examples ?? []).map((value, i) => ({ label: `example ${i + 1}`, value })),
+            origin: "custom",
+          },
+    [buildResolved, buildSource, buildRoot, builder.doc],
+  );
+  // The document the last run used; build mode only shows a trace that matches what's on the canvas.
+  const [lastRunDoc, setLastRunDoc] = useState<ChainDocument | null>(null);
+
+  const [inputA, setInputA] = useState<InputValue>(() => (props.initialInput ? editorFromDeepLink(props.initialInput) : sampleEditor(chain, 0)));
+  const [inputB, setInputB] = useState<InputValue>(() => sampleEditor(chain, 1));
+  const [comparing, setComparing] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [target, setTarget] = useState<Target>("a");
+  const [fitSignal, setFitSignal] = useState(0);
+  const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+
+  // Save finished runs against the chain they ran on.
+  const sourceRef = useRef(source);
+  const chainTitleRef = useRef(chain?.title ?? "");
+  useEffect(() => {
+    sourceRef.current = source;
+    chainTitleRef.current = chain?.title ?? "";
+  });
+  const onFinishA = useCallback((trace: Trace, input: Json) => {
+    if (trace.status === "aborted") return;
+    const saved = saveRun({ source: sourceRef.current, chainTitle: chainTitleRef.current, input, trace });
+    setActiveSavedId(saved.id);
+  }, []);
+  const onFinishB = useCallback((trace: Trace, input: Json) => {
+    if (trace.status === "aborted") return;
+    saveRun({ source: sourceRef.current, chainTitle: chainTitleRef.current, input, trace });
+  }, []);
+  const runA = useChainRun({ onFinish: onFinishA });
+  const runB = useChainRun({ onFinish: onFinishB });
+  const running = runA.phase === "running" || runB.phase === "running";
+  const nowA = useRunClock(runA.phase === "running", runA.startedAtPerf, runA.trace?.durationMs);
+  const nowB = useRunClock(runB.phase === "running", runB.startedAtPerf, runB.trace?.durationMs);
+
+  const parsedA = parseInput(inputA.text, inputA.mode);
+  const parsedB = parseInput(inputB.text, inputB.mode);
+  const runnable = building ? (buildResolved.ok ? buildResolved.chain : undefined) : chain;
+  const canRun = Boolean(runnable) && parsedA.ok && (!comparing || parsedB.ok);
+  const runBlocker = !runnable
+    ? building
+      ? `fix ${buildIssues.length} broken link${buildIssues.length === 1 ? "" : "s"} first`
+      : "this chain doesn't load"
+    : !parsedA.ok || (comparing && !parsedB.ok)
+      ? "the input isn't valid json"
+      : null;
+
+  // Keep the URL shareable: /studio?example=<slug>, plus &mode=build.
+  useEffect(() => {
+    const params = new URLSearchParams();
+    const slug = building ? builder.forkedFrom : source.kind === "example" ? source.slug : undefined;
+    if (slug) params.set("example", slug);
+    if (building) params.set("mode", "build");
+    const url = `/studio${params.size ? `?${params}` : ""}`;
+    if (window.location.pathname + window.location.search !== url) window.history.replaceState(window.history.state, "", url);
+  }, [source, building, builder.forkedFrom]);
+
+  const run = useCallback(() => {
+    if (!runnable || !parsedA.ok || (comparing && !parsedB.ok)) return;
+    setSelected(null);
+    setActiveSavedId(null);
+    if (building) {
+      // Run what's on the canvas, then watch it in run mode.
+      setSource(buildSource);
+      setCustomDoc(builder.doc);
+      setMode("run");
+    }
+    setLastRunDoc(building ? builder.doc : source.kind === "doc" ? source.doc : null);
+    void runA.start(runnable.node, parsedA.value);
+    if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value);
+    else runB.reset();
+  }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source]);
+
+  const stop = useCallback(() => {
+    runA.stop();
+    runB.stop();
+  }, [runA, runB]);
+
+  const switchTo = useCallback(
+    (next: ChainSource) => {
+      runA.reset();
+      runB.reset();
+      setSource(next);
+      const r = resolveChain(next);
+      const c = r.ok ? r.chain : undefined;
+      setInputA(sampleEditor(c, 0));
+      setInputB(sampleEditor(c, 1));
+      setSelected(null);
+      setActiveSavedId(null);
+      setTarget("a");
+    },
+    [runA, runB],
+  );
+
+  const pickExample = useCallback((slug: string) => switchTo({ kind: "example", slug }), [switchTo]);
+
+  /** Put a document in the builder and switch to build mode. */
+  const openInBuilder = useCallback(
+    (options: OpenOptions) => {
+      builder.open(options);
+      runA.reset();
+      runB.reset();
+      setLastRunDoc(null);
+      setSelected(null);
+      setActiveSavedId(null);
+      setTarget("a");
+      const first = options.doc.examples?.[0];
+      if (first !== undefined) setInputA(toEditor(first));
+      setMode("build");
+    },
+    [builder, runA, runB],
+  );
+
+  const loadDoc = useCallback(
+    (doc: ChainDocument) => {
+      setCustomDoc(doc);
+      setSource({ kind: "doc", doc });
+      openInBuilder({ doc, persist: true });
+    },
+    [openInBuilder],
+  );
+
+  const newChain = useCallback(() => openInBuilder({ doc: newDocument() }), [openInBuilder]);
+
+  const forkExample = useCallback(
+    (slug: string) => {
+      const o = forkOptions(slug);
+      if (o) openInBuilder(o);
+    },
+    [openInBuilder],
+  );
+
+  const openDraft = useCallback(
+    (d: Draft) => {
+      const r = d.forkedFrom ? resolveChain({ kind: "example", slug: d.forkedFrom }) : undefined;
+      openInBuilder({ doc: d.doc, draftId: d.id, ...(d.forkedFrom ? { forkedFrom: d.forkedFrom } : {}), ...(r?.ok ? { handlers: handlersOf(r.chain.node) } : {}) });
+    },
+    [openInBuilder],
+  );
+
+  /** Run → build: resume the working doc if it's what's on screen, else fork what's on screen. */
+  const enterBuild = useCallback(() => {
+    if (source.kind === "doc") {
+      if (!(builder.active && source.doc === builder.doc)) return openInBuilder({ doc: source.doc, ...(source.handlers ? { handlers: source.handlers } : {}) });
+    } else if (!(builder.active && builder.forkedFrom === source.slug)) {
+      const o = forkOptions(source.slug);
+      if (o) return openInBuilder(o);
+    }
+    setMode("build");
+  }, [source, builder, openInBuilder]);
+
+  /** Build → run: pull the chain if it changed since the last pull (that also flips the mode). */
+  const enterRun = useCallback(() => {
+    if (!buildResolved.ok) return;
+    if (lastRunDoc !== builder.doc && canRun && !running) return run();
+    setSource(buildSource);
+    setCustomDoc(builder.doc);
+    setMode("run");
+  }, [buildResolved.ok, lastRunDoc, builder.doc, canRun, running, run, buildSource]);
+
+  const toggleMode = useCallback(() => (building ? enterRun() : enterBuild()), [building, enterRun, enterBuild]);
+
+  const openSaved = useCallback(
+    (saved: SavedRun) => {
+      if (!resolveChain(saved.source).ok) return;
+      runB.reset();
+      setSource(saved.source);
+      if (saved.source.kind === "doc") setCustomDoc(saved.source.doc);
+      setInputA(toEditor(saved.input));
+      setComparing(false);
+      setTarget("a");
+      setSelected(null);
+      runA.show(saved.trace, saved.input);
+      setActiveSavedId(saved.id);
+    },
+    [runA, runB],
+  );
+
+  const resetB = runB.reset;
+  const toggleCompare = useCallback(() => {
+    if (comparing) {
+      resetB();
+      setTarget("a");
+    }
+    setComparing(!comparing);
+  }, [comparing, resetB]);
+
+  // What's on screen right now, for share / step-through.
+  const view = building ? buildView : chain;
+  const viewGraph = building ? buildGraph : graph;
+  const focus = comparing && target === "b" ? runB : runA;
+  const order = useMemo(() => visitOrder(viewGraph, focus.trace), [viewGraph, focus.trace]);
+  const { state: shareState, share } = useShare();
+  const canShare = Boolean(focus.trace && focus.trace.status !== "running" && focus.input !== undefined);
+  const doShare = useCallback(() => {
+    if (!focus.trace || focus.input === undefined || focus.trace.status === "running") return;
+    void share(sharePayload(source, focus.input, focus.trace));
+  }, [focus.trace, focus.input, source, share]);
+
+  const sampleValue = parsedA.ok && inputA.text.trim() ? parsedA.value : undefined;
+  const build = useBuildMode({
+    builder,
+    graph: buildGraph,
+    selected,
+    setSelected,
+    active: building,
+    issues: buildIssues,
+    sample: sampleValue,
+  });
+
+  // ── keyboard ─────────────────────────────────────────────────────────────
+  useHotkey("mod+enter", () => (running ? undefined : run()), { description: "run the chain", group: "studio" });
+  useHotkey(
+    "escape",
+    () => {
+      if (running) stop();
+      else setSelected(null);
+    },
+    { description: "stop the run / deselect", group: "studio", preventDefault: false },
+  );
+  useHotkey("b", toggleMode, { description: "switch between run and build mode", group: "studio" });
+  useHotkey("c", toggleCompare, { description: "toggle compare mode", group: "studio", enabled: !building });
+  useHotkey("s", doShare, { description: "copy a share link to this run", group: "studio", enabled: !building });
+  useHotkey("]", () => setSelected((s) => stepSelection(order, s, 1)), { description: "next visited node", group: "studio", enabled: !building });
+  useHotkey("[", () => setSelected((s) => stepSelection(order, s, -1)), { description: "previous visited node", group: "studio", enabled: !building });
+  useHotkey("f", () => setFitSignal((n) => n + 1), { description: "fit graph to view", group: "studio" });
+
+  if (!view) {
+    return (
+      <div className="mx-auto grid max-w-lg flex-1 place-items-center px-4 py-24 text-center">
+        <div className="space-y-4">
+          <ChainLinks count={7} progress={0} size={18} className="mx-auto text-ink-3" />
+          <h1 className="font-display text-3xl italic">this chain snapped.</h1>
+          <ul className="space-y-1 font-mono text-[11px] text-fail">{!resolved.ok && resolved.issues.map((i) => <li key={i}>{i}</li>)}</ul>
+          <div className="flex justify-center gap-2">
+            <Button variant="outline" onClick={() => switchTo({ kind: "example", slug: DEFAULT_SLUG })}>
+              back to the examples
+            </Button>
+            {source.kind === "doc" && (
+              <Button variant="accent" onClick={enterBuild}>
+                fix it in the builder
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const modeSwitch = (
+    <div role="radiogroup" aria-label="studio mode" className="flex border-hard bg-paper">
+      {(["run", "build"] as const).map((m) => {
+        const blocked = m === "run" && building && !buildResolved.ok;
+        return (
+          <Tooltip key={m} label={blocked ? `fix ${buildIssues.length} issue${buildIssues.length === 1 ? "" : "s"} first` : m === "build" ? "edit this chain · b" : "pull it · b"}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={mode === m}
+              aria-disabled={blocked || undefined}
+              onClick={() => (m === mode || blocked ? undefined : toggleMode())}
+              className={cn(
+                "flex h-7 items-center gap-1.5 px-2.5 font-mono text-[11px] lowercase transition-colors duration-(--dur-fast)",
+                m === "build" && "border-soft-l",
+                mode === m ? (m === "build" ? "bg-accent text-accent-ink" : "bg-ink text-paper") : "text-ink-2 hover:bg-surface-2 hover:text-ink",
+                blocked && "cursor-not-allowed opacity-45",
+              )}
+            >
+              <span aria-hidden className="text-[10px]">
+                {m === "run" ? "▶" : "✎"}
+              </span>
+              {m}
+            </button>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+
+  const saveNote =
+    builder.saveState.state === "saved"
+      ? `draft saved ✓${builder.forkedFrom ? ` · fork of ${builder.forkedFrom}` : ""}`
+      : builder.saveState.state === "failed"
+        ? "couldn't save a draft (storage is blocked)"
+        : builder.forkedFrom
+          ? `fork of ${builder.forkedFrom} · saves as you edit`
+          : "saves as you edit";
+
+  const header = building ? (
+    <div className="flex min-h-13 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+      <div className="min-w-0 basis-full sm:basis-0 sm:flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 className="truncate text-[15px] leading-6 font-medium text-ink">{builder.doc.name || "untitled chain"}</h1>
+          <Badge tone="accent">building</Badge>
+        </div>
+        <p className={cn("truncate font-mono text-[11px]", builder.saveState.state === "failed" ? "text-warn" : "text-ink-3")} aria-live="polite">
+          {saveNote}
+        </p>
+      </div>
+      <div className="flex items-center gap-1.5">
+        {modeSwitch}
+        <Tooltip label="live code · e">
+          <Button variant={build.codeOpen ? "solid" : "ghost"} size="sm" onClick={() => build.setCodeOpen(!build.codeOpen)} aria-pressed={build.codeOpen}>
+            {"</>"} code
+          </Button>
+        </Tooltip>
+        <ExportMenu doc={() => builder.doc} filename={slugify(builder.doc.name) || "chain"} variant="outline" />
+        <Tooltip label="fit graph · f">
+          <Button variant="ghost" size="sm" onClick={() => setFitSignal((n) => n + 1)} aria-label="fit graph to view">
+            fit
+          </Button>
+        </Tooltip>
+      </div>
+    </div>
+  ) : (
+    <div className="flex min-h-13 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+      <div className="min-w-0 basis-full sm:basis-0 sm:flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 className="truncate text-[15px] leading-6 font-medium text-ink">{view.title}</h1>
+          {source.kind === "doc" && <Badge tone="dim">custom</Badge>}
+        </div>
+        {view.tagline && <p className="truncate font-mono text-[11px] text-ink-3">{view.tagline}</p>}
+      </div>
+      <div className="flex items-center gap-1">
+        {modeSwitch}
+        <Tooltip label="compare two inputs · c">
+          <Button variant={comparing ? "solid" : "ghost"} size="sm" onClick={toggleCompare} aria-pressed={comparing}>
+            <span aria-hidden className="flex gap-0.5">
+              <span className="size-1.5 bg-accent" />
+              <span className="size-1.5 bg-compare" />
+            </span>
+            compare
+          </Button>
+        </Tooltip>
+        <Tooltip label={canShare ? "copy share link · s" : "run it first"}>
+          <Button variant="ghost" size="sm" onClick={doShare} disabled={!canShare || shareState === "working"}>
+            <span aria-live="polite">
+              {shareState === "copied" ? "link copied ✓" : shareState === "error" ? "couldn't copy" : shareState === "working" ? "packing…" : "share"}
+            </span>
+          </Button>
+        </Tooltip>
+        <ExportMenu doc={() => documentOf(view)} filename={source.kind === "example" ? source.slug : "custom-chain"} />
+        <Tooltip label="fit graph · f">
+          <Button variant="ghost" size="sm" onClick={() => setFitSignal((n) => n + 1)} aria-label="fit graph to view">
+            fit
+          </Button>
+        </Tooltip>
+      </div>
+    </div>
+  );
+
+  const railSection = (title: string, children: React.ReactNode, extra?: React.ReactNode) => (
+    <section className="border-soft-b">
+      <div className="flex items-center justify-between px-3 pt-3 pb-2">
+        <h2 className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">{title}</h2>
+        {extra}
+      </div>
+      {children}
+    </section>
+  );
+
+  const runControls = (
+    <div className="sticky bottom-0 z-10 -mx-3 bg-paper px-3 pt-1 pb-3 lg:pb-0">
+      {running ? (
+        <Button variant="outline" size="lg" className="w-full" onClick={stop}>
+          <span aria-hidden className="size-2.5 bg-fail" />
+          stop
+          <KbdCombo combo="escape" className="ml-auto" />
+        </Button>
+      ) : (
+        <Button variant="accent" size="lg" className="w-full" onClick={run} disabled={!canRun}>
+          <svg aria-hidden viewBox="0 0 10 10" className="size-2.5">
+            <path d="M1 0.5 L9.5 5 L1 9.5 z" fill="currentColor" />
+          </svg>
+          {comparing ? "pull both" : "pull the chain"}
+          <KbdCombo combo="mod+enter" className="ml-auto" />
+        </Button>
+      )}
+      {!running && runBlocker && (
+        <p role="status" className="mt-1.5 font-mono text-[10.5px] text-fail">
+          ✕ {runBlocker}
+        </p>
+      )}
+    </div>
+  );
+
+  const inputSection = railSection(
+    comparing ? "inputs" : "input",
+    <div className="space-y-4 px-3 pb-3">
+      <InputEditor
+        label={comparing ? "input a" : "input"}
+        hideLabel={!comparing}
+        tone={comparing ? "a" : undefined}
+        value={inputA}
+        onChange={setInputA}
+        samples={view.inputs}
+        disabled={running}
+        rows={comparing ? 4 : 6}
+      />
+      {comparing && <InputEditor label="input b" tone="b" value={inputB} onChange={setInputB} samples={view.inputs} disabled={running} rows={4} />}
+      {runControls}
+    </div>,
+    building && build.canSaveSample ? (
+      <button type="button" onClick={build.saveSample} className="font-mono text-[10px] lowercase text-ink-3 underline decoration-dotted underline-offset-4 hover:text-ink">
+        + keep as a sample
+      </button>
+    ) : undefined,
+  );
+
+  const rail = building ? (
+    <div className="flex flex-col">
+      {railSection(
+        "start from",
+        <div className="space-y-1.5 px-3 pb-3">
+          <button type="button" onClick={newChain} className={railButton}>
+            <span aria-hidden className="w-3 text-center">+</span> a blank chain
+          </button>
+          <details className="group/fork">
+            <summary className={cn(railButton, "cursor-pointer list-none [&::-webkit-details-marker]:hidden")}>
+              <span aria-hidden className="w-3 text-center">⑂</span> fork an example
+              <span aria-hidden className="ml-auto text-[9px] transition-transform duration-(--dur-fast) group-open/fork:rotate-180">
+                ▾
+              </span>
+            </summary>
+            <ul className="mt-1 border-soft">
+              {examples.map((ex) => (
+                <li key={ex.slug} className="border-soft-b last:border-b-0">
+                  <button type="button" onClick={() => forkExample(ex.slug)} className="group/fx block w-full px-2 py-1.5 text-left hover:bg-surface-2">
+                    <span className="block truncate text-[12px] leading-5 text-ink-2 group-hover/fx:text-ink">{ex.title}</span>
+                    <span className="block truncate font-mono text-[10px] text-ink-3">{ex.pattern}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+          <button type="button" onClick={() => setImportOpen(true)} className={railButton}>
+            <span aria-hidden className="w-3 text-center">{"{"}</span> import json
+          </button>
+        </div>,
+      )}
+      {inputSection}
+      {railSection(
+        "drafts",
+        <DraftsList
+          activeId={builder.draftId}
+          onOpen={openDraft}
+          onRename={(d, name) => {
+            if (d.id === builder.draftId) builder.commit({ ...builder.doc, name }, "doc:name");
+            else renameDraft(d.id, name);
+          }}
+          onDelete={(d) => deleteDraft(d.id)}
+        />,
+      )}
+    </div>
+  ) : (
+    <div className="flex flex-col">
+      {railSection(
+        "chains",
+        <ChainPicker
+          source={source}
+          customTitle={customDoc ? (customDoc.name ?? "custom chain") : undefined}
+          customNote={customDoc && customDoc === builder.doc ? "custom · from the builder" : undefined}
+          docsChain={view.origin === "docs" ? { title: view.title, href: view.href } : undefined}
+          onPick={pickExample}
+          onPickCustom={customDoc ? () => switchTo({ kind: "doc", doc: customDoc, ...(customDoc === builder.doc ? { handlers: builder.handlers } : {}) }) : undefined}
+          onImport={() => setImportOpen(true)}
+          onNew={newChain}
+        />,
+      )}
+      {inputSection}
+      {railSection("recent runs", <SavedRunsList activeId={activeSavedId} onOpen={openSaved} />)}
+      <div className="px-3 py-3">
+        <ButtonLink href="/examples" variant="ghost" size="sm" className="w-full justify-start px-0 text-ink-3">
+          how these examples work →
+        </ButtonLink>
+      </div>
+    </div>
+  );
+
+  // Build mode shows a trace only if it came from exactly this document.
+  const showTrace = !building || lastRunDoc === builder.doc;
+
+  return (
+    <>
+      {examples.slice(0, 9).map((ex, i) => (
+        <PickHotkey key={ex.slug} index={i} title={ex.title} enabled={!building} onPick={() => !running && pickExample(ex.slug)} />
+      ))}
+      <Workbench
+        chain={view}
+        graph={viewGraph}
+        trace={showTrace ? runA.trace : undefined}
+        issue={showTrace ? runA.issue : null}
+        now={nowA}
+        {...(comparing && !building ? { compare: { trace: runB.trace, issue: runB.issue, now: nowB } } : {})}
+        target={target}
+        onTarget={setTarget}
+        selected={selected}
+        onSelect={setSelected}
+        fitSignal={fitSignal}
+        header={header}
+        rail={rail}
+        issueAction={<IssueActions issue={runA.issue} onRetry={run} />}
+        issueActionB={<IssueActions issue={runB.issue} onRetry={run} />}
+        {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
+      />
+      {building && build.portals}
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onLoad={loadDoc} starter={() => (building ? builder.doc : documentOf(view))} />
+      <span className="sr-only" aria-live="polite">
+        {runA.phase === "running" ? "run started" : runA.trace ? `run ${runA.trace.status}` : ""}
+      </span>
+    </>
+  );
+}
+
+const railButton =
+  "flex h-7 w-full items-center gap-2 border-(length:--bw) border-dashed border-ink-3 px-2 font-mono text-[11px] lowercase text-ink-2 transition-colors duration-(--dur-fast) hover:border-ink hover:bg-surface-2 hover:text-ink";
+
+function slugify(s: string | undefined): string {
+  return (s ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function PickHotkey({ index, title, onPick, enabled }: { index: number; title: string; onPick: () => void; enabled: boolean }) {
+  useHotkey(String(index + 1), onPick, { description: `open “${title.toLowerCase()}”`, group: "studio", enabled });
+  return null;
+}
