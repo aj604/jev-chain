@@ -71,3 +71,39 @@ test("cascade result", () => {
   expectTypeOf<Extract<O, { resolvedBy: "tier" }>["answer"]>().toEqualTypeOf<ChoiceAnswer<"y" | "n">>();
   expectTypeOf<Extract<O, { resolvedBy: "fallback" }>["output"]>().toEqualTypeOf<string>();
 });
+
+test("chains of eight or more still thread types and reject mismatches", () => {
+  const inc = (id: string) => step(id, (n: number) => n + 1);
+  const long = chain(
+    "long",
+    step("parse", (s: string) => s.length),
+    inc("a"),
+    inc("b"),
+    inc("c"),
+    inc("d"),
+    inc("e"),
+    inc("f"),
+    step("show", (n: number) => `${n}!`),
+    emit({ done: true }),
+  );
+  expectTypeOf<InputOf<typeof long>>().toEqualTypeOf<string>();
+  expectTypeOf<OutputOf<typeof long>>().toEqualTypeOf<{ readonly done: true }>();
+  const eight = chain("eight", inc("a"), inc("b"), inc("c"), inc("d"), inc("e"), inc("f"), inc("g"), step("s", (n: number) => String(n)));
+  expectTypeOf<InputOf<typeof eight>>().toEqualTypeOf<number>();
+  expectTypeOf<OutputOf<typeof eight>>().toEqualTypeOf<string>();
+  // Loose nodes (what generated code is made of) compose at any length.
+  const loose = (id: string) => step(id, async (input: any) => input);
+  chain("loose", loose("1"), loose("2"), loose("3"), loose("4"), loose("5"), loose("6"), loose("7"), loose("8"), loose("9"), loose("10"));
+  chain(
+    "bad",
+    // @ts-expect-error: the eighth node takes a number but gets the string before it
+    inc("a"),
+    inc("b"),
+    inc("c"),
+    inc("d"),
+    inc("e"),
+    inc("f"),
+    step("show", (n: number) => `${n}!`),
+    inc("g"),
+  );
+});

@@ -335,6 +335,13 @@ export function emit<const V extends Json>(value: V, options: { id?: string } & 
   return { kind: "emit", id: id ?? "emit", value, ...meta } as EmitNode<V extends string ? string : V>;
 }
 
+type LongChain = readonly [AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, ...AnyNode[]];
+/** `T` with every node after the first required to accept the output of the node before it. */
+type Linked<T extends readonly AnyNode[], Prev = unknown, First = true> = T extends readonly [infer H extends AnyNode, ...infer R extends AnyNode[]]
+  ? [First extends true ? H : JevNode<Prev, OutputOf<H>>, ...Linked<R, OutputOf<H>, false>]
+  : [];
+type Last<T extends readonly AnyNode[]> = T extends readonly [...AnyNode[], infer L] ? L : AnyNode;
+
 /**
  * Run nodes in sequence, feeding each output into the next input.
  * A chain is a node, so chains nest.
@@ -376,7 +383,9 @@ export function chain<A, B, C, D, E, F, G, H>(
   n6: JevNode<F, G>,
   n7: JevNode<G, H>,
 ): ChainNode<A, H>;
-// Longer than seven? Nest chains; it reads better anyway.
+// Eight or more: still checked hand-off by hand-off, but a step's parameter
+// isn't inferred from the node before it, so annotate it (or nest chains).
+export function chain<const T extends LongChain>(id: string, ...steps: T & Linked<T>): ChainNode<InputOf<T[0]>, OutputOf<Last<T>>>;
 export function chain(id: string, ...steps: AnyNode[]): ChainNode {
   if (steps.length === 0) throw new TypeError(`chain("${id}"): needs at least one node`);
   return { kind: "chain", id, steps };

@@ -9,6 +9,10 @@ import type { ChainDocument } from "./serialize";
 type Obj = Record<string, unknown>;
 
 const IDENT = /^[A-Za-z_$][\w$]*$/;
+/** Words that can't name a `const`. */
+const RESERVED = new Set(
+  "await break case catch class const continue debugger default delete do else enum export extends false finally for function if implements import in instanceof interface let new null package private protected public return static super switch this throw true try typeof var void while with yield".split(" "),
+);
 
 export interface CodegenOptions {
   /** Name of the exported constant. Defaults to a camelCase of the root id. */
@@ -48,18 +52,25 @@ export function toTypeScript(doc: ChainDocument, options: CodegenOptions = {}): 
   const state = (s: unknown, where: string): string | undefined => {
     if (s === undefined) return undefined;
     if (s && typeof s === "object" && "$ref" in (s as Obj)) {
-      stubs.push(`// TODO: state for ${where} (was handler "${(s as Obj).$ref}")`);
+      stubs.push(`// TODO: state for ${comment(where)} (was handler ${literal((s as Obj).$ref)})`);
       return `(input: any) => input`;
     }
     return literal(s);
+  };
+
+  /** `title`/`description` entries, for any node kind (and `title` for tiers). */
+  const meta = (n: Obj): string[] => {
+    const out: string[] = [];
+    if (n.title !== undefined) out.push(`title: ${literal(n.title)}`);
+    if (n.description !== undefined) out.push(`description: ${literal(n.description)}`);
+    return out;
   };
 
   const common = (n: Obj, out: string[]) => {
     const st = state(n.state, String(n.id));
     if (st) out.push(`state: ${st},`);
     if (n.model) out.push(`model: ${literal(n.model)},`);
-    if (n.title) out.push(`title: ${literal(n.title)},`);
-    if (n.description) out.push(`description: ${literal(n.description)},`);
+    for (const m of meta(n)) out.push(`${m},`);
   };
 
   const block = (lines: string[]) => `{\n  ${lines.map((l) => indent(l)).join("\n  ")}\n}`;
@@ -69,15 +80,18 @@ export function toTypeScript(doc: ChainDocument, options: CodegenOptions = {}): 
     const id = literal(n.id);
     used.add(n.kind as string);
     switch (n.kind) {
-      case "emit":
-        return n.id === "emit" ? `emit(${literal(n.value)})` : `emit(${literal(n.value)}, { id: ${id} })`;
+      case "emit": {
+        const opts = [...(n.id === "emit" ? [] : [`id: ${id}`]), ...meta(n)];
+        return `emit(${literal(n.value)}${opts.length ? `, { ${opts.join(", ")} }` : ""})`;
+      }
       case "step": {
         const name = (n.run as Obj | undefined)?.$ref ?? n.id;
         const opts: string[] = [];
-        if (n.timeoutMs) opts.push(`timeoutMs: ${n.timeoutMs}`);
-        if (n.retries) opts.push(`retries: ${n.retries}`);
+        if (n.timeoutMs !== undefined) opts.push(`timeoutMs: ${n.timeoutMs}`);
+        if (n.retries !== undefined) opts.push(`retries: ${n.retries}`);
         if (name !== n.id) opts.push(`ref: ${literal(name)}`);
-        return `step(${id}, async (input: any, ctx) => {\n  // TODO: implement "${name}"\n  return input;\n}${opts.length ? `, { ${opts.join(", ")} }` : ""})`;
+        opts.push(...meta(n));
+        return `step(${id}, async (input: any, ctx) => {\n  // TODO: implement ${literal(name)}\n  return input;\n}${opts.length ? `, { ${opts.join(", ")} }` : ""})`;
       }
       case "ask": {
         const lines = [`questions: ${indent(questions(n.questions))},`];
@@ -102,7 +116,8 @@ export function toTypeScript(doc: ChainDocument, options: CodegenOptions = {}): 
         if (n.unsure) {
           const u = n.unsure as Obj;
           const parts = [u.margin !== undefined ? `margin: ${u.margin}` : "", u.minConfidence !== undefined ? `minConfidence: ${u.minConfidence}` : ""].filter(Boolean);
-          lines.push(`unsure: { ${parts.join(", ")}, then: ${indent(node(u.then))} },`);
+          parts.push(`then: ${indent(node(u.then))}`);
+          lines.push(`unsure: { ${parts.join(", ")} },`);
         }
         if (n.alsoAsk) lines.push(`alsoAsk: ${indent(questions(n.alsoAsk))},`);
         common(n, lines);
@@ -111,7 +126,7 @@ export function toTypeScript(doc: ChainDocument, options: CodegenOptions = {}): 
       case "parallel": {
         const branches = Object.entries(n.branches as Obj).map(([k, b]) => `${key(k)}: ${indent(node(b))},`);
         const lines = [`branches: {\n  ${branches.join("\n  ")}\n},`];
-        if (n.join) lines.push(`join: (results) => results, // TODO: was handler "${(n.join as Obj).$ref}"`);
+        if (n.join) lines.push(`join: (results) => results, // TODO: was handler ${literal((n.join as Obj).$ref)}`);
         common(n, lines);
         return `parallel(${id}, ${block(lines)})`;
       }
@@ -122,6 +137,7 @@ export function toTypeScript(doc: ChainDocument, options: CodegenOptions = {}): 
           const st = state(t.state, `${n.id}.${t.id}`);
           if (st) parts.push(`state: ${st}`);
           if (t.model) parts.push(`model: ${literal(t.model)}`);
+          if (t.title !== undefined) parts.push(`title: ${literal(t.title)}`);
           return `tier(${literal(t.id)}, { ${parts.join(", ")} }),`;
         });
         const lines = [`tiers: [\n  ${tiers.join("\n  ")}\n],`, `fallback: ${indent(node(n.fallback))},`];
@@ -130,22 +146,35 @@ export function toTypeScript(doc: ChainDocument, options: CodegenOptions = {}): 
       }
       case "chain": {
         const steps = (n.steps as unknown[]).map((s) => `${indent(node(s))},`);
-        return `chain(\n  ${id},\n  ${steps.join("\n  ")}\n)`;
+        const code = `chain(\n  ${id},\n  ${steps.join("\n  ")}\n)`;
+        // chain() takes no options, so a titled chain goes through describe().
+        const m = meta(n);
+        if (!m.length) return code;
+        used.add("describe");
+        return `describe(${code}, { ${m.join(", ")} })`;
       }
       default:
-        return `/* unknown node kind ${String(n.kind)} */ undefined as never`;
+        return `/* unknown node kind ${comment(String(n.kind))} */ undefined as never`;
     }
   };
 
   const body = node(root);
-  const exportName = options.exportName ?? camel(String(root.id ?? "chain"));
   const imports = [...used].sort();
+  let exportName = options.exportName ?? camel(String(root.id ?? "chain"));
+  // A root called "route" mustn't shadow the route() it's built with.
+  if (!options.exportName && (used.has(exportName) || RESERVED.has(exportName))) exportName += "Chain";
+  const about = doc.description || doc.name;
   const header = [
     `import { ${imports.join(", ")} } from ${literal(options.importFrom ?? "jevchain")};`,
     "",
-    ...(doc.description ? [`/** ${doc.description} */`] : doc.name ? [`/** ${doc.name} */`] : []),
+    ...(about ? [`/** ${comment(String(about))} */`] : []),
   ];
   return [...header, ...stubs, `export const ${exportName} = ${body};`, ""].join("\n");
+}
+
+/** Text that's safe inside a line or block comment: one line, no `*\/`. */
+function comment(s: string): string {
+  return s.replace(/[\r\n\u2028\u2029]+/g, " ").replace(/\*\//g, "*\\/");
 }
 
 function key(k: string): string {
