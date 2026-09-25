@@ -374,6 +374,41 @@ describe("a step whose output the next step never reads", () => {
     for (const [label, node] of cases) expect(unusedIn(asRoot(node)), label).toEqual([]);
   });
 
+  it("keeps the chain around a flagged step when its id is read through results, so no fix empties that read", async () => {
+    const q = { questions: { q: noul("?") } };
+    const inner = (first: Parameters<typeof chain>[1], rest: Parameters<typeof chain>[1]) => asRoot(chain("outer", chain("inner", first, rest), emit("got {{results.inner}}", { id: "got" })));
+    const cases = [
+      inner(ask("a", q), emit("x", { id: "x" })),
+      inner(gate("g", { ask: noul("?"), state: "{{run}}", pass: { min: 0.5 }, then: emit("t", { id: "t" }), otherwise: emit("no", { id: "no" }) }), emit("rest", { id: "rest" })),
+    ];
+    let checked = 0;
+    for (const root of cases) {
+      const [w] = unusedIn(root);
+      expect(w!.path).toBe("$/0/0");
+      for (const [i, f] of w!.fixes.entries()) {
+        const fixed = fix(root, w!, i);
+        expect(getAt(fixed, "$/0"), f.label).toMatchObject({ kind: "chain", id: "inner" });
+        expect(getAt(fixed, f.select!), f.label).toBeDefined();
+        for (const input of INPUTS)
+          for (const seed of [1, 2, 3, 4]) {
+            const before = await ending(root, input, seed);
+            const passed = before.r.trace.spans.find((s) => s.path === "$/0/0")?.decision?.taken;
+            if (f.label.startsWith("run the rest") && passed !== "then") continue;
+            expect((await ending(fixed, input, seed)).end, f.label).toEqual(before.end);
+            checked++;
+          }
+      }
+    }
+    expect(checked).toBeGreaterThan(20);
+  });
+
+  it("counts {{answers.<id>}} as a read too (jevchain's coming answers root), bare {{answers}} included", () => {
+    const q = { questions: { q: noul("?") } };
+    expect(unusedIn(asRoot(chain("c", ask("a", q), emit("was {{answers.a.q}}", { id: "e" }))))).toEqual([]);
+    expect(unusedIn(asRoot(chain("c", ask("a", q), emit("{{answers}}", { id: "e" }))))).toEqual([]);
+    expect(unusedIn(asRoot(chain("c", ask("a", q), emit("was {{answers.other.q}}", { id: "e" }))))).toHaveLength(1);
+  });
+
   it("flags only the outermost of nested unused steps", () => {
     const root = asRoot(
       chain(
@@ -424,6 +459,7 @@ function generated(seed: number): NodeJson {
     return (s === undefined ? rest : { ...rest, state: s }) as NodeJson;
   };
   const ids = [...allIds(root)];
+  const chainIds = allPaths(root).map((p) => getAt(root, p)!).filter((n) => n.kind === "chain").map((n) => n.id);
   for (const p of allPaths(root)) {
     if (!getAt(root, p)) continue; // under an `otherwise` just switched off
     root = updateAt(root, p, (n) => {
@@ -439,8 +475,9 @@ function generated(seed: number): NodeJson {
         case "cascade":
           return { ...n, tiers: (n.tiers as NodeJson[]).map(setState) };
         case "emit": {
-          const v = pick<unknown>(["done", "done", "{{input}}", "for {{run.user}}", { ok: true, who: "{{run.user}}" }, "results"]);
-          return { ...n, value: v === "results" ? `{{results.${pick(ids)}}}` : v };
+          const v = pick<unknown>(["done", "done", "{{input}}", "for {{run.user}}", { ok: true, who: "{{run.user}}" }, "results", "chain results"]);
+          if (v === "chain results" && chainIds.length) return { ...n, value: `got {{results.${pick(chainIds)}}}` };
+          return { ...n, value: v === "results" || v === "chain results" ? `{{results.${pick(ids)}}}` : v };
         }
         default:
           return n;

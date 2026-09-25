@@ -418,7 +418,7 @@ export function unusedOutputs(root: NodeJson): FlowWarning[] {
         if (results === "all" || [...allIds(step)].some((id) => results.has(id))) return;
         if (codeAfter(root, at)) return;
         flagged.add(at);
-        out.push(unusedWarning(root, path, node, i));
+        out.push(unusedWarning(root, path, node, i, results.has(String(node.id))));
       });
     }
     for (const c of childEdges(node)) {
@@ -494,14 +494,18 @@ function hasRef(v: unknown, depth = 0): boolean {
   return Object.values(v).some((x) => hasRef(x, depth + 1));
 }
 
-/** Ids some template reads through `{{results.<id>…}}`, or "all" for a bare `{{results}}`. */
+/**
+ * Ids some template reads through `{{results.<id>…}}`, or "all" for a bare `{{results}}`.
+ * `{{answers.<id>…}}` counts the same, for forward compatibility with jevchain's
+ * coming `answers` root; on this jevchain it renders empty, so it can only mean fewer flags.
+ */
 function resultsReads(root: NodeJson): Set<string> | "all" {
   const ids = new Set<string>();
   let all = false;
   stringsIn(root, (s) => {
     for (const m of s.matchAll(HOLE)) {
       const [head, id] = m[1]!.split(".");
-      if (head !== "results") continue;
+      if (head !== "results" && head !== "answers") continue;
       if (id === undefined) all = true;
       else ids.add(id);
     }
@@ -522,7 +526,8 @@ function codeAfter(root: NodeJson, path: string): boolean {
   return false;
 }
 
-function unusedWarning(root: NodeJson, chainPath: string, chain: NodeJson, i: number): FlowWarning {
+/** `keepChain`: the chain's own id is read through `{{results.<id>}}`, so no fix may collapse the chain away. */
+function unusedWarning(root: NodeJson, chainPath: string, chain: NodeJson, i: number, keepChain: boolean): FlowWarning {
   const steps = chain.steps as NodeJson[];
   const step = steps[i]!;
   const next = steps[i + 1]!;
@@ -537,11 +542,11 @@ function unusedWarning(root: NodeJson, chainPath: string, chain: NodeJson, i: nu
         ? `nothing reads what this parallel collects: ${because}. every run ends the same without it`
         : `this ${step.kind} decides nothing: ${because}, so the rest of the chain runs the same whichever way it goes`;
 
-  // selecting afterwards: a two-step chain collapses into its remaining step
-  const collapses = steps.length === 2;
-  const removed = getAt(removeAt(root, path), chainPath)!;
+  // a two-step chain collapses into its remaining step, unless its id is read
+  const collapses = steps.length === 2 && !keepChain;
+  const removed = collapses ? getAt(removeAt(root, path), chainPath)! : { ...chain, steps: steps.filter((_, j) => j !== i) };
   const fixes: FlowFix[] = [];
-  if (step.kind === "gate") fixes.push(guardRest(root, chainPath, chain, i));
+  if (step.kind === "gate") fixes.push(guardRest(root, chainPath, chain, i, keepChain));
   fixes.push({ label: `remove this ${step.kind}`, node: removed, at: chainPath, select: collapses ? chainPath : path });
   return { path, rule: "unused-output", message, fixes };
 }
@@ -552,7 +557,7 @@ function unusedWarning(root: NodeJson, chainPath: string, chain: NodeJson, i: nu
  * passes. The old `then` stays in front unless it's an emit (whose value
  * the rest never read anyway).
  */
-function guardRest(root: NodeJson, chainPath: string, chain: NodeJson, i: number): FlowFix {
+function guardRest(root: NodeJson, chainPath: string, chain: NodeJson, i: number, keepChain: boolean): FlowFix {
   const steps = chain.steps as NodeJson[];
   const gate = steps[i]!;
   const then = gate.then as NodeJson | undefined;
@@ -561,11 +566,12 @@ function guardRest(root: NodeJson, chainPath: string, chain: NodeJson, i: number
   const nextThen: NodeJson = body.length === 1 ? body[0]! : { kind: "chain", id: freshId("chain", allIds(root)), steps: body };
   const guarded = { ...gate, then: nextThen };
   const before = steps.slice(0, i);
+  const wrap = before.length > 0 || keepChain;
   return {
     label: "run the rest only if it passes",
-    node: before.length ? { ...chain, steps: [...before, guarded] } : guarded,
+    node: wrap ? { ...chain, steps: [...before, guarded] } : guarded,
     at: chainPath,
-    select: before.length ? `${chainPath}/${i}` : chainPath,
+    select: wrap ? `${chainPath}/${i}` : chainPath,
   };
 }
 
