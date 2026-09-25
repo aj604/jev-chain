@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Typed decision graphs for Jev, TypeSafe's classification model.",
   "license": "MIT",
+  "author": "Avery Jones",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aj604/jev-chain.git",
+    "directory": "packages/jevchain"
+  },
+  "homepage": "https://github.com/aj604/jev-chain#readme",
+  "bugs": "https://github.com/aj604/jev-chain/issues",
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -11,22 +19,40 @@
   "publishConfig": {
     "exports": {
       ".": {
-        "types": "./dist/index.d.ts",
-        "import": "./dist/index.js",
-        "require": "./dist/index.cjs"
+        "import": {
+          "types": "./dist/index.d.ts",
+          "default": "./dist/index.js"
+        },
+        "require": {
+          "types": "./dist/index.d.cts",
+          "default": "./dist/index.cjs"
+        }
       }
     },
     "main": "./dist/index.cjs",
     "module": "./dist/index.js",
-    "types": "./dist/index.d.ts"
+    "types": "./dist/index.d.ts",
+    "access": "public"
   },
-  "files": ["dist", "README.md"],
-  "keywords": ["jev", "typesafe", "classification", "routing", "decision-graph", "trace"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "jev",
+    "typesafe",
+    "classification",
+    "routing",
+    "decision-graph",
+    "trace"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
