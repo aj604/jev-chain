@@ -13,13 +13,18 @@
  * Pass `whatIf` and every road a decision didn't take gets a "what if?"
  * button that re-runs the chain forced down it (see `lib/trace/what-if`).
  * On a what-if trace that stacks: what it already forced stays forced.
+ *
+ * Pass `root` (the chain the trace ran on) and a decision also says how close
+ * the call was: the nearest road it didn't take, and how far Jev's number
+ * would have had to move to take it (see `lib/trace/margin`).
  */
 import type { ReactNode } from "react";
-import { spanAt, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
+import { spanAt, type AnyNode, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "@/lib/trace/format";
+import { closestFlip, flipText } from "@/lib/trace/margin";
 import { edgeName, WHAT_IF_MODEL, type ForcedDecision } from "@/lib/trace/what-if";
 import { Distribution } from "./distribution";
 import { JsonView } from "./json-view";
@@ -42,10 +47,12 @@ export interface InspectorProps {
   selected: string;
   onSelect?: (id: string | null) => void;
   whatIf?: WhatIfControl;
+  /** The chain the trace ran on, for "how close was the call?". */
+  root?: AnyNode;
   className?: string;
 }
 
-export function Inspector({ graph, trace, selected, onSelect, whatIf, className }: InspectorProps) {
+export function Inspector({ graph, trace, selected, onSelect, whatIf, root, className }: InspectorProps) {
   const vertex = graph.vertices.find((v) => v.id === selected);
   const spanPath = vertex?.spanPath ?? selected;
   const span = trace ? spanAt(trace, spanPath) : undefined;
@@ -116,6 +123,7 @@ export function Inspector({ graph, trace, selected, onSelect, whatIf, className 
               forced={span.calls.some((c) => c.model === WHAT_IF_MODEL)}
               stacked={(whatIf?.forks ?? []).some((f) => f.path !== span.path)}
               forkable={whatIf?.edges(span.path) ?? []}
+              closest={root && vertex?.kind !== "tier" ? closestFlipText(root, span) : undefined}
               onWhatIf={whatIf ? (edge) => whatIf.run(span.path, edge) : undefined}
             />
           )}
@@ -224,6 +232,7 @@ function DecisionSection({
   forced,
   stacked,
   forkable,
+  closest,
   onWhatIf,
 }: {
   decision: Decision;
@@ -234,6 +243,8 @@ function DecisionSection({
   /** Forking here keeps other decisions this run already forced. */
   stacked: boolean;
   forkable: string[];
+  /** How close the call was, as a sentence. */
+  closest?: string;
   onWhatIf?: (edge: string) => void;
 }) {
   const threshold = fmtThreshold(decision.threshold);
@@ -274,6 +285,11 @@ function DecisionSection({
           );
         })}
       </ul>
+      {closest && (
+        <p className="mt-2 border-(length:--bw) border-dashed border-dim px-2 py-1 text-[12px] leading-snug text-ink-2">
+          <span className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">closest call</span> · {closest}
+        </p>
+      )}
       {forced && (
         <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">
           forced: jev&rsquo;s numbers here were bent so the chain would go &ldquo;{edgeName(decision.taken)}&rdquo;.
@@ -287,6 +303,11 @@ function DecisionSection({
       </p>
     </Section>
   );
+}
+
+function closestFlipText(root: AnyNode, span: Span): string | undefined {
+  const flip = closestFlip(root, span);
+  return flip ? flipText(flip, span.decision?.taken) : undefined;
 }
 
 function CallSection({ call, index, total, decision }: { call: JevCall; index: number; total: number; decision?: Decision }) {

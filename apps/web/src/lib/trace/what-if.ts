@@ -286,7 +286,8 @@ function planCascade(node: CascadeNode, calls: readonly JevCall[], edge: string)
 // answer surgery
 // ---------------------------------------------------------------------------
 
-function gateValue(answer: Answer, label?: string): number {
+/** The number a gate measures: the runtime's `gateValue`, restated. */
+export function gateValue(answer: Answer, label?: string): number {
   switch (answer.type) {
     case "noul":
       return answer.noul;
@@ -297,7 +298,7 @@ function gateValue(answer: Answer, label?: string): number {
   }
 }
 
-function withGateValue(answer: Answer, label: string | undefined, v: number): Answer {
+export function withGateValue(answer: Answer, label: string | undefined, v: number): Answer {
   switch (answer.type) {
     case "noul":
       return { ...answer, noul: v };
@@ -333,13 +334,15 @@ function setConfidence(answer: Answer, c: number): Answer {
   return { ...answer, noul };
 }
 
-function domain(q: Question): [number, number] {
+/** The range a gate's measured number can take. */
+export function domain(q: Question): [number, number] {
   return q.type === "score" ? [0, q.criteria.length - 1] : [0, 1];
 }
 
 // ---------------------------------------------------------------------------
 
-function nodeAt(root: AnyNode, path: string): AnyNode | undefined {
+/** The node at a span path, found by walking the chain. */
+export function nodeAt(root: AnyNode, path: string): AnyNode | undefined {
   let found: AnyNode | undefined;
   walk(root, (n, info) => {
     if (!found && info.path === path) found = n;
