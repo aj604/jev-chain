@@ -95,7 +95,7 @@ route("desk", {
 });
 ```
 
-The keys are an ask's question keys, a route or gate's `decision` plus its `alsoAsk` keys, and a cascade's tier ids (tiers that ran). The same checks apply before a run: the id has to ask Jev, its call has to have come back by then (an ancestor route, gate or cascade, or anything `results` could read), and the key has to be one it asks.
+The keys are an ask's question keys, a route or gate's `decision` plus its `alsoAsk` keys, and a cascade's tier ids (tiers that ran). The same checks apply before a run: the id has to ask Jev, its call has to have come back by then (an ancestor route, gate or cascade, anything `results` could read, or, in a cascade tier's `state`, the tiers before it), and the key has to be one it asks.
 
 ## Running
 

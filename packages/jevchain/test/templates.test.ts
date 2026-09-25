@@ -18,6 +18,8 @@ import {
   toJSON,
   walk,
   type AnyNode,
+  type StepContext,
+  type Tier,
 } from "../src/index.js";
 import { fakeFetch } from "./helpers";
 
@@ -236,35 +238,67 @@ describe("answers: what Jev said, as soon as it said it", () => {
     expect(() => fromJSON(toJSON(c))).not.toThrow();
   });
 
+  it("lets a cascade tier's state read the tiers before it, and only those", async () => {
+    const cc = cascade("cc", {
+      tiers: [
+        tier("quick", { ask: noul("?"), minConfidence: 0.9 }),
+        tier("careful", { ask: noul("?"), minConfidence: 0.9, state: "prior={{answers.cc.quick.noul}} {{answers.cc}}" }),
+        tier("last", { ask: noul("?"), minConfidence: 0.9, state: "{{answers.cc.careful.noul}} {{answers.cc.last}} {{answers.cc.never}}" }),
+      ],
+      fallback: emit("fb"),
+    });
+    expect(chainIssues(cc)).toEqual([
+      `$ (cascade "cc").tiers.last.state: "{{answers.cc.last}}" reads answers of "cc", whose tier "last" hasn't answered when tier "last" renders its state (only "quick", "careful" have)`,
+      `$ (cascade "cc").tiers.last.state: "{{answers.cc.never}}" reads answers of "cc", which has no "never" (it has "quick", "careful", "last")`,
+    ]);
+    const ok = cascade("cc", { tiers: [cc.tiers[0]!, cc.tiers[1]!, tier("first", { ask: noul("?"), minConfidence: 0.9, state: "{{answers.cc}}" })], fallback: emit("fb") });
+    expect(chainIssues(ok)).toEqual([]);
+    expect(chainIssues(cascade("cc", { tiers: [tier("first", { ask: noul("?"), minConfidence: 0.9, state: "{{answers.cc}}" })], fallback: emit("fb") }))).toEqual([
+      `$ (cascade "cc").tiers.first.state: "{{answers.cc}}" reads answers of "cc", this node's own, which don't exist until its call comes back`,
+    ]);
+    const f = fakeFetch(() => ({ noul: 0.37 }));
+    await jevWith(f).run(ok, "hi");
+    expect(f.calls[1]!.state).toMatch(/^prior=0\.37 \{"quick"/);
+  });
+
   // A rejected hole must be one that is empty in every run. Random chains get
-  // probes that read `{{answers.<id>.<key>}}`: once as an emit (what
-  // chainIssues judges), once as a step at the same spot that records whether
-  // the answer was ever there, over runs where every decision goes both ways.
+  // probes that read `{{answers.<id>.<key>}}` in every place a template goes
+  // (ask/route/gate state, each cascade tier's state, emit values, nested
+  // anywhere): once as templates (what chainIssues judges), once as functions
+  // at the same spots that record whether the answer was there, over runs
+  // where every decision goes both ways.
   it("never rejects a hole that some run would fill (random sweep)", async () => {
     let probes = 0;
     let rejected = 0;
+    const where = new Map<string, number>();
     const wrong: string[] = [];
     for (let seed = 1; seed <= 250; seed++) {
-      const filled = new Set<string>();
-      const judged = randomChain(seed, "emit", filled);
+      const filled = new Set<number>();
+      const judged = randomChain(seed, "template", filled);
       const issues = chainIssues(judged.root);
-      expect(issues.filter((i) => !/ \(emit "probe\d+"\)/.test(i))).toEqual([]);
-      const probed = randomChain(seed, "step", filled);
+      const paths = new Map<object, string>();
+      walk(judged.root, (n, info) => paths.set(n, info.path));
+      const at = judged.probes.map((p) => `${paths.get(p.node!)} (${p.node!.kind} "${p.node!.id}")${p.where}`);
+      expect(issues.filter((i) => !at.some((a) => i.startsWith(a)))).toEqual([]);
+      const probed = randomChain(seed, "function", filled);
       for (let i = 0; i < 8; i++) {
         const next = lcg(seed * 1000 + i);
         const f = fakeFetch((_s, _k, q) => (q.type === "choice" ? { choice: next() < 0.5 ? "l1" : "l2", confidence: next() } : q.type === "noul" ? { noul: next() } : { confidence: next() }));
         expect((await jevWith(f).run(probed.root, "in")).status).not.toBe("error");
       }
-      for (const p of judged.probes) {
+      judged.probes.forEach((p, i) => {
         probes++;
-        const issue = issues.find((i) => i.includes(`(emit "${p.name}")`));
+        const place = p.where.startsWith(".value") ? "emit" : p.where.startsWith(".tiers") ? "tier state" : `${p.node!.kind} state`;
+        where.set(place, (where.get(place) ?? 0) + 1);
+        const issue = issues.find((x) => x.startsWith(at[i]!) && x.includes(`"{{${p.hole}}}"`));
         if (issue) rejected++;
-        if (issue && filled.has(p.name)) wrong.push(`seed ${seed}: ${issue}`);
-      }
+        if (issue && filled.has(i)) wrong.push(`seed ${seed}: ${issue}`);
+      });
     }
     expect(wrong).toEqual([]);
-    expect(probes).toBeGreaterThan(1000);
+    expect(probes).toBeGreaterThan(1500);
     expect(rejected / probes).toBeGreaterThan(0.3); // the sweep exercises real rejections, not just passes
+    for (const place of ["emit", "ask state", "route state", "gate state", "tier state"]) expect(where.get(place)).toBeGreaterThan(100);
   });
 });
 
@@ -273,65 +307,111 @@ function lcg(seed: number) {
   return () => (s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32;
 }
 
-/** A random, valid chain with probe leaves that read `{{answers.<id>.<key>}}` (as emits) or record whether it's there (as steps). */
-function randomChain(seed: number, as: "emit" | "step", filled: Set<string>) {
+/**
+ * A random, valid chain with probes that read `{{answers.<id>.<key>}}` in every
+ * template position: as templates, or as functions (a step, or a state
+ * function) that record in `filled` whether the answer was there.
+ */
+function randomChain(seed: number, as: "template" | "function", filled: Set<number>) {
   const next = lcg(seed);
   const pick = <T,>(xs: readonly T[]) => xs[Math.floor(next() * xs.length)]!;
   let unique = 0;
   const id = () => (next() < 0.6 ? pick(["n1", "n2", "n3", "n4", "n5", "n6", "n7"]) : `u${unique++}`);
-  const probes: { name: string; hole: string }[] = [];
-  const ids: string[] = [];
+  const probes: { hole: string; where: string; self?: string; node?: AnyNode }[] = [];
+  let answers: StepContext["answers"] = {};
+  const grab = step("grab", (x: unknown, ctx) => ((answers = ctx.answers), x));
+  const check = (i: number) => {
+    const [, target, key] = probes[i]!.hole.split(".");
+    const v = answers[target!];
+    if ((key ? v?.[key] : v) !== undefined) filled.add(i);
+  };
+  type StateProbe = { probe?: (typeof probes)[number]; state?: () => string };
+  /** A `state` that probes (a template getter, or a checking function), or nothing. The node is attached once it's built. */
+  const stateProbe = (self: string, where: string): StateProbe => {
+    if (next() >= 0.5) return {};
+    const i = probes.push({ hole: "", where, self }) - 1;
+    return { probe: probes[i]!, state: as === "template" ? () => `s {{${probes[i]!.hole}}}` : () => (check(i), "s") };
+  };
   const leaf = (): AnyNode => {
     if (next() < 0.45) {
-      const probe = { name: `probe${probes.length}`, hole: "" };
-      probes.push(probe);
-      if (as === "emit") return { kind: "emit", id: probe.name, get value() { return `{{${probe.hole}}}`; } } as unknown as AnyNode;
-      return step(probe.name, (_: unknown, ctx) => {
-        const [, target, key] = probe.hole.split(".");
-        const v = ctx.answers[target!];
-        if ((key ? v?.[key] : v) !== undefined) filled.add(probe.name);
-        return null;
-      });
+      const name = `probe${probes.length}`;
+      const nested = next() < 0.3;
+      const i = probes.push({ hole: "", where: nested ? ".value.v.0" : ".value" }) - 1;
+      const node =
+        as === "template"
+          ? ({ kind: "emit", id: name, get value() { return nested ? { v: [`{{${probes[i]!.hole}}}`] } : `{{${probes[i]!.hole}}}`; } } as unknown as AnyNode)
+          : step(name, () => (check(i), null));
+      probes[i]!.node = node;
+      return node;
     }
     return next() < 0.5 ? emit("e", { id: id() }) : step(id(), (x: unknown) => x);
+  };
+  /** Template states are built lazily (holes are aimed after the tree exists), so a getter renders them. */
+  const withState = <N extends AnyNode>(node: N, s: StateProbe): N => {
+    const out = !s.state ? node : as === "function" ? { ...node, state: s.state } : Object.defineProperty({ ...node }, "state", { get: s.state, enumerable: true });
+    if (s.probe) s.probe.node = out;
+    return out;
   };
   const node = (depth: number): AnyNode => {
     const k = depth > 3 ? 1 : next();
     const sub = () => node(depth + 1);
     const maybe = <T,>(p: number, v: () => T) => (next() < p ? v() : {});
-    if (k < 0.15) return ask(id(), { questions: next() < 0.5 ? { a: noul("?") } : { a: noul("?"), b: noul("?") } });
-    if (k < 0.3)
-      return route(id(), {
-        ask: choice("?", ["l1", "l2"]),
-        branches: { l1: sub(), l2: sub() },
-        ...maybe(0.5, () => ({ alsoAsk: { x: noul("?") } })),
-        ...maybe(0.3, () => ({ lowConfidence: { below: 0.5, then: sub() } })),
-      });
-    if (k < 0.45)
-      return gate(id(), {
-        ask: noul("?"),
-        pass: { min: 0.5 },
-        then: sub(),
-        ...maybe(0.6, () => ({ otherwise: sub() })),
-        ...maybe(0.3, () => ({ unsure: { margin: 0.2, then: sub() } })),
-        ...maybe(0.4, () => ({ alsoAsk: { x: noul("?") } })),
-      });
+    if (k < 0.15) {
+      const nid = id();
+      const s = stateProbe(nid, ".state");
+      return withState(ask(nid, { questions: next() < 0.5 ? { a: noul("?") } : { a: noul("?"), b: noul("?") } }), s);
+    }
+    if (k < 0.3) {
+      const nid = id();
+      const s = stateProbe(nid, ".state");
+      return withState(
+        route(nid, {
+          ask: choice("?", ["l1", "l2"]),
+          branches: { l1: sub(), l2: sub() },
+          ...maybe(0.5, () => ({ alsoAsk: { x: noul("?") } })),
+          ...maybe(0.3, () => ({ lowConfidence: { below: 0.5, then: sub() } })),
+        }),
+        s,
+      );
+    }
+    if (k < 0.45) {
+      const nid = id();
+      const s = stateProbe(nid, ".state");
+      return withState(
+        gate(nid, {
+          ask: noul("?"),
+          pass: { min: 0.5 },
+          then: sub(),
+          ...maybe(0.6, () => ({ otherwise: sub() })),
+          ...maybe(0.3, () => ({ unsure: { margin: 0.2, then: sub() } })),
+          ...maybe(0.4, () => ({ alsoAsk: { x: noul("?") } })),
+        }),
+        s,
+      );
+    }
     if (k < 0.58) return parallel(id(), { branches: { p1: sub(), p2: sub(), ...maybe(0.4, () => ({ p3: sub() })) } });
     if (k < 0.7) {
-      const t1 = tier("t1", { ask: noul("?"), minConfidence: 0.5 });
-      return cascade(id(), { tiers: next() < 0.5 ? [t1] : [t1, tier("t2", { ask: choice("?", ["l1", "l2"]), minConfidence: 0.5 })], fallback: sub() });
+      const nid = id();
+      const specs = next() < 0.4 ? [["t1", noul("?")] as const] : [["t1", noul("?")] as const, ["t2", choice("?", ["l1", "l2"])] as const, ...(next() < 0.4 ? [["t3", noul("?")] as const] : [])];
+      const states = specs.map(([t]) => stateProbe(nid, `.tiers.${t}.state`));
+      const tiers = specs.map(([t, q], j) => withState(tier(t, { ask: q, minConfidence: 0.5 }) as unknown as AnyNode, { ...states[j]!, probe: undefined }) as unknown as Tier);
+      const built = cascade(nid, { tiers, fallback: sub() });
+      for (const s of states) if (s.probe) s.probe.node = built;
+      return built;
     }
     if (k < 0.88) return (chain as (id: string, ...nodes: AnyNode[]) => AnyNode)(id(), sub(), ...Array.from({ length: Math.floor(next() * 3) }, sub));
     return leaf();
   };
-  const root = chain("root", node(0), node(0), node(0));
+  const root = chain("root", grab, node(0), node(0), node(0));
+  const ids: string[] = [];
   walk(root, (n) => {
     if (!n.id.startsWith("probe")) ids.push(n.id);
   });
   const aim = lcg(seed * 7 + 1);
   for (const p of probes) {
-    const key = aim() < 0.2 ? undefined : pick(["a", "b", "x", "decision", "t1", "t2", "zz"]);
-    p.hole = `answers.${ids[Math.floor(aim() * ids.length)]}${key ? `.${key}` : ""}`;
+    const key = aim() < 0.2 ? undefined : ["a", "b", "x", "decision", "t1", "t2", "t3", "zz"][Math.floor(aim() * 8)];
+    const target = p.self && aim() < 0.35 ? p.self : ids[Math.floor(aim() * ids.length)];
+    p.hole = `answers.${target}${key ? `.${key}` : ""}`;
   }
   return { root, probes };
 }
