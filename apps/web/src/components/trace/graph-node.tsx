@@ -29,6 +29,8 @@ export type FlowNodeData = {
   compact: boolean;
   direction: Direction;
   decoration?: VertexDecoration;
+  /** Sweep mode: how many of `total` runs reached this vertex. */
+  traffic?: { count: number; total: number };
   onSelect?: (id: string) => void;
 };
 
@@ -155,6 +157,7 @@ function SmallNode({ data }: { data: FlowNodeData }) {
       {compare && <CompareMarks a={a} b={b} />}
       <span aria-hidden>{KIND_GLYPH[vertex.kind]}</span>
       <span>{vertex.label}</span>
+      {data.traffic && <span className="tabular-nums text-ink-3">{data.traffic.count}/{data.traffic.total}</span>}
     </div>
   );
 }
@@ -196,7 +199,10 @@ function TraceNodeImpl({ data }: NodeProps<FlowNode>) {
 
   const style: CSSProperties = { width: "100%", height: "100%" };
   const deco = data.decoration;
-  const label = `${vertex.kind} ${vertex.label}, ${state}${overlay.durationMs !== undefined ? `, ${fmtMs(overlay.durationMs)}` : ""}`;
+  const traffic = data.traffic;
+  const label = traffic
+    ? `${vertex.kind} ${vertex.label}, reached by ${traffic.count} of ${traffic.total} inputs`
+    : `${vertex.kind} ${vertex.label}, ${state}${overlay.durationMs !== undefined ? `, ${fmtMs(overlay.durationMs)}` : ""}`;
 
   return (
     <>
@@ -274,7 +280,19 @@ function TraceNodeImpl({ data }: NodeProps<FlowNode>) {
                   ↻{retries}
                 </span>
               )}
-              {state !== "idle" && <StateMark state={state} />}
+              {traffic ? (
+                <span
+                  className={cn(
+                    "inline-flex h-4 items-center px-1 font-mono text-[10px] leading-none tabular-nums",
+                    traffic.count > 0 ? "border-hard bg-accent text-accent-ink" : "border-soft text-ink-3",
+                  )}
+                  title={`${traffic.count} of ${traffic.total} inputs got here`}
+                >
+                  {traffic.count}/{traffic.total}
+                </span>
+              ) : (
+                state !== "idle" && <StateMark state={state} />
+              )}
               {overlay.durationMs !== undefined && state !== "running" && (
                 <span className="font-mono text-[10px] tabular-nums text-ink-3">{fmtMs(overlay.durationMs)}</span>
               )}

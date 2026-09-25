@@ -1,23 +1,78 @@
 "use client";
 
-import { decisions, diffTraces, type Decision, type Trace } from "jevchain";
+import { decisions, type Decision, type Trace } from "jevchain";
+import { ChainLinks } from "@/components/brand/chain-links";
 import { cn } from "@/lib/cn";
 import { fmtMetric, fmtMs, fmtUsd, previewJson } from "@/lib/trace/format";
+import type { RunIssue } from "@/lib/trace/run-error";
+import { hasReasks, splitHeadline, splitText, type Split, type SplitVerdict } from "@/lib/trace/split";
+import { edgeName, forksOf } from "@/lib/trace/what-if";
+import { ForkList } from "@/components/trace/fork-list";
 
-/** One-line verdict on two runs of the same chain. */
-export function diffHeadline(a: Trace, b: Trace): { text: string; diverged: boolean; path?: string } {
-  const d = diffTraces(a, b);
-  const title = (path: string) => a.spans.find((s) => s.path === path)?.title ?? d.divergedAt?.nodeId ?? path;
-  if (d.divergedAt) {
-    const nice = (e: string) => (e === "lowConfidence" ? "unsure" : e);
-    return {
-      text: `diverged at ${title(d.divergedAt.path)}: a went “${nice(d.divergedAt.a)}”, b went “${nice(d.divergedAt.b)}”.`,
-      diverged: true,
-      path: d.divergedAt.path,
-    };
-  }
-  if (d.onlyA.length || d.onlyB.length) return { text: "same decisions, but the runs ended in different places.", diverged: true };
-  return { text: "same road, every fork. only the numbers differ.", diverged: false };
+/**
+ * "Ask both again": send a's input and b's input to Jev a few more times
+ * each, and read every decision across both (see `lib/trace/split`).
+ */
+export interface CompareAskControl {
+  /** Why the two inputs can't be asked again (a rehearsal, a what-if, the same input twice…), or null. */
+  blocker: string | null;
+  running: boolean;
+  /** Re-asks finished so far per side (answered or failed), of `total` each. */
+  done: { a: number; b: number };
+  total: number;
+  /** Every decision either run made, across both inputs' asks so far (once any re-ask of either finished). */
+  splits?: Split[];
+  /** What stopped the re-asks early (no key, rate limited…). */
+  stoppedBy?: RunIssue;
+  start: () => void;
+}
+
+const VERDICT_TAG: Record<SplitVerdict, { label: string; tone: string } | null> = {
+  apart: { label: "apart", tone: "border-pass text-pass" },
+  "both-ways": { label: "both ways", tone: "border-warn text-warn" },
+  same: { label: "same", tone: "border-dim text-ink-3" },
+  thin: null,
+  "one-sided": null,
+};
+
+function AskBoth({ ask }: { ask: CompareAskControl }) {
+  const splits = ask.splits && hasReasks(ask.splits) ? ask.splits : undefined;
+  return (
+    <div className="mb-4 border-(length:--bw) border-dashed border-dim px-2.5 py-2 text-[12.5px] leading-relaxed text-ink-2">
+      <div className="flex items-center gap-3">
+        <span className="font-mono text-[11px] lowercase text-ink-3">input, or jev?</span>
+        {ask.running ? (
+          <span className="ml-auto flex items-center gap-2 font-mono text-[10.5px] lowercase text-ink-3" aria-live="polite">
+            <ChainLinks variant="loading" count={3} size={9} label="asking again" />
+            asking again · a {ask.done.a}/{ask.total} · b {ask.done.b}/{ask.total}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={ask.start}
+            disabled={ask.blocker !== null}
+            title={ask.blocker ?? `send each input to jev ${ask.total} more times and see whether they part at the same places every time`}
+            className="ml-auto font-mono text-[10.5px] lowercase text-ink-2 underline decoration-dotted underline-offset-4 hover:text-ink disabled:cursor-not-allowed disabled:no-underline disabled:opacity-45"
+          >
+            ask both again ×{ask.total}
+          </button>
+        )}
+      </div>
+      <p className="mt-1">
+        {splits
+          ? "each decision below is read across every ask of each input. “apart” means the two inputs never shared a road there; “both ways” means at least one input goes either way by itself, so a single pull of each can split there without the edit mattering. a handful of asks can catch a coin toss, not prove there isn't one."
+          : ask.blocker && !ask.running
+            ? ask.blocker
+            : "one pull of each input is one sample of each. the same input can come back down a different road, so a split here may be jev, not your edit. ask both again to tell."}
+      </p>
+      {ask.stoppedBy && (
+        <p className="mt-1 font-mono text-[11px] text-warn">
+          stopped early: {ask.stoppedBy.title}
+          {ask.stoppedBy.detail ? `. ${ask.stoppedBy.detail}` : ""}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function Side({ tone, decision, missing }: { tone: "a" | "b"; decision?: Decision; missing: boolean }) {
@@ -42,7 +97,26 @@ function Side({ tone, decision, missing }: { tone: "a" | "b"; decision?: Decisio
   );
 }
 
-export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSelect?: (id: string) => void }) {
+/**
+ * `canFork` says run b can be forked again (the studio, not a share page);
+ * `onUndo` puts back the b this one was forked from, when there is one.
+ */
+export function CompareSummary({
+  a,
+  b,
+  onSelect,
+  canFork,
+  onUndo,
+  ask,
+}: {
+  a?: Trace;
+  b?: Trace;
+  onSelect?: (id: string) => void;
+  canFork?: boolean;
+  onUndo?: () => void;
+  /** "Ask both again" (the studio, when both runs are real). */
+  ask?: CompareAskControl;
+}) {
   if (!a || !b) {
     return (
       <p className="px-4 py-6 text-[13px] leading-relaxed text-ink-2">
@@ -52,13 +126,42 @@ export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSel
   }
   const da = decisions(a);
   const db = decisions(b);
-  const paths = [...new Set([...da.map((d) => d.path), ...db.map((d) => d.path)])];
+  const splits = ask?.splits && hasReasks(ask.splits) ? ask.splits : undefined;
+  // Decisions only a re-ask made get a row too: that's where some ask of an input went instead.
+  const paths = [...new Set([...da.map((d) => d.path), ...db.map((d) => d.path), ...(splits ?? []).map((s) => s.path)])];
   const done = a.status !== "running" && b.status !== "running";
-  const head = done ? diffHeadline(a, b) : null;
+  const head = done ? splitHeadline(a, b, splits) : null;
+  const forks = forksOf(b);
 
   return (
     <div className="px-4 py-4">
       <h2 className="mb-3 font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">a vs b</h2>
+      {forks.length === 1 && (
+        <p className="mb-3 text-[12.5px] leading-relaxed text-ink-2">
+          b is a what-if: same input, with <span className="font-mono text-[11px] text-ink">{forks[0]!.title ?? forks[0]!.nodeId}</span> forced to go &ldquo;
+          {edgeName(forks[0]!.edge)}&rdquo;. before it, b replays a&rsquo;s answers; after it, the new road was asked fresh.
+        </p>
+      )}
+      {forks.length > 1 && (
+        <div className="mb-3 text-[12.5px] leading-relaxed text-ink-2">
+          <p>b is a what-if of a what-if: same input, with {forks.length} decisions forced in turn:</p>
+          <ForkList forks={forks} onSelect={onSelect} className="my-1.5" />
+          <p>everything jev already said is replayed; only roads no run had walked were asked fresh.</p>
+        </div>
+      )}
+      {forks.length > 0 && canFork && b.status !== "running" && (
+        <p className="mb-3 font-mono text-[10.5px] leading-relaxed text-ink-3">
+          open run b and pick any decision to force it too; what b already forced stays forced.
+          {onUndo && (
+            <>
+              {" "}
+              <button type="button" onClick={onUndo} className="text-ink-2 lowercase underline decoration-dotted underline-offset-4 hover:text-ink">
+                ↩ undo the last what-if
+              </button>
+            </>
+          )}
+        </p>
+      )}
       {head && (
         <button
           type="button"
@@ -71,11 +174,14 @@ export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSel
           {head.text}
         </button>
       )}
+      {ask && done && forks.length === 0 && <AskBoth ask={ask} />}
       <ol className="space-y-3">
         {paths.map((path) => {
           const x = da.find((d) => d.path === path);
           const y = db.find((d) => d.path === path);
-          const name = a.spans.find((s) => s.path === path)?.title ?? b.spans.find((s) => s.path === path)?.title ?? x?.nodeId ?? y?.nodeId;
+          const sp = splits?.find((z) => z.path === path);
+          const tag = sp ? VERDICT_TAG[sp.verdict] : null;
+          const name = a.spans.find((s) => s.path === path)?.title ?? b.spans.find((s) => s.path === path)?.title ?? sp?.title ?? x?.nodeId ?? y?.nodeId;
           const split = x && y && x.decision.taken !== y.decision.taken;
           return (
             <li key={path} className="fade-up">
@@ -86,11 +192,13 @@ export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSel
               >
                 <span className="truncate">{name}</span>
                 {split && <span className="ml-auto shrink-0 border-(length:--bw) border-warn px-1 text-[9px] leading-4 text-warn">fork</span>}
+                {tag && <span className={cn("shrink-0 border-(length:--bw) px-1 text-[9px] leading-4", !split && "ml-auto", tag.tone)}>{tag.label}</span>}
               </button>
               <div className="grid grid-cols-2 gap-3">
                 <Side tone="a" decision={x?.decision} missing={a.status !== "running"} />
                 <Side tone="b" decision={y?.decision} missing={b.status !== "running"} />
               </div>
+              {sp && <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-ink-3">⇄ {splitText(sp)}</p>}
             </li>
           );
         })}

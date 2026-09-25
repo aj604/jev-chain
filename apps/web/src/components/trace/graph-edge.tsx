@@ -18,6 +18,8 @@ export type FlowEdgeData = {
   /** Where layout put this edge's pill (flow coordinates). */
   labelPos?: Point;
   direction: Direction;
+  /** Sweep mode: how many of `total` runs took this edge. */
+  traffic?: { count: number; total: number };
   onSelect?: (id: string) => void;
 };
 
@@ -47,14 +49,16 @@ const STROKE: Record<EdgeTone, { color: string; width: number; dash?: string }> 
 
 function TraceEdgeImpl({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps<FlowEdge>) {
   if (!data) return null;
-  const { edge, overlay, overlayB, flowing, markerPrefix, compact, labelPos, direction } = data;
+  const { edge, overlay, overlayB, flowing, markerPrefix, compact, labelPos, direction, traffic } = data;
   const tone = edgeTone(overlay, overlayB);
   const s = STROKE[tone];
+  // A sweep draws busier roads thicker: 1.5px for one input, up to 5px for all of them.
+  const width = traffic && traffic.count > 0 ? 1.5 + 3.5 * (traffic.count / Math.max(1, traffic.total)) : s.width;
   const { d, label } = direction === "TB" ? edgePath(sourceX, sourceY, targetX, targetY - 3, labelPos, "TB") : edgePath(sourceX, sourceY, targetX - 3, targetY, labelPos);
 
   const valueA = fmtMetric(overlay.metric, overlay.value);
   const valueB = overlayB ? fmtMetric(overlayB.metric, overlayB.value) : null;
-  const showPill = !compact || tone !== "idle" ? Boolean(edge.label || valueA || valueB) : Boolean(edge.label);
+  const showPill = traffic ? Boolean(edge.label || traffic.count > 0) : !compact || tone !== "idle" ? Boolean(edge.label || valueA || valueB) : Boolean(edge.label);
   const takenAny = tone === "taken" || tone === "b" || tone === "both";
 
   return (
@@ -64,7 +68,7 @@ function TraceEdgeImpl({ id, sourceX, sourceY, targetX, targetY, data }: EdgePro
         d={d}
         fill="none"
         className={cn("react-flow__edge-path", flowing && takenAny && "edge-flow")}
-        style={{ stroke: s.color, strokeWidth: s.width, strokeDasharray: flowing && takenAny ? undefined : s.dash }}
+        style={{ stroke: s.color, strokeWidth: width, strokeDasharray: flowing && takenAny ? undefined : s.dash }}
         markerEnd={`url(#${markerPrefix}-${tone})`}
       />
       {/* fat invisible hit area so hovering is forgiving */}
@@ -85,11 +89,20 @@ function TraceEdgeImpl({ id, sourceX, sourceY, targetX, targetY, data }: EdgePro
               edge.decidedBy ? "cursor-pointer" : "cursor-default",
             )}
             style={{ transform: `translate(-50%, -50%) translate(${label.x}px, ${label.y}px)`, pointerEvents: "all" }}
-            aria-label={`${edge.label || "edge"}${takenAny ? " (taken)" : tone === "dim" ? " (not taken)" : ""}${valueA ? ` ${valueA}` : ""}`}
+            aria-label={
+              traffic
+                ? `${edge.label || "edge"}: ${traffic.count} of ${traffic.total} inputs went this way`
+                : `${edge.label || "edge"}${takenAny ? " (taken)" : tone === "dim" ? " (not taken)" : ""}${valueA ? ` ${valueA}` : ""}`
+            }
           >
-            {takenAny && <span aria-hidden>✓</span>}
+            {takenAny && !traffic && <span aria-hidden>✓</span>}
             {edge.label && <span>{edge.label}</span>}
-            {overlayB ? (
+            {traffic ? (
+              <span className="tabular-nums opacity-85">
+                {edge.label && "· "}
+                {traffic.count}/{traffic.total}
+              </span>
+            ) : overlayB ? (
               (valueA || valueB) && (
                 <span className="tabular-nums opacity-85">
                   {edge.label && "· "}a {valueA ?? "–"} · b {valueB ?? "–"}

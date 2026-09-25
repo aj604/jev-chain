@@ -5,17 +5,20 @@
  * links: graph in the middle, inspector / story on the right, waterfall at
  * the bottom, optional rail on the left.
  */
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AnyNode, FlowGraph, Trace } from "jevchain";
-import { Inspector } from "@/components/trace/inspector";
+import { Inspector, type WhatIfControl } from "@/components/trace/inspector";
 import { RunSummary } from "@/components/trace/run-summary";
 import { Timeline } from "@/components/trace/timeline";
 import { TraceGraph, type TraceGraphProps } from "@/components/trace/trace-graph";
-import { WhyPanel } from "@/components/trace/why-panel";
+import { WhyPanel, type ReaskControl } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import type { ResolvedChain } from "@/lib/trace/chain-source";
 import type { RunIssue } from "@/lib/trace/run-error";
-import { CompareSummary, diffHeadline } from "./compare-summary";
+import type { Traffic } from "@/lib/trace/sweep";
+import { forkableEdges, forksOf } from "@/lib/trace/what-if";
+import { hasReasks, splitHeadline } from "@/lib/trace/split";
+import { CompareSummary, type CompareAskControl } from "./compare-summary";
 
 export type Target = "a" | "b" | "diff";
 
@@ -46,6 +49,22 @@ export interface WorkbenchProps {
   graphNode?: AnyNode;
   /** Extra TraceGraph props for the builder. */
   graphProps?: Pick<TraceGraphProps, "decorations" | "onNodeContextMenu" | "children">;
+  /**
+   * Re-run with the decision at `path` forced down `edge`, forking run `from`
+   * (whichever run's inspector it was offered in). Forking b keeps b's forks.
+   */
+  onWhatIf?: (path: string, edge: string, from: "a" | "b") => void;
+  /** Put back the b the current what-if was forked from. */
+  onUndoWhatIf?: () => void;
+  /**
+   * Sweep mode: the graph shows how many inputs went where instead of one
+   * trace, `aside` replaces the story / inspector and `summary` the run strip.
+   */
+  sweep?: { traffic: Traffic; aside: ReactNode; summary: ReactNode };
+  /** "Ask again" for run a: shown in its story and inspector (see `lib/trace/reask`). */
+  reask?: ReaskControl;
+  /** "Ask both again" in compare mode: both inputs re-sent to Jev (see `lib/trace/split`). */
+  compareAsk?: CompareAskControl;
 }
 
 const TIMELINE_MIN = 72;
@@ -72,18 +91,34 @@ export function Workbench({
   canvasOverlay,
   graphNode,
   graphProps,
+  onWhatIf,
+  onUndoWhatIf,
+  sweep,
+  reask,
+  compareAsk,
 }: WorkbenchProps) {
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
   const drag = useRef<{ y: number; h: number } | null>(null);
 
-  const comparing = compare !== undefined;
+  const comparing = compare !== undefined && !sweep;
   const showB = comparing && target === "b";
   const focusTrace = showB ? compare.trace : trace;
   const focusIssue = showB ? compare.issue : issue;
   const focusNow = showB ? compare.now : now;
   const select = useCallback((id: string | null) => onSelect(id), [onSelect]);
-  const head = comparing && trace && compare.trace && trace.status !== "running" && compare.trace.status !== "running" ? diffHeadline(trace, compare.trace) : null;
+  // What-ifs fork whichever run is in focus, once it's finished (forkableEdges checks).
+  const whatIf = useMemo<WhatIfControl | undefined>(() => {
+    if (!onWhatIf || !focusTrace) return undefined;
+    const from = showB ? "b" : "a";
+    return {
+      edges: (path) => forkableEdges(chain.node, focusTrace, path),
+      run: (path, edge) => onWhatIf(path, edge, from),
+      forks: forksOf(focusTrace),
+    };
+  }, [onWhatIf, showB, focusTrace, chain.node]);
+  const head = comparing && trace && compare.trace && trace.status !== "running" && compare.trace.status !== "running" ? splitHeadline(trace, compare.trace, compareAsk?.splits && hasReasks(compareAsk.splits) ? compareAsk.splits : undefined)
+      : null;
 
   const onPointerDown = (e: React.PointerEvent) => {
     drag.current = { y: e.clientY, h: timelineH };
@@ -110,8 +145,14 @@ export function Workbench({
       <section className="flex min-h-0 min-w-0 flex-col">
         <div className="border-hard-b bg-paper">{header}</div>
         <div className="border-soft-b bg-paper">
-          <RunSummary trace={trace} now={now} label={comparing ? "a" : undefined} />
-          {comparing && <RunSummary trace={compare.trace} now={compare.now} label="b" className="border-soft-t" />}
+          {sweep ? (
+            sweep.summary
+          ) : (
+            <>
+              <RunSummary trace={trace} now={now} label={comparing ? "a" : undefined} />
+              {comparing && <RunSummary trace={compare.trace} now={compare.now} label="b" className="border-soft-t" />}
+            </>
+          )}
         </div>
         {head && (
           <button
@@ -126,7 +167,7 @@ export function Workbench({
               <span className="size-2 border-hard bg-accent" />
               <span className="size-2 border-hard bg-compare" />
             </span>
-            <span className="truncate">{head.text}</span>
+            <span className="truncate" title={head.text}>{head.text}</span>
           </button>
         )}
         <div className="relative h-[62vh] min-h-[22rem] lg:h-auto lg:min-h-0 lg:flex-1">
@@ -134,15 +175,14 @@ export function Workbench({
             {...graphProps}
             chain={graphNode ?? chain.node}
             graph={graph}
-            trace={trace}
-            {...(comparing ? { compare: compare.trace } : {})}
+            {...(sweep ? { traffic: sweep.traffic } : { trace, ...(comparing ? { compare: compare.trace } : {}) })}
             selected={selected}
             onSelect={select}
             fitSignal={fitSignal}
           />
           {canvasOverlay}
         </div>
-        {footer ?? (
+        {sweep ? null : footer ?? (
         <div className="border-hard-t bg-paper">
           <div className="flex h-8 items-center gap-2 border-soft-b px-3">
             <div
@@ -210,7 +250,7 @@ export function Workbench({
       </section>
 
       <aside className="min-h-0 border-hard-t bg-paper lg:overflow-y-auto lg:border-t-0 lg:border-hard-l" aria-label={aside ? "properties" : "inspector"}>
-        {aside ?? (
+        {aside ?? sweep?.aside ?? (
         <>
         {comparing && (
           <div className="sticky top-0 z-10 flex border-hard-b bg-paper" role="tablist" aria-label="which run">
@@ -236,11 +276,11 @@ export function Workbench({
           </div>
         )}
         {comparing && target === "diff" && !selected ? (
-          <CompareSummary a={trace} b={compare.trace} onSelect={select} />
+          <CompareSummary a={trace} b={compare.trace} onSelect={select} canFork={Boolean(onWhatIf)} onUndo={onUndoWhatIf} {...(compareAsk ? { ask: compareAsk } : {})} />
         ) : selected ? (
-          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} />
+          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} root={chain.node} {...(reask && !showB ? { reask } : {})} />
         ) : (
-          <WhyPanel trace={focusTrace} issue={focusIssue} onSelect={select} issueAction={showB ? issueActionB : issueAction} />
+          <WhyPanel trace={focusTrace} issue={focusIssue} onSelect={select} issueAction={showB ? issueActionB : issueAction} {...(reask && !showB ? { reask } : {})} />
         )}
         </>
         )}

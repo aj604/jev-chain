@@ -9,27 +9,58 @@
  *
  * `selected` is a graph vertex id (which equals the span path for real nodes)
  * or a span path with no vertex (e.g. a `chain` span from the timeline).
+ *
+ * Pass `whatIf` and every road a decision didn't take gets a "what if?"
+ * button that re-runs the chain forced down it (see `lib/trace/what-if`).
+ * On a what-if trace that stacks: what it already forced stays forced.
+ *
+ * Pass `root` (the chain the trace ran on) and a decision also says how close
+ * the call was: the nearest road it didn't take, and how far Jev's number
+ * would have had to move to take it (see `lib/trace/margin`).
+ *
+ * Pass `reask` (the same input asked again) and a decision also says whether
+ * every ask took the same road, and how far Jev's number moved between them
+ * (see `lib/trace/reask`).
  */
 import type { ReactNode } from "react";
-import { spanAt, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
+import { spanAt, type AnyNode, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "@/lib/trace/format";
+import { closestFlip, flipText } from "@/lib/trace/margin";
+import type { Steadiness } from "@/lib/trace/reask";
+import { edgeName, WHAT_IF_MODEL, type ForcedDecision } from "@/lib/trace/what-if";
 import { Distribution } from "./distribution";
 import { JsonView } from "./json-view";
 import { KindTag, StateMark, type AnyState } from "./kinds";
+import { SteadyLine } from "./why-panel";
 
 const DECISION_KEY = "decision";
+
+/** Offer "what if it went the other way?" re-runs from this trace. */
+export interface WhatIfControl {
+  /** The edges that can be forced at a decision's span path. */
+  edges: (path: string) => string[];
+  run: (path: string, edge: string) => void;
+  /** What the run being inspected already forced (they stay forced in the re-run). */
+  forks: ForcedDecision[];
+}
 
 export interface InspectorProps {
   graph: FlowGraph;
   trace?: Trace;
   selected: string;
   onSelect?: (id: string | null) => void;
+  whatIf?: WhatIfControl;
+  /** The chain the trace ran on, for "how close was the call?". */
+  root?: AnyNode;
+  /** The run asked again (see `lib/trace/reask`): did this decision hold, and open an ask that didn't. */
+  reask?: { steadiness?: Steadiness[]; open: (index: number) => void };
   className?: string;
 }
 
-export function Inspector({ graph, trace, selected, onSelect, className }: InspectorProps) {
+export function Inspector({ graph, trace, selected, onSelect, whatIf, root, reask, className }: InspectorProps) {
   const vertex = graph.vertices.find((v) => v.id === selected);
   const spanPath = vertex?.spanPath ?? selected;
   const span = trace ? spanAt(trace, spanPath) : undefined;
@@ -74,7 +105,7 @@ export function Inspector({ graph, trace, selected, onSelect, className }: Inspe
       </header>
 
       {!trace || !span ? (
-        <NotRun vertex={vertex} trace={trace} graph={graph} onSelect={onSelect} />
+        <NotRun vertex={vertex} trace={trace} graph={graph} onSelect={onSelect} whatIf={whatIf} />
       ) : (
         <>
           <dl className="grid grid-cols-3 border-soft-b">
@@ -92,7 +123,20 @@ export function Inspector({ graph, trace, selected, onSelect, className }: Inspe
             </Section>
           )}
 
-          {decision && <DecisionSection decision={decision} tier={vertex?.kind === "tier" ? vertex.tier : undefined} />}
+          {decision && (
+            <DecisionSection
+              decision={decision}
+              tier={vertex?.kind === "tier" ? vertex.tier : undefined}
+              title={span.title ?? span.nodeId}
+              forced={span.calls.some((c) => c.model === WHAT_IF_MODEL)}
+              stacked={(whatIf?.forks ?? []).some((f) => f.path !== span.path)}
+              forkable={whatIf?.edges(span.path) ?? []}
+              closest={root && vertex?.kind !== "tier" ? closestFlipText(root, span) : undefined}
+              steady={vertex?.kind !== "tier" ? reask?.steadiness?.find((s) => s.path === span.path) : undefined}
+              onOpenReask={reask?.open}
+              onWhatIf={whatIf ? (edge) => whatIf.run(span.path, edge) : undefined}
+            />
+          )}
 
           {span.error && (
             <Section title="error">
@@ -191,15 +235,44 @@ export function Section({ title, children, actions }: { title: ReactNode; childr
   );
 }
 
-function DecisionSection({ decision, tier }: { decision: Decision; tier?: string }) {
+function DecisionSection({
+  decision,
+  tier,
+  title,
+  forced,
+  stacked,
+  forkable,
+  closest,
+  steady,
+  onOpenReask,
+  onWhatIf,
+}: {
+  decision: Decision;
+  tier?: string;
+  title: string;
+  /** This decision was itself forced by a what-if. */
+  forced: boolean;
+  /** Forking here keeps other decisions this run already forced. */
+  stacked: boolean;
+  forkable: string[];
+  /** How close the call was, as a sentence. */
+  closest?: string;
+  /** This decision across the same input asked again. */
+  steady?: Steadiness;
+  onOpenReask?: (index: number) => void;
+  onWhatIf?: (edge: string) => void;
+}) {
   const threshold = fmtThreshold(decision.threshold);
   return (
     <Section
       title="decision"
       actions={
-        <Badge tone={decision.fallback ? "warn" : "accent"}>
-          {decision.kind} → {decision.taken === "lowConfidence" ? "unsure" : decision.taken}
-        </Badge>
+        <span className="flex items-center gap-1.5">
+          {forced && <Badge tone="warn">forced</Badge>}
+          <Badge tone={decision.fallback ? "warn" : "accent"}>
+            {decision.kind} → {edgeName(decision.taken)}
+          </Badge>
+        </span>
       }
     >
       <p className="text-[13px] leading-relaxed text-ink">{decision.summary}</p>
@@ -220,10 +293,34 @@ function DecisionSection({ decision, tier }: { decision: Decision; tier?: string
               <span className="min-w-0 flex-1 truncate">{e.edge === "lowConfidence" ? "unsure (low confidence)" : e.edge}</span>
               <span className="tabular-nums">{v ?? (e.value === null ? "not tried" : "—")}</span>
               <span className="sr-only">{e.taken ? "taken" : "not taken"}</span>
+              {onWhatIf && forkable.includes(e.edge) && (
+                <WhatIfButton label={edgeName(e.edge)} title={title} stacked={stacked} onClick={() => onWhatIf(e.edge)} />
+              )}
             </li>
           );
         })}
       </ul>
+      {closest && (
+        <p className="mt-2 border-(length:--bw) border-dashed border-dim px-2 py-1 text-[12px] leading-snug text-ink-2">
+          <span className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">closest call</span> · {closest}
+        </p>
+      )}
+      {steady && (
+        <div className={cn("mt-2 border-(length:--bw) border-dashed px-2 py-1", steady.verdict === "held" || steady.verdict === "unasked" ? "border-dim" : "border-warn")}>
+          <span className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">asked again</span>
+          <SteadyLine steady={steady} {...(onOpenReask ? { onOpen: onOpenReask } : {})} className="mt-0.5" />
+          {steady.moved && (
+            <p className="mt-0.5 font-mono text-[10px] text-ink-3 tabular-nums">
+              {steady.flip?.measure} {fmtNum(steady.moved.min)}–{fmtNum(steady.moved.max)} over {steady.moved.n} asks
+            </p>
+          )}
+        </div>
+      )}
+      {forced && (
+        <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">
+          forced: jev&rsquo;s numbers here were bent so the chain would go &ldquo;{edgeName(decision.taken)}&rdquo;.
+        </p>
+      )}
       <p className="mt-2 font-mono text-[10px] text-ink-3">
         metric {decision.metric}
         {threshold && ` · bar ${threshold}`}
@@ -232,6 +329,11 @@ function DecisionSection({ decision, tier }: { decision: Decision; tier?: string
       </p>
     </Section>
   );
+}
+
+function closestFlipText(root: AnyNode, span: Span): string | undefined {
+  const flip = closestFlip(root, span);
+  return flip ? flipText(flip, span.decision?.taken) : undefined;
 }
 
 function CallSection({ call, index, total, decision }: { call: JevCall; index: number; total: number; decision?: Decision }) {
@@ -302,10 +404,25 @@ function CallSection({ call, index, total, decision }: { call: JevCall; index: n
   );
 }
 
-function NotRun({ vertex, trace, graph, onSelect }: { vertex?: Vertex; trace?: Trace; graph: FlowGraph; onSelect?: (id: string | null) => void }) {
+function NotRun({
+  vertex,
+  trace,
+  graph,
+  onSelect,
+  whatIf,
+}: {
+  vertex?: Vertex;
+  trace?: Trace;
+  graph: FlowGraph;
+  onSelect?: (id: string | null) => void;
+  whatIf?: WhatIfControl;
+}) {
   // Which decision routed around this node?
   const incoming = vertex ? graph.edges.find((e) => e.target === vertex.id && e.decidedBy) : undefined;
   const decider = incoming?.decidedBy && trace ? spanAt(trace, incoming.decidedBy.spanPath) : undefined;
+  const road = incoming?.decidedBy;
+  const canTake = Boolean(whatIf && decider?.decision && road && whatIf.edges(road.spanPath).includes(road.key));
+  const stacked = (whatIf?.forks ?? []).filter((f) => f.path !== road?.spanPath).length;
   return (
     <>
       <Section title={trace ? "not reached" : "not run yet"}>
@@ -315,17 +432,33 @@ function NotRun({ vertex, trace, graph, onSelect }: { vertex?: Vertex; trace?: T
             : trace.status === "running"
               ? "hasn't happened yet. the chain is still being pulled."
               : decider?.decision
-                ? `the road not taken. ${decider.title ?? decider.nodeId} went "${decider.decision.taken}" instead of "${incoming!.label}".`
+                ? `the road not taken. ${decider.title ?? decider.nodeId} went "${edgeName(decider.decision.taken)}" instead of "${edgeName(incoming!.label)}".`
                 : "this node didn't run on this trace."}
         </p>
-        {decider && onSelect && (
-          <button
-            type="button"
-            onClick={() => onSelect(decider.path)}
-            className="mt-2 font-mono text-[11px] lowercase text-accent-strong underline decoration-dotted underline-offset-4 hover:text-ink"
-          >
-            inspect {decider.nodeId} →
-          </button>
+        {(canTake || (decider && onSelect)) && (
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            {canTake && road && (
+              <Button variant="accent" size="sm" onClick={() => whatIf!.run(road.spanPath, road.key)}>
+                what if it went “{edgeName(road.key)}”?
+              </Button>
+            )}
+            {decider && onSelect && (
+              <button
+                type="button"
+                onClick={() => onSelect(decider.path)}
+                className="font-mono text-[11px] lowercase text-accent-strong underline decoration-dotted underline-offset-4 hover:text-ink"
+              >
+                inspect {decider.nodeId} →
+              </button>
+            )}
+          </div>
+        )}
+        {canTake && (
+          <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">
+            re-runs as b with {decider!.title ?? decider!.nodeId} forced this way
+            {stacked ? `, on top of the ${stacked} decision${stacked === 1 ? "" : "s"} this run already forced` : ""}. what jev already said is replayed; only the new
+            road gets asked.
+          </p>
         )}
       </Section>
       {vertex?.question && <QuestionDef question={vertex.question} />}
@@ -368,5 +501,20 @@ function QuestionDef({ question }: { question: Question }) {
         )}
       </ul>
     </Section>
+  );
+}
+
+
+function WhatIfButton({ label, title, stacked, onClick }: { label: string; title: string; stacked: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`re-run as b with ${title} forced to “${label}”${stacked ? ", keeping what this run already forced" : ""}`}
+      aria-label={`what if ${title} went “${label}”? re-run it that way`}
+      className="-my-0.5 shrink-0 border-(length:--bw) border-dashed border-ink-3 px-1 text-[10px] leading-4 lowercase text-ink-2 transition-colors duration-(--dur-fast) hover:border-compare hover:bg-surface-2 hover:text-ink"
+    >
+      what if?
+    </button>
   );
 }

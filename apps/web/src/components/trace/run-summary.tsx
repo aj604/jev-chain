@@ -2,13 +2,16 @@
 
 /**
  * The run in one strip: status, duration, requests vs calls (batching made
- * visible), tokens, cost, model. Live while running.
+ * visible), tokens, cost, model. Live while running. Rehearsal runs get a
+ * badge that says the numbers are made up, here and on share links alike.
  */
 import type { Trace } from "jevchain";
 import { ChainLinks } from "@/components/brand/chain-links";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { cn } from "@/lib/cn";
 import { fmtMs, fmtTokens, fmtUsd } from "@/lib/trace/format";
+import { isRehearsal } from "@/lib/trace/rehearsal";
+import { forkLabel, forksOf } from "@/lib/trace/what-if";
 
 const STATUS: Record<Trace["status"], { tone: BadgeTone; label: string }> = {
   running: { tone: "accent", label: "running" },
@@ -30,6 +33,7 @@ export function RunSummary({ trace, now, label, className }: { trace?: Trace; no
   const s = STATUS[trace.status];
   const u = trace.usage;
   const saved = u.calls - u.requests;
+  const forks = forksOf(trace);
   return (
     <div className={cn("flex h-9 min-w-0 items-center gap-x-4 overflow-x-auto px-3 font-mono text-[11px] whitespace-nowrap text-ink-3", className)} aria-live="polite">
       {label && <span className="text-ink-2">{label}</span>}
@@ -37,6 +41,23 @@ export function RunSummary({ trace, now, label, className }: { trace?: Trace; no
         {trace.status === "running" ? <ChainLinks variant="loading" count={3} size={8} label="running" cycleMs={900} /> : null}
         {s.label}
       </Badge>
+      {isRehearsal(trace) && (
+        <span title="jev wasn't asked: every answer came from a hash of the input. the path is real, the judgement isn't.">
+          <Badge tone="warn">rehearsal · made-up answers</Badge>
+        </span>
+      )}
+      {forks.length === 1 && (
+        <span title="one decision was forced down a road it didn't take. earlier answers are replayed; only the new road was asked.">
+          <Badge tone="warn">what if · {forkLabel(forks[0]!)}</Badge>
+        </span>
+      )}
+      {forks.length > 1 && (
+        <span title={`${forks.length} decisions were forced, one what-if on top of another: ${forks.map(forkLabel).join(", then ")}. answers jev already gave are replayed.`}>
+          <Badge tone="warn">
+            what if ×{forks.length} · {forkLabel(forks.at(-1)!)}
+          </Badge>
+        </span>
+      )}
       <Metric k="time" v={fmtMs(trace.durationMs ?? now)} />
       <Metric
         k="requests"

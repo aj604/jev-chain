@@ -7,14 +7,18 @@
  *
  *   const run = useChainRun({ onFinish: (trace, input) => save(trace) });
  *   run.start(chain, input);   // resolves with the final trace
+ *   run.start(chain, input, { rehearse: true });  // no Jev, made-up answers
+ *   run.start(chain, input, { whatIf: { trace, fork } });  // replay `trace`, force one decision
  *   run.stop();                // aborts; trace ends "aborted"
  *   run.trace, run.status, run.issue
  *   run.show(trace, input);    // display a saved trace without running
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createJev, reduceTrace, type AnyNode, type Json, type Trace } from "jevchain";
+import { createJev, createJevClient, reduceTrace, type AnyNode, type Json, type Trace } from "jevchain";
 import { BYOK_HEADER, getByok } from "@/lib/byok";
 import { configIssues } from "@/lib/trace/chain-source";
+import { rehearsalClient } from "@/lib/trace/rehearsal";
+import { whatIfClient, type Fork } from "@/lib/trace/what-if";
 import { traceIssue, type RunIssue } from "@/lib/trace/run-error";
 
 export type RunPhase = "idle" | "running" | "done";
@@ -28,17 +32,24 @@ export interface ChainRunState {
   startedAtPerf?: number;
 }
 
+export interface StartOptions {
+  /** Answer from the local rehearsal client instead of calling Jev. See `lib/trace/rehearsal`. */
+  rehearse?: boolean;
+  /** Replay `trace` and force the decision at `fork.path` down `fork.edge`. See `lib/trace/what-if`. */
+  whatIf?: { trace: Trace; fork: Fork };
+}
+
 export interface UseChainRun extends ChainRunState {
-  start: (node: AnyNode, input: Json) => Promise<Trace | undefined>;
+  start: (node: AnyNode, input: Json, options?: StartOptions) => Promise<Trace | undefined>;
   stop: () => void;
   reset: () => void;
   show: (trace: Trace, input: Json) => void;
 }
 
-/** The browser-side Jev: everything goes through our proxy, BYOK header if set. */
-export function browserJev() {
+/** The browser-side Jev client: everything goes through our proxy, BYOK header if set. */
+export function browserClient() {
   const key = getByok();
-  return createJev({ apiKey: null, baseURL: "/api/jev", path: "", ...(key ? { headers: { [BYOK_HEADER]: key } } : {}) });
+  return createJevClient({ apiKey: null, baseURL: "/api/jev", path: "", ...(key ? { headers: { [BYOK_HEADER]: key } } : {}) });
 }
 
 export function useChainRun(options: { onFinish?: (trace: Trace, input: Json) => void } = {}): UseChainRun {
@@ -53,7 +64,7 @@ export function useChainRun(options: { onFinish?: (trace: Trace, input: Json) =>
   // Abort in-flight work if the component goes away.
   useEffect(() => () => controller.current?.abort(), []);
 
-  const start = useCallback(async (node: AnyNode, input: Json) => {
+  const start = useCallback(async (node: AnyNode, input: Json, options: StartOptions = {}) => {
     controller.current?.abort();
     const ac = new AbortController();
     controller.current = ac;
@@ -62,7 +73,9 @@ export function useChainRun(options: { onFinish?: (trace: Trace, input: Json) =>
     setState({ phase: "running", input, issue: null, startedAtPerf: performance.now() });
 
     try {
-      const result = await browserJev().run(node, input, {
+      const inner = options.rehearse ? rehearsalClient() : browserClient();
+      const jev = createJev(options.whatIf ? whatIfClient(inner, { root: node, ...options.whatIf }) : inner);
+      const result = await jev.run(node, input, {
         signal: ac.signal,
         onEvent: (event) => {
           if (!alive()) return;

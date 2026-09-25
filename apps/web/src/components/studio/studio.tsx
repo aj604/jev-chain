@@ -12,6 +12,31 @@
  * autosaved draft) and draws it on the same canvas. Running from the builder
  * hands that document to the run pipeline as a doc source, flips back to run
  * mode, and the trace paints over the graph you just built.
+ *
+ * Rehearse (`r`, or `?rehearse=1`) swaps Jev for a local client that makes
+ * its answers up (see `lib/trace/rehearsal`): no key, no network, every road
+ * still walkable. Those traces are badged as rehearsals wherever they show.
+ *
+ * What if (from any road not taken in the inspector) re-runs run a's input
+ * as run b with that one decision forced the other way (see
+ * `lib/trace/what-if`), and opens the a-vs-b diff. Forking run b instead
+ * stacks another what-if on top of b's (the chain of forks can be undone one
+ * at a time), which is how you reach decisions that only exist on a road
+ * run a never took.
+ *
+ * Sweep (`w`) runs every sample, your input and any extra lines through the
+ * chain one after another (see `lib/trace/sweep`): the graph shows how many
+ * inputs went down each road, the panel how each decision split them and
+ * which roads none of them reach. Click an input to open its run.
+ *
+ * Ask again (`a`, or from the story) sends run a's input to Jev a few more
+ * times (see `lib/trace/reask`): every decision says whether all the asks
+ * took the same road, and an ask that went elsewhere opens as run b.
+ *
+ * Ask both again (compare mode, from the a-vs-b panel) does that for input a
+ * and then input b (see `lib/trace/split`): the diff then says, per decision,
+ * whether the two inputs stayed apart on every ask or one of them goes both
+ * ways by itself, so a split on one pull isn't read as the edit's doing.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -25,24 +50,41 @@ import { Button, ButtonLink } from "@/components/ui/button";
 import { KbdCombo } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useChainRun, useRunClock } from "@/components/trace/use-chain-run";
+import type { ReaskControl } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import { useHotkey } from "@/lib/hotkeys";
 import { newDocument } from "@/lib/builder/doc-ops";
 import { deleteDraft, renameDraft, type Draft } from "@/lib/builder/drafts";
 import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type ResolvedChain } from "@/lib/trace/chain-source";
 import { parseInput, toEditor } from "@/lib/trace/input";
+import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
+import { answeredReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
+import { sameInput, splitsOf } from "@/lib/trace/split";
+import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
+import type { Fork } from "@/lib/trace/what-if";
 import { ChainPicker } from "./chain-picker";
+import type { CompareAskControl } from "./compare-summary";
 import { ExportMenu } from "./export-menu";
 import { ImportDialog } from "./import-dialog";
 import { InputEditor, type InputValue } from "./input-editor";
 import { IssueActions } from "./issue-actions";
 import { SavedRunsList } from "./saved-runs-list";
+import { SweepPanel, SweepSummary } from "./sweep-panel";
 import { sharePayload, useShare } from "./use-share";
+import { useReask } from "./use-reask";
+import { useSweep } from "./use-sweep";
 import { Workbench, type Target } from "./workbench";
 
 export type StudioMode = "run" | "build";
+
+/** A what-if run: `base` re-run on `input` with `fork` forced. */
+interface WhatIfRequest {
+  base: Trace;
+  input: Json;
+  fork: Fork;
+}
 
 export interface StudioProps {
   /** `?example=` deep link. */
@@ -53,6 +95,8 @@ export interface StudioProps {
   initialSource?: ChainSource;
   /** `?mode=build` deep link. */
   initialMode?: StudioMode;
+  /** `?rehearse=1` deep link: start with rehearsal on. */
+  initialRehearse?: boolean;
 }
 
 function initialSourceFrom(props: StudioProps): ChainSource {
@@ -136,11 +180,22 @@ export function Studio(props: StudioProps) {
   const [inputA, setInputA] = useState<InputValue>(() => (props.initialInput ? editorFromDeepLink(props.initialInput) : sampleEditor(chain, 0)));
   const [inputB, setInputB] = useState<InputValue>(() => sampleEditor(chain, 1));
   const [comparing, setComparing] = useState(false);
+  const [sweeping, setSweeping] = useState(false);
+  const [sweepExtra, setSweepExtra] = useState("");
+  const [rehearsing, setRehearsing] = useState(Boolean(props.initialRehearse));
   const [selected, setSelected] = useState<string | null>(null);
   const [target, setTarget] = useState<Target>("a");
   const [fitSignal, setFitSignal] = useState(0);
   const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  // The what-if behind run b (so a failed one retries as that what-if, not as a plain pull),
+  // and the runs b was forked from, newest last (so a fork of a fork can be undone).
+  const [lastWhatIf, setLastWhatIf] = useState<WhatIfRequest | null>(null);
+  const [forkedFrom, setForkedFrom] = useState<{ trace: Trace; input: Json }[]>([]);
+  const forgetWhatIfs = useCallback(() => {
+    setLastWhatIf(null);
+    setForkedFrom([]);
+  }, []);
 
   // Save finished runs against the chain they ran on.
   const sourceRef = useRef(source);
@@ -160,21 +215,40 @@ export function Studio(props: StudioProps) {
   }, []);
   const runA = useChainRun({ onFinish: onFinishA });
   const runB = useChainRun({ onFinish: onFinishB });
-  const running = runA.phase === "running" || runB.phase === "running";
+  const sweep = useSweep();
+  const reask = useReask();
+  // Compare mode's "ask both again": run b's input, re-sent (run a's re-asks are `reask`'s).
+  const reaskB = useReask();
+  // Bumped by stop: an "ask both" that was stopped during a's asks doesn't go on to spend b's.
+  const askBothSeq = useRef(0);
+  const running =
+    runA.phase === "running" || runB.phase === "running" || sweep.phase === "running" || reask.phase === "running" || reaskB.phase === "running";
   const nowA = useRunClock(runA.phase === "running", runA.startedAtPerf, runA.trace?.durationMs);
   const nowB = useRunClock(runB.phase === "running", runB.startedAtPerf, runB.trace?.durationMs);
 
   const parsedA = parseInput(inputA.text, inputA.mode);
   const parsedB = parseInput(inputB.text, inputB.mode);
   const runnable = building ? (buildResolved.ok ? buildResolved.chain : undefined) : chain;
-  const canRun = Boolean(runnable) && parsedA.ok && (!comparing || parsedB.ok);
+  // Sweep mode (run mode only): the samples, the editor's input if it parses, and the extra lines.
+  const sweepMode = sweeping && !building;
+  const parsedExtra = parseSweepLines(sweepExtra);
+  const queued = sweepInputs(chain?.inputs ?? [], parsedA.ok ? parsedA.value : undefined, parsedExtra.ok ? parsedExtra.values : []);
+  const canRun = sweepMode
+    ? Boolean(chain) && parsedExtra.ok && queued.inputs.length > 0
+    : Boolean(runnable) && parsedA.ok && (!comparing || parsedB.ok);
   const runBlocker = !runnable
     ? building
       ? `fix ${buildIssues.length} broken link${buildIssues.length === 1 ? "" : "s"} first`
       : "this chain doesn't load"
-    : !parsedA.ok || (comparing && !parsedB.ok)
-      ? "the input isn't valid json"
-      : null;
+    : sweepMode
+      ? !parsedExtra.ok
+        ? parsedExtra.error
+        : queued.inputs.length === 0
+          ? "nothing to sweep"
+          : null
+      : !parsedA.ok || (comparing && !parsedB.ok)
+        ? "the input isn't valid json"
+        : null;
 
   // Keep the URL shareable: /studio?example=<slug>, plus &mode=build.
   useEffect(() => {
@@ -182,14 +256,18 @@ export function Studio(props: StudioProps) {
     const slug = building ? builder.forkedFrom : source.kind === "example" ? source.slug : undefined;
     if (slug) params.set("example", slug);
     if (building) params.set("mode", "build");
+    if (rehearsing) params.set("rehearse", "1");
     const url = `/studio${params.size ? `?${params}` : ""}`;
     if (window.location.pathname + window.location.search !== url) window.history.replaceState(window.history.state, "", url);
-  }, [source, building, builder.forkedFrom]);
+  }, [source, building, builder.forkedFrom, rehearsing]);
 
-  const run = useCallback(() => {
+  const pull = useCallback((rehearse: boolean) => {
     if (!runnable || !parsedA.ok || (comparing && !parsedB.ok)) return;
     setSelected(null);
     setActiveSavedId(null);
+    forgetWhatIfs();
+    reask.reset();
+    reaskB.reset();
     if (building) {
       // Run what's on the canvas, then watch it in run mode.
       setSource(buildSource);
@@ -197,20 +275,97 @@ export function Studio(props: StudioProps) {
       setMode("run");
     }
     setLastRunDoc(building ? builder.doc : source.kind === "doc" ? source.doc : null);
-    void runA.start(runnable.node, parsedA.value);
-    if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value);
+    void runA.start(runnable.node, parsedA.value, { rehearse });
+    if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value, { rehearse });
     else runB.reset();
-  }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source]);
+  }, [runnable, parsedA, parsedB, comparing, runA, runB, reask, reaskB, building, buildSource, builder.doc, source, forgetWhatIfs]);
+
+  /** Sweep every queued input through the chain on screen. */
+  const startSweep = useCallback(
+    (rehearse: boolean) => {
+      if (!chain || queued.inputs.length === 0) return;
+      setSelected(null);
+      void sweep.start(chain.node, queued.inputs, { rehearse });
+    },
+    [chain, queued, sweep],
+  );
+
+  const run = useCallback(() => (sweepMode ? startSweep(rehearsing) : pull(rehearsing)), [sweepMode, startSweep, pull, rehearsing]);
+
+  /** From a missing-key dead end: turn rehearsal on and pull again. */
+  const rehearseNow = useCallback(() => {
+    setRehearsing(true);
+    if (sweepMode) startSweep(true);
+    else pull(true);
+  }, [pull, sweepMode, startSweep]);
+
+  /** Run `request` as run b and open the a-vs-b diff. */
+  const startWhatIf = useCallback(
+    (request: WhatIfRequest, rehearse: boolean) => {
+      if (!chain) return;
+      setLastWhatIf(request);
+      setComparing(true);
+      setInputB(toEditor(request.input));
+      setTarget("diff");
+      setSelected(null);
+      void runB.start(chain.node, request.input, { rehearse: rehearse || isRehearsal(request.base), whatIf: { trace: request.base, fork: request.fork } });
+    },
+    [chain, runB],
+  );
+
+  /**
+   * "What if it went the other way?": run the input again as run b, with one
+   * decision forced. Forking run a starts a fresh what-if; forking run b stacks
+   * one more on top of b's, and remembers b so it can be undone.
+   */
+  const whatIf = useCallback(
+    (path: string, edge: string, from: "a" | "b" = "a") => {
+      const run = from === "b" ? runB : runA;
+      const base = run.trace;
+      if (!base || base.status === "running" || run.input === undefined) return;
+      const input = run.input;
+      setForkedFrom((h) => (from === "b" ? [...h, { trace: base, input }] : []));
+      startWhatIf({ base, input, fork: { path, edge } }, rehearsing);
+    },
+    [runA, runB, rehearsing, startWhatIf],
+  );
+
+  /** Put back the b the current what-if was forked from. */
+  const undoWhatIf = useCallback(() => {
+    const prev = forkedFrom.at(-1);
+    if (!prev) return;
+    setForkedFrom((h) => h.slice(0, -1));
+    setLastWhatIf(null);
+    setSelected(null);
+    setInputB(toEditor(prev.input));
+    runB.show(prev.trace, prev.input);
+  }, [forkedFrom, runB]);
+
+  /** Run b's issue buttons: a failed what-if retries (or rehearses) the same fork. */
+  const retryB = useCallback(() => (lastWhatIf ? startWhatIf(lastWhatIf, rehearsing) : run()), [lastWhatIf, startWhatIf, rehearsing, run]);
+  const rehearseB = useCallback(() => {
+    if (!lastWhatIf) return rehearseNow();
+    setRehearsing(true);
+    startWhatIf(lastWhatIf, true);
+  }, [lastWhatIf, startWhatIf, rehearseNow]);
 
   const stop = useCallback(() => {
     runA.stop();
     runB.stop();
-  }, [runA, runB]);
+    sweep.stop();
+    reask.stop();
+    reaskB.stop();
+    askBothSeq.current++;
+  }, [runA, runB, sweep, reask, reaskB]);
 
   const switchTo = useCallback(
     (next: ChainSource) => {
       runA.reset();
       runB.reset();
+      sweep.reset();
+      reask.reset();
+      reaskB.reset();
+      forgetWhatIfs();
       setSource(next);
       const r = resolveChain(next);
       const c = r.ok ? r.chain : undefined;
@@ -220,7 +375,7 @@ export function Studio(props: StudioProps) {
       setActiveSavedId(null);
       setTarget("a");
     },
-    [runA, runB],
+    [runA, runB, sweep, reask, reaskB, forgetWhatIfs],
   );
 
   const pickExample = useCallback((slug: string) => switchTo({ kind: "example", slug }), [switchTo]);
@@ -231,6 +386,9 @@ export function Studio(props: StudioProps) {
       builder.open(options);
       runA.reset();
       runB.reset();
+      reask.reset();
+      reaskB.reset();
+      forgetWhatIfs();
       setLastRunDoc(null);
       setSelected(null);
       setActiveSavedId(null);
@@ -239,7 +397,7 @@ export function Studio(props: StudioProps) {
       if (first !== undefined) setInputA(toEditor(first));
       setMode("build");
     },
-    [builder, runA, runB],
+    [builder, runA, runB, reask, reaskB, forgetWhatIfs],
   );
 
   const loadDoc = useCallback(
@@ -295,26 +453,150 @@ export function Studio(props: StudioProps) {
     (saved: SavedRun) => {
       if (!resolveChain(saved.source).ok) return;
       runB.reset();
+      reask.reset();
+      forgetWhatIfs();
       setSource(saved.source);
       if (saved.source.kind === "doc") setCustomDoc(saved.source.doc);
       setInputA(toEditor(saved.input));
       setComparing(false);
+      setSweeping(false);
       setTarget("a");
       setSelected(null);
       runA.show(saved.trace, saved.input);
       setActiveSavedId(saved.id);
     },
-    [runA, runB],
+    [runA, runB, reask, forgetWhatIfs],
   );
 
   const resetB = runB.reset;
   const toggleCompare = useCallback(() => {
     if (comparing) {
       resetB();
+      forgetWhatIfs();
       setTarget("a");
     }
+    setSweeping(false);
     setComparing(!comparing);
-  }, [comparing, resetB]);
+  }, [comparing, resetB, forgetWhatIfs]);
+
+  /** Sweep mode on/off. Results stay until the chain changes, so you can step into a run and back. */
+  const toggleSweep = useCallback(() => {
+    if (!sweeping && comparing) {
+      resetB();
+      forgetWhatIfs();
+      setComparing(false);
+      setTarget("a");
+    }
+    setSelected(null);
+    setSweeping(!sweeping);
+  }, [sweeping, comparing, resetB, forgetWhatIfs]);
+
+  /** A sweep row → a normal run a, ready for "why did it go here?" and what-ifs. */
+  /** Open one sweep input's run as run a, optionally with a node (e.g. the decision it nearly flipped) selected. */
+  const openSweepRow = useCallback(
+    (row: SweepRow, select?: string) => {
+      if (!row.trace) return;
+      forgetWhatIfs();
+      reask.reset();
+      setInputA(toEditor(row.value));
+      setSweeping(false);
+      setTarget("a");
+      setSelected(select ?? null);
+      setActiveSavedId(null);
+      runA.show(row.trace, row.value);
+    },
+    [runA, reask, forgetWhatIfs],
+  );
+  const sweepTraces = useMemo(() => finishedTraces(sweep.rows), [sweep.rows]);
+  const traffic = useMemo(() => trafficOf(graph, sweepTraces), [graph, sweepTraces]);
+
+  // ── ask again: run a's input, re-sent to jev ───────────────────────────────
+  const reaskOn = reask.phase !== "idle" && reask.base !== undefined && reask.base === runA.trace;
+  // Only re-asks Jev actually answered count; a verdict needs at least one of them.
+  const reaskTraces = useMemo(() => reask.rows.map((r) => r.trace), [reask.rows]);
+  const answered = reaskOn ? answeredReasks(reaskTraces).length : 0;
+  const steadiness = useMemo(
+    () => (reaskOn && chain && reask.base && answered > 0 ? steadinessOf(chain.node, reask.base, reaskTraces) : undefined),
+    [reaskOn, chain, reask.base, reaskTraces, answered],
+  );
+  const reaskDone = reaskOn ? reask.rows.filter((r) => r.trace || r.issue).length : 0;
+  const startReask = useCallback(() => {
+    const base = runA.trace;
+    if (!chain || !base || runA.input === undefined || running || reaskBlocker(base)) return;
+    void reask.start(chain.node, base, runA.input);
+  }, [chain, runA.trace, runA.input, running, reask]);
+  /** An ask that went elsewhere → run b, with the a-vs-b diff open on where they parted. */
+  const openReask = useCallback(
+    (index: number) => {
+      const row = reask.rows[index];
+      if (!row?.trace) return;
+      forgetWhatIfs();
+      setSweeping(false);
+      setComparing(true);
+      setInputB(toEditor(row.value));
+      setTarget("diff");
+      setSelected(null);
+      runB.show(row.trace, row.value);
+    },
+    [reask.rows, runB, forgetWhatIfs],
+  );
+  const reaskControl: ReaskControl = {
+    blocker: running && !reaskOn ? "wait for the run to finish" : reaskBlocker(runA.trace),
+    running: reaskOn && reask.phase === "running",
+    done: reaskDone,
+    answered,
+    total: REASKS,
+    ...(steadiness ? { steadiness } : {}),
+    ...(reaskOn && reask.stoppedBy ? { stoppedBy: reask.stoppedBy } : {}),
+    start: startReask,
+    open: openReask,
+  };
+
+  // ── ask both again: compare mode, a's input and b's input re-sent ──────────
+  const reaskBOn = reaskB.phase !== "idle" && reaskB.base !== undefined && reaskB.base === runB.trace;
+  const reaskBTraces = useMemo(() => reaskB.rows.map((r) => r.trace), [reaskB.rows]);
+  const askingBoth = (reaskOn && reask.phase === "running") || (reaskBOn && reaskB.phase === "running");
+  const bothBlocker = ((): string | null => {
+    const a = runA.trace;
+    const b = runB.trace;
+    if (!a || !b || a.status === "running" || b.status === "running") return "run both first";
+    if (running && !askingBoth) return "wait for the runs to finish";
+    if (sameInput(a.input, b.input)) return "a and b are the same input, so any split between them is jev answering differently. “ask again” on run a asks it more.";
+    const ba = reaskBlocker(a);
+    if (ba) return `run a: ${ba}`;
+    const bb = reaskBlocker(b);
+    return bb ? `run b: ${bb}` : null;
+  })();
+  // Splits only mean something for two real runs of two different inputs.
+  const splits = useMemo(
+    () =>
+      comparing && !building && runA.trace && runB.trace && (reaskOn || reaskBOn) && !reaskBlocker(runA.trace) && !reaskBlocker(runB.trace) && !sameInput(runA.trace.input, runB.trace.input)
+        ? splitsOf(runA.trace, reaskOn ? reaskTraces : [], runB.trace, reaskBOn ? reaskBTraces : [])
+        : undefined,
+    [comparing, building, runA.trace, runB.trace, reaskOn, reaskBOn, reaskTraces, reaskBTraces],
+  );
+  const startAskBoth = useCallback(async () => {
+    const a = runA.trace;
+    const b = runB.trace;
+    if (!chain || !a || !b || runA.input === undefined || runB.input === undefined || running || bothBlocker) return;
+    const mine = ++askBothSeq.current;
+    // a asked already (say with `a`, before b ran)? Its asks count; don't spend them twice.
+    if (!(reaskOn && reask.phase === "done" && !reask.stoppedBy)) {
+      const first = await reask.start(chain.node, a, runA.input);
+      // Stopped by hand, or by something b's asks would hit too (no key, a 429…): don't spend b's.
+      if (askBothSeq.current !== mine || !first || first.stoppedBy || first.rows.some((r) => !r.trace || r.trace.status === "aborted")) return;
+    }
+    await reaskB.start(chain.node, b, runB.input);
+  }, [chain, runA.trace, runA.input, runB.trace, runB.input, running, bothBlocker, reaskOn, reask, reaskB]);
+  const compareAsk: CompareAskControl = {
+    blocker: bothBlocker,
+    running: askingBoth,
+    done: { a: reaskDone, b: reaskBOn ? reaskB.rows.filter((r) => r.trace || r.issue).length : 0 },
+    total: REASKS,
+    ...(splits ? { splits } : {}),
+    ...(reaskBOn && reaskB.stoppedBy ? { stoppedBy: reaskB.stoppedBy } : reaskOn && reask.stoppedBy ? { stoppedBy: reask.stoppedBy } : {}),
+    start: () => void startAskBoth(),
+  };
 
   // What's on screen right now, for share / step-through.
   const view = building ? buildView : chain;
@@ -322,11 +604,11 @@ export function Studio(props: StudioProps) {
   const focus = comparing && target === "b" ? runB : runA;
   const order = useMemo(() => visitOrder(viewGraph, focus.trace), [viewGraph, focus.trace]);
   const { state: shareState, share } = useShare();
-  const canShare = Boolean(focus.trace && focus.trace.status !== "running" && focus.input !== undefined);
+  const canShare = Boolean(!sweepMode && focus.trace && focus.trace.status !== "running" && focus.input !== undefined);
   const doShare = useCallback(() => {
-    if (!focus.trace || focus.input === undefined || focus.trace.status === "running") return;
+    if (sweepMode || !focus.trace || focus.input === undefined || focus.trace.status === "running") return;
     void share(sharePayload(source, focus.input, focus.trace));
-  }, [focus.trace, focus.input, source, share]);
+  }, [sweepMode, focus.trace, focus.input, source, share]);
 
   const sampleValue = parsedA.ok && inputA.text.trim() ? parsedA.value : undefined;
   const build = useBuildMode({
@@ -350,7 +632,10 @@ export function Studio(props: StudioProps) {
     { description: "stop the run / deselect", group: "studio", preventDefault: false },
   );
   useHotkey("b", toggleMode, { description: "switch between run and build mode", group: "studio" });
+  useHotkey("r", () => setRehearsing((r) => !r), { description: "toggle rehearsal (made-up answers, no key)", group: "studio", enabled: !running });
   useHotkey("c", toggleCompare, { description: "toggle compare mode", group: "studio", enabled: !building });
+  useHotkey("w", toggleSweep, { description: "toggle sweep: run every sample and see where each goes", group: "studio", enabled: !building && !running });
+  useHotkey("a", startReask, { description: `ask again: send run a's input to jev ${REASKS} more times`, group: "studio", enabled: !building && !sweepMode && !running });
   useHotkey("s", doShare, { description: "copy a share link to this run", group: "studio", enabled: !building });
   useHotkey("]", () => setSelected((s) => stepSelection(order, s, 1)), { description: "next visited node", group: "studio", enabled: !building });
   useHotkey("[", () => setSelected((s) => stepSelection(order, s, -1)), { description: "previous visited node", group: "studio", enabled: !building });
@@ -408,6 +693,14 @@ export function Studio(props: StudioProps) {
     </div>
   );
 
+  const rehearseToggle = (
+    <Tooltip label={rehearsing ? "rehearsing: made-up answers, no key · r" : "rehearse: run with made-up answers, no key · r"}>
+      <Button variant={rehearsing ? "solid" : "ghost"} size="sm" onClick={() => setRehearsing(!rehearsing)} aria-pressed={rehearsing} disabled={running}>
+        rehearse
+      </Button>
+    </Tooltip>
+  );
+
   const saveNote =
     builder.saveState.state === "saved"
       ? `draft saved ✓${builder.forkedFrom ? ` · fork of ${builder.forkedFrom}` : ""}`
@@ -430,6 +723,7 @@ export function Studio(props: StudioProps) {
       </div>
       <div className="flex items-center gap-1.5">
         {modeSwitch}
+        {rehearseToggle}
         <Tooltip label="live code · e">
           <Button variant={build.codeOpen ? "solid" : "ghost"} size="sm" onClick={() => build.setCodeOpen(!build.codeOpen)} aria-pressed={build.codeOpen}>
             {"</>"} code
@@ -454,6 +748,7 @@ export function Studio(props: StudioProps) {
       </div>
       <div className="flex items-center gap-1">
         {modeSwitch}
+        {rehearseToggle}
         <Tooltip label="compare two inputs · c">
           <Button variant={comparing ? "solid" : "ghost"} size="sm" onClick={toggleCompare} aria-pressed={comparing}>
             <span aria-hidden className="flex gap-0.5">
@@ -463,7 +758,13 @@ export function Studio(props: StudioProps) {
             compare
           </Button>
         </Tooltip>
-        <Tooltip label={canShare ? "copy share link · s" : "run it first"}>
+        <Tooltip label="run every sample and see where each goes · w">
+          <Button variant={sweeping ? "solid" : "ghost"} size="sm" onClick={toggleSweep} aria-pressed={sweeping} disabled={running}>
+            <span aria-hidden className="font-mono text-[10px]">⋔</span>
+            sweep
+          </Button>
+        </Tooltip>
+        <Tooltip label={sweepMode ? "open one input's run to share it" : canShare ? "copy share link · s" : "run it first"}>
           <Button variant="ghost" size="sm" onClick={doShare} disabled={!canShare || shareState === "working"}>
             <span aria-live="polite">
               {shareState === "copied" ? "link copied ✓" : shareState === "error" ? "couldn't copy" : shareState === "working" ? "packing…" : "share"}
@@ -503,7 +804,15 @@ export function Studio(props: StudioProps) {
           <svg aria-hidden viewBox="0 0 10 10" className="size-2.5">
             <path d="M1 0.5 L9.5 5 L1 9.5 z" fill="currentColor" />
           </svg>
-          {comparing ? "pull both" : "pull the chain"}
+          {sweepMode
+            ? `${rehearsing ? "rehearse" : "sweep"} ${queued.inputs.length} input${queued.inputs.length === 1 ? "" : "s"}`
+            : rehearsing
+              ? comparing
+                ? "rehearse both"
+                : "rehearse the chain"
+              : comparing
+                ? "pull both"
+                : "pull the chain"}
           <KbdCombo combo="mod+enter" className="ml-auto" />
         </Button>
       )}
@@ -516,11 +825,11 @@ export function Studio(props: StudioProps) {
   );
 
   const inputSection = railSection(
-    comparing ? "inputs" : "input",
+    comparing || sweepMode ? "inputs" : "input",
     <div className="space-y-4 px-3 pb-3">
       <InputEditor
-        label={comparing ? "input a" : "input"}
-        hideLabel={!comparing}
+        label={comparing ? "input a" : sweepMode ? "your input" : "input"}
+        hideLabel={!comparing && !sweepMode}
         tone={comparing ? "a" : undefined}
         value={inputA}
         onChange={setInputA}
@@ -529,6 +838,30 @@ export function Studio(props: StudioProps) {
         rows={comparing ? 4 : 6}
       />
       {comparing && <InputEditor label="input b" tone="b" value={inputB} onChange={setInputB} samples={view.inputs} disabled={running} rows={4} />}
+      {sweepMode && (
+        <label className="block">
+          <span className="mb-1 flex items-baseline justify-between font-mono text-[10px] lowercase text-ink-3">
+            <span>more inputs · one per line</span>
+            <span className="tabular-nums">
+              {queued.inputs.length} to sweep{queued.dropped > 0 ? ` · ${queued.dropped} over the cap` : ""}
+            </span>
+          </span>
+          <textarea
+            value={sweepExtra}
+            onChange={(e) => setSweepExtra(e.target.value)}
+            disabled={running}
+            rows={4}
+            spellCheck={false}
+            placeholder={'text, or one json value per line\n{"message": "..."}'}
+            aria-invalid={!parsedExtra.ok || undefined}
+            className={cn(
+              "block w-full resize-y border-hard bg-paper px-2 py-1.5 font-mono text-[12px] leading-relaxed text-ink placeholder:text-ink-3 focus:outline-2 focus:outline-offset-2 focus:outline-ink disabled:opacity-60",
+              !parsedExtra.ok && "border-fail",
+            )}
+          />
+          <span className="mt-1 block font-mono text-[10px] leading-relaxed text-ink-3">every sample and your input are swept too, one at a time, up to {MAX_SWEEP}.</span>
+        </label>
+      )}
       {runControls}
     </div>,
     building && build.canSaveSample ? (
@@ -623,6 +956,29 @@ export function Studio(props: StudioProps) {
         issue={showTrace ? runA.issue : null}
         now={nowA}
         {...(comparing && !building ? { compare: { trace: runB.trace, issue: runB.issue, now: nowB } } : {})}
+        {...(sweepMode
+          ? {
+              sweep: {
+                traffic,
+                summary: <SweepSummary rows={sweep.rows} running={sweep.phase === "running"} rehearsed={sweep.rehearsed} />,
+                aside: (
+                  <SweepPanel
+                    graph={graph}
+                    {...(chain ? { root: chain.node } : {})}
+                    rows={sweep.rows}
+                    running={sweep.phase === "running"}
+                    rehearsed={sweep.rehearsed}
+                    {...(sweep.stoppedBy ? { stoppedBy: sweep.stoppedBy } : {})}
+                    queued={queued.inputs}
+                    selected={selected}
+                    onSelect={setSelected}
+                    onOpen={openSweepRow}
+                    issueAction={<IssueActions issue={sweep.stoppedBy ?? null} onRetry={run} onRehearse={rehearseNow} />}
+                  />
+                ),
+              },
+            }
+          : {})}
         target={target}
         onTarget={setTarget}
         selected={selected}
@@ -630,14 +986,15 @@ export function Studio(props: StudioProps) {
         fitSignal={fitSignal}
         header={header}
         rail={rail}
-        issueAction={<IssueActions issue={runA.issue} onRetry={run} />}
-        issueActionB={<IssueActions issue={runB.issue} onRetry={run} />}
+        issueAction={<IssueActions issue={runA.issue} onRetry={run} onRehearse={rehearseNow} />}
+        issueActionB={<IssueActions issue={runB.issue} onRetry={retryB} onRehearse={rehearseB} />}
+        {...(building ? {} : { onWhatIf: whatIf, reask: reaskControl, ...(comparing ? { compareAsk } : {}), ...(forkedFrom.length > 0 && runB.phase !== "running" ? { onUndoWhatIf: undoWhatIf } : {}) })}
         {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
       />
       {building && build.portals}
       <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onLoad={loadDoc} starter={() => (building ? builder.doc : documentOf(view))} />
       <span className="sr-only" aria-live="polite">
-        {runA.phase === "running" ? "run started" : runA.trace ? `run ${runA.trace.status}` : ""}
+        {sweep.phase === "running" ? "sweep started" : runA.phase === "running" ? "run started" : runA.trace ? `run ${runA.trace.status}` : ""}
       </span>
     </>
   );
