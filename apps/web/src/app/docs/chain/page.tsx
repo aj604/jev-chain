@@ -26,7 +26,7 @@ const MISMATCH_ERROR = `error TS2345: Argument of type 'StepNode<unknown, number
         Types of property 'out' are incompatible.
           Type 'number' is not assignable to type 'string'.`;
 
-const TYPES = `import type { InputOf, OutputOf } from "jevchain";
+const TYPES = `import { ask, noul, step, type InputOf, type OutputOf } from "jevchain";
 
 type In = InputOf<typeof pipeline>;   // string
 type Out = OutputOf<typeof pipeline>; // "hide" | "show"
@@ -48,7 +48,7 @@ const desk = route("desk", {
   branches: { moderation: moderate, support: supportFlow },
 });`;
 
-const DESCRIBE = `import { describe } from "jevchain";
+const DESCRIBE = `import { chain, describe } from "jevchain";
 
 // A copy with a title/description for UIs; the original is untouched.
 const understand = describe(chain("understand", clean, read), {
@@ -77,7 +77,7 @@ export default function ChainPage() {
         <C>chain(a, b)</C> only compiles when <C>a</C>&apos;s output fits <C>b</C>&apos;s input. Get it wrong and
         you find out in your editor, not in production at 3am:
       </P>
-      <CompileError code={MISMATCH} line={4} error={MISMATCH_ERROR} file="oops.ts" />
+      <CompileError code={MISMATCH} line={3} error={MISMATCH_ERROR} file="oops.ts" />
       <P>
         The message is long but the last line is the one that matters. (The <C>[io]</C> property is the phantom field
         that carries the types. It&apos;s never set at runtime.)
