@@ -295,7 +295,10 @@ function withConfidence(answer: Answer, c: number | undefined, doubt: boolean): 
 function setConfidence(answer: Answer, c: number): Answer {
   if (answer.type !== "noul") return { ...answer, confidence: c };
   const side = answer.noul >= 0.5 ? 1 : -1;
-  return { ...answer, noul: round(0.5 + (side * c) / 2) };
+  let noul = round(0.5 + (side * c) / 2);
+  // |noul − 0.5| × 2 can land a hair under c in floating point (0.7 → 0.3999…); nudge outward.
+  if (Math.abs(noul - 0.5) * 2 < c) noul = round(noul + side * 0.001);
+  return { ...answer, noul };
 }
 
 function domain(q: Question): [number, number] {

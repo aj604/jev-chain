@@ -183,6 +183,21 @@ describe("whatIfClient", () => {
     }
   });
 
+  it("forces noul cascade tiers whose bar doesn't survive floating point (0.4, 0.2)", async () => {
+    const root = cascade("nouls", {
+      tiers: [tier("t1", { ask: noul("Sure?"), minConfidence: 0.4 }), tier("t2", { ask: noul("Really sure?"), minConfidence: 0.2 })],
+      fallback: emit("human", { id: "human" }),
+    });
+    for (const input of ["a", "b", "c", "d", "e", "f", "g", "h"]) {
+      const a = await base(root, input);
+      for (const edge of forkableEdges(root, a, "$")) {
+        const b = await fork(root, a, "$", edge);
+        expect(spanAt(b, "$")!.decision!.taken, `${input} → ${edge}`).toBe(edge);
+        expect(forkOf(b)?.edge).toBe(edge);
+      }
+    }
+  });
+
   it("offers nothing on a running trace, a node that didn't decide, or a road already taken", async () => {
     const a = await base(triage, "hello");
     expect(forkableEdges(triage, a, "$/0")).toEqual([]);
