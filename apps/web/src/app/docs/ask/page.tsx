@@ -105,8 +105,9 @@ export default function AskPage() {
       <List>
         <Li>
           Templates are paths only: <C>{"{{input.user.name}}"}</C>, <C>{"{{input.items.0}}"}</C>. No expressions, no{" "}
-          <C>eval</C>. Besides <C>input</C> you can reach <C>run</C> (the run&apos;s original input) and{" "}
-          <C>results</C> (finished nodes&apos; outputs, by id).
+          <C>eval</C>. Besides <C>input</C> you can reach <C>run</C> (the run&apos;s original input),{" "}
+          <C>results</C> (finished nodes&apos; outputs, by id) and <C>answers</C> (Jev&apos;s answers so far, by node
+          id). See <A href="/docs/step-and-emit#templates">templates</A>.
         </Li>
         <Li>
           Whatever you end up with is coerced into something Jev accepts: <C>null</C> and <C>undefined</C> become{" "}
@@ -163,9 +164,11 @@ export default function AskPage() {
       </List>
       <H3 id="ask-vs-also-ask">ask vs. alsoAsk</H3>
       <P>
-        Routes and gates take <C>alsoAsk</C>: extra questions that ride in the same call and are recorded in the trace
-        but don&apos;t affect the branch. Use it for &ldquo;I&apos;ll want to know this later&rdquo; signals like
-        sentiment. When you need to <em>use</em> the answers downstream, use an <C>ask</C>.
+        Routes and gates take <C>alsoAsk</C>: extra questions that ride in the same call but don&apos;t affect the
+        branch. Use it for &ldquo;I&apos;ll want to know this later&rdquo; signals like sentiment. Later is fine: the
+        branch and everything after it read them as <C>{"{{answers.<route>.<key>}}"}</C> or <C>ctx.answers</C> (see{" "}
+        <A href="/docs/route#also-ask">route</A>). Reach for an <C>ask</C> instead when the answers <em>are</em> the
+        point, and should be the node&apos;s output that the next node receives.
       </P>
       <DocExample
         id="group-chat-drama"
