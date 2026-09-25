@@ -39,6 +39,15 @@ export interface ExplainInput {
   wouldHaveBeen?: string;
   /** The low-confidence bar that triggered a fallback. */
   lowConfidenceBelow?: number;
+  /**
+   * For a gate that took "unsure": which trigger(s) fired. `margin` when the
+   * value landed within it of the bar; `minConfidence` (with the `confidence`
+   * it was compared to) when Jev wasn't sure enough. Omitted, the sentence
+   * just says it was close.
+   */
+  unsureBecause?: { margin?: number; minConfidence?: number; confidence?: number };
+  /** For a cascade: each tier's `minConfidence`, by tier id, so escalations can say what they missed. */
+  tierBars?: Readonly<Record<string, number>>;
 }
 
 /** One sentence explaining a decision. */
@@ -90,28 +99,67 @@ function describeBar(t: Decision["threshold"]): string {
   return "the bar";
 }
 
+/**
+ * The edge of a gate's bar that a value is measured against: the only one
+ * there is, or for a min–max window the edge it missed or, inside, the edge
+ * it's closest to. The runtime's `unsure` margin and the gate's sentence both
+ * use it, so "right next to the bar" always means the bar it was next to.
+ */
+export function nearestEdge(value: number, t: Decision["threshold"]): { bar: number; side: "min" | "max" } | undefined {
+  const { min, max } = t ?? {};
+  if (min !== undefined && max !== undefined) {
+    if (value < min) return { bar: min, side: "min" };
+    if (value > max) return { bar: max, side: "max" };
+    return value - min <= max - value ? { bar: min, side: "min" } : { bar: max, side: "max" };
+  }
+  if (min !== undefined) return { bar: min, side: "min" };
+  if (max !== undefined) return { bar: max, side: "max" };
+  return undefined;
+}
+
 function explainGate(d: ExplainInput): string {
   const what = describeValue(d);
   const bar = describeBar(d.threshold);
-  const ref = d.threshold?.min ?? d.threshold?.max;
-  if (d.taken === "unsure") {
-    return `Too close to call: ${what}, right next to ${bar}${
-      d.confidence !== undefined ? ` (confidence ${num(d.confidence)})` : ""
-    }, so it took the "unsure" path.`;
+  const edge = nearestEdge(d.value, d.threshold);
+  const window = d.threshold?.min !== undefined && d.threshold?.max !== undefined;
+  if (d.taken === "unsure") return explainUnsure(d, what, bar, edge, window);
+  const by = edge ? ` ${clearance(d.value, edge.bar)}` : "";
+  if (d.taken === "then") {
+    const how = window ? "inside" : edge?.side === "max" ? "under" : "clearing";
+    return `Passed: ${what}, ${how} ${bar}${by}.`;
   }
-  const ceilingOnly = d.threshold?.min === undefined && d.threshold?.max !== undefined;
-  const by = ref !== undefined ? ` ${clearance(d.value, ref)}` : "";
-  if (d.taken === "then") return `Passed: ${what}, ${ceilingOnly ? "under" : "clearing"} ${bar}${by}.`;
   const tail = d.edges.some((e) => e.edge === "otherwise") ? `took "otherwise"` : "the run stopped here";
-  return `Blocked: ${what}, ${ceilingOnly ? "over" : "short of"} ${bar}${by}, so ${tail}.`;
+  return `Blocked: ${what}, ${edge?.side === "max" ? "over" : "short of"} ${bar}${by}, so ${tail}.`;
+}
+
+function explainUnsure(d: ExplainInput, what: string, bar: string, edge: ReturnType<typeof nearestEdge>, window: boolean): string {
+  const why = d.unsureBecause;
+  const conf = d.confidence !== undefined ? ` (confidence ${num(d.confidence)})` : "";
+  if (!why || (why.margin === undefined && why.minConfidence === undefined)) {
+    return `Too close to call: ${what}, right next to ${bar}${conf}, so it took the "unsure" path.`;
+  }
+  const reasons: string[] = [];
+  if (why.margin !== undefined && edge) {
+    const place = window ? `the ${num(edge.bar)} ${edge.side === "min" ? "floor" : "ceiling"} of ${bar}` : bar;
+    const gap = Math.abs(d.value - edge.bar);
+    const where = gap === 0 ? `exactly on ${place}` : `${num(gap)} ${d.value < edge.bar ? "under" : "over"} ${place}`;
+    reasons.push(`${where}, inside the ${num(why.margin)} margin`);
+  }
+  if (why.minConfidence !== undefined) {
+    const c = why.confidence ?? d.confidence;
+    reasons.push(`${c !== undefined ? `confidence ${num(c)}` : "confidence"} was under the ${num(why.minConfidence)} minimum`);
+  }
+  const verdict = why.margin !== undefined ? "Too close to call" : "Too unsure to call";
+  return `${verdict}: ${what}, ${reasons.join(", and ")}${why.minConfidence === undefined ? conf : ""}, so it took the "unsure" path.`;
 }
 
 function explainCascade(d: ExplainInput): string {
   const tiers = d.edges.filter((e) => e.edge !== "fallback");
   const tried = tiers.filter((e) => e.value !== null);
   const skipped = tried.filter((e) => !e.taken);
+  const needed = (tier: string) => (d.tierBars?.[tier] !== undefined ? `, needed ${num(d.tierBars[tier]!)}` : "");
   const escalations = skipped.length
-    ? `Escalated past ${skipped.map((e) => `"${e.edge}" (${num(e.value!)})`).join(", ")}; `
+    ? `Escalated past ${skipped.map((e) => `"${e.edge}" (${num(e.value!)}${needed(e.edge)})`).join(", ")}; `
     : "";
   if (d.taken === "fallback") {
     return `${escalations}no tier was confident enough, so it handed off to the fallback.`;
