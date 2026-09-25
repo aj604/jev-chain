@@ -16,6 +16,7 @@ import {
   step,
   tier,
   traceFromEvents,
+  type JevClient,
   type TraceEvent,
 } from "../src/index.js";
 import { fakeFetch } from "./helpers";
@@ -429,6 +430,37 @@ describe("stopping a run", () => {
     expect(events.at(-1)!.type).toBe("run:end");
     expect((await s.result).status).toBe("aborted");
     expect(slow.calls).toHaveLength(1);
+  });
+
+  /** How long a `break` on the first event of `kind` takes to leave the loop. */
+  const breakOn = async (s: AsyncIterable<TraceEvent>, stopAt: (e: TraceEvent) => boolean) => {
+    let t0 = 0;
+    for await (const e of s) {
+      if (stopAt(e)) {
+        t0 = Date.now();
+        break;
+      }
+    }
+    return Date.now() - t0;
+  };
+
+  it("leaves the loop at once even when a parallel's join ignores the signal", async () => {
+    const p = parallel("p", {
+      branches: { a: emit("a"), b: emit("b") },
+      join: () => new Promise(() => {}), // never settles, never looks at ctx.signal
+    });
+    const s = jevWith(fakeFetch()).stream(p, "x");
+    expect(await breakOn(s, (e) => e.type === "span:end" && e.path === "$/b")).toBeLessThan(50);
+    expect((await s.result).status).toBe("aborted");
+  });
+
+  it("leaves the loop at once even when a custom client ignores the signal", async () => {
+    const deaf: JevClient = { model: "fake", usdPerMillionTokens: 0, ask: () => new Promise(() => {}) };
+    const s = createJev(deaf).stream(three, "x");
+    expect(await breakOn(s, (e) => e.type === "span:start" && e.span.nodeId === "a")).toBeLessThan(50);
+    const res = await s.result;
+    expect(res.status).toBe("aborted");
+    expect(res.trace.error).toMatchObject({ code: "aborted", nodeId: "a", path: "$/0" });
   });
 
   it("doesn't sleep through an abort between step retries", async () => {

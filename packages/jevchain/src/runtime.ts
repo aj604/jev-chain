@@ -313,12 +313,16 @@ class Runner {
 
   private async callJev(path: string, state: Entry, questions: Questions, model: string | undefined, signal: AbortSignal, tier?: string): Promise<AskResult> {
     const start = this.now();
-    const r = await this.opts.jev.ask(state, questions, {
-      ...(model ? { model } : {}),
+    // Raced against the signal: a custom client that ignores it can't hold up a stopped run.
+    const r = await untilAborted(
+      this.opts.jev.ask(state, questions, {
+        ...(model ? { model } : {}),
+        signal,
+        onRetry: ({ attempt, delayMs, error }) =>
+          this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(error), source: "jev" } }),
+      }),
       signal,
-      onRetry: ({ attempt, delayMs, error }) =>
-        this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(error), source: "jev" } }),
-    });
+    );
     const call: JevCall = {
       id: `call_${++this.callSeq}`,
       model: r.model,
@@ -444,7 +448,9 @@ class Runner {
       const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (rejected) throw rejected.reason;
       const results = Object.fromEntries(entries.map(([key], i) => [key, (settled[i] as PromiseFulfilledResult<unknown>).value]));
-      return node.join ? await node.join(results, input, this.ctx(path, signal)) : results;
+      if (!node.join) return results;
+      const join = node.join;
+      return await untilAborted(Promise.resolve().then(() => join(results, input, this.ctx(path, signal))), signal);
     } finally {
       signal.removeEventListener("abort", onAbort);
     }
@@ -560,6 +566,35 @@ function either(a: AbortSignal, b: AbortSignal): AbortSignal {
   a.addEventListener("abort", onA, { once: true });
   b.addEventListener("abort", onB, { once: true });
   return controller.signal;
+}
+
+/**
+ * `work`, or a rejection with the signal's reason as soon as it aborts, so
+ * user code (a join, a custom client) that ignores the signal can't keep a
+ * stopped run from settling. Until the signal fires it's just `work`.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.catch(() => {}); // it may still reject later; nobody's listening
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
 }
 
 /** Waits `ms`, or rejects with the signal's reason as soon as it aborts. */
