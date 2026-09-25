@@ -4,11 +4,14 @@ import { editTarget, selectionAfterRemove, vertexFor } from "./selection";
 import {
   allIds,
   canDuplicate,
+  canMove,
   documentIssues,
   duplicateAt,
   getAt,
   insertAfterPath,
+  insertBeforePath,
   isPlaceholder,
+  moveStep,
   newDocument,
   removeAt,
   subtreeSize,
@@ -179,6 +182,46 @@ describe("structure ops", () => {
     const wrapped = insertAfterPath(root(), "$/0/a", template("gate"));
     expect(wrapped.path).toBe("$/0/a/1");
     expect(getAt(wrapped.root, wrapped.path)!.kind).toBe("gate");
+  });
+
+  it("inserts before: into chains, at a chain's front, or wrapping (root included)", () => {
+    const inChain = insertBeforePath(root(), "$/1", template("emit"));
+    expect(inChain.path).toBe("$/1");
+    expect((inChain.root.steps as NodeJson[]).map((s) => s.kind)).toEqual(["route", "emit", "parallel"]);
+    const first = insertBeforePath(root(), "$/0", template("gate"));
+    expect(first.path).toBe("$/0");
+    expect(getAt(first.root, "$/1")!.id).toBe("r");
+    const front = insertBeforePath(root(), "$", template("ask"));
+    expect(front.path).toBe("$/0");
+    expect((front.root.steps as NodeJson[]).map((s) => s.kind)).toEqual(["ask", "route", "parallel"]);
+    const wrapped = insertBeforePath(root(), "$/0/a", template("gate"));
+    expect(wrapped.path).toBe("$/0/a/0");
+    expect(getAt(wrapped.root, "$/0/a")!.kind).toBe("chain");
+    expect(getAt(wrapped.root, "$/0/a/1")!.id).toBe("ea");
+    const lone = template("emit");
+    const wrappedRoot = insertBeforePath(lone, "$", template("ask"));
+    expect(wrappedRoot.root.kind).toBe("chain");
+    expect(getAt(wrappedRoot.root, "$/1")).toBe(lone);
+    for (const r of [inChain, first, front, wrapped, wrappedRoot]) expect(documentIssues(withRoot(newDocument(), r.root))).toEqual([]);
+  });
+
+  it("moves chain steps, subtree and all, and refuses to fall off the ends", () => {
+    const r = insertAfterPath(root(), "$/1", template("emit")).root; // [route, parallel, emit]
+    expect(canMove(r, "$/0", -1)).toBe(false);
+    expect(canMove(r, "$/0", 1)).toBe(true);
+    expect(canMove(r, "$/2", 1)).toBe(false);
+    expect(canMove(r, "$/0/a", 1)).toBe(false); // a route branch, not a chain step
+    expect(canMove(r, "$", 1)).toBe(false);
+    const down = moveStep(r, "$/0", 1)!;
+    expect(down.path).toBe("$/1");
+    expect((down.root.steps as NodeJson[]).map((s) => s.kind)).toEqual(["parallel", "route", "emit"]);
+    expect(getAt(down.root, "$/1")).toBe(getAt(r, "$/0")); // the subtree moves intact
+    const up = moveStep(down.root, "$/2", -2)!;
+    expect(up.path).toBe("$/0");
+    expect((up.root.steps as NodeJson[]).map((s) => s.kind)).toEqual(["emit", "parallel", "route"]);
+    expect(moveStep(r, "$/0", -1)).toBeNull();
+    expect(moveStep(r, "$/0/a", 1)).toBeNull();
+    expect(moveStep(moveStep(r, "$/1", 1)!.root, "$/2", -1)!.root).toEqual(r); // round-trips
   });
 
   it("duplicates into chains and parallels with fresh ids", () => {

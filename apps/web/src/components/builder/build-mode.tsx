@@ -20,11 +20,14 @@ import { useHotkey } from "@/lib/hotkeys";
 import {
   allIds,
   canDuplicate,
+  canMove,
   childEdges,
   duplicateAt,
   getAt,
   insertAfterPath,
+  insertBeforePath,
   isPlaceholder,
+  moveStep,
   removeAt,
   replaceKind,
   subtreeSize,
@@ -44,6 +47,8 @@ import { DocumentEditor, PropertyEditor, type Update } from "./property-editor";
 import type { Builder } from "./use-builder";
 
 const GROUP = "builder";
+
+type Menu = "add" | "before" | "kind";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
@@ -78,7 +83,7 @@ export function useBuildMode({
   const { doc, commit, handlers } = builder;
   const root = doc.root as unknown as NodeJson;
   const target = useMemo(() => editTarget(graph, root, selected), [graph, root, selected]);
-  const [menu, setMenu] = useState<"add" | "kind" | null>(null);
+  const [menu, setMenu] = useState<Menu | null>(null);
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [codeOpen, setCodeOpen] = useState(false);
@@ -96,6 +101,30 @@ export function useBuildMode({
       setSelected(vertexFor(r.root, r.path));
       setMenu(null);
       setCtx(null);
+    },
+    [target, root, commitRoot, setSelected],
+  );
+
+  const addBefore = useCallback(
+    (kind: BuilderKind) => {
+      const path = target?.path ?? "$";
+      const taken = allIds(root);
+      const r = insertBeforePath(root, path, template(kind, taken), taken);
+      commitRoot(r.root);
+      setSelected(vertexFor(r.root, r.path));
+      setMenu(null);
+      setCtx(null);
+    },
+    [target, root, commitRoot, setSelected],
+  );
+
+  const move = useCallback(
+    (delta: number) => {
+      if (!target) return;
+      const r = moveStep(root, target.path, delta);
+      if (!r) return;
+      commitRoot(r.root);
+      setSelected(vertexFor(r.root, r.path, target.tier));
     },
     [target, root, commitRoot, setSelected],
   );
@@ -168,10 +197,31 @@ export function useBuildMode({
   );
 
   const dupOk = Boolean(target && canDuplicate(root, target.path));
+  const upOk = Boolean(target && canMove(root, target.path, -1));
+  const downOk = Boolean(target && canMove(root, target.path, 1));
 
   // ── hotkeys ──────────────────────────────────────────────────────────────
   const on = { group: GROUP, enabled: active };
   useHotkey("n", () => setMenu("add"), { ...on, description: "add a node after the selection" });
+  useHotkey("shift+n", () => setMenu("before"), { ...on, description: "add a node before the selection" });
+  useHotkey(
+    "alt+up",
+    (e) => {
+      if (isTyping(e)) return;
+      e.preventDefault();
+      move(-1);
+    },
+    { ...on, preventDefault: false, description: "move the selected step earlier in its chain" },
+  );
+  useHotkey(
+    "alt+down",
+    (e) => {
+      if (isTyping(e)) return;
+      e.preventDefault();
+      move(1);
+    },
+    { ...on, preventDefault: false, description: "move the selected step later in its chain" },
+  );
   useHotkey("k", () => target && setMenu("kind"), { ...on, description: "change the selected node's kind" });
   useHotkey("d", duplicate, { ...on, description: "duplicate the selected node (chains, parallels)" });
   useHotkey("backspace", remove, { ...on, description: "delete the selected node" });
@@ -234,6 +284,7 @@ export function useBuildMode({
         menu={menu}
         setMenu={setMenu}
         addAfter={addAfter}
+        addBefore={addBefore}
         changeKind={changeKind}
         duplicate={duplicate}
         dupOk={dupOk}
@@ -274,6 +325,9 @@ export function useBuildMode({
             </div>
           ) : (
             <div className="flex flex-wrap gap-1 pt-0.5">
+              <ActionChip onClick={() => setMenu("before")} keys="⇧n">
+                + add before
+              </ActionChip>
               <ActionChip onClick={() => setMenu("add")} keys="n">
                 + add after
               </ActionChip>
@@ -284,6 +338,16 @@ export function useBuildMode({
                 <ActionChip onClick={duplicate} keys="d">
                   duplicate
                 </ActionChip>
+              )}
+              {(upOk || downOk) && (
+                <>
+                  <ActionChip onClick={() => move(-1)} keys="⌥↑" disabled={!upOk} label="move earlier in the chain">
+                    ↑ earlier
+                  </ActionChip>
+                  <ActionChip onClick={() => move(1)} keys="⌥↓" disabled={!downOk} label="move later in the chain">
+                    ↓ later
+                  </ActionChip>
+                </>
               )}
               <ActionChip onClick={remove} keys="⌫" danger>
                 delete
@@ -332,9 +396,16 @@ export function useBuildMode({
           }
           kind={target.node.kind}
           onAdd={addAfter}
+          onAddBefore={addBefore}
           onChangeKind={changeKind}
           onClose={() => setCtx(null)}
           actions={[
+            ...(upOk || downOk
+              ? [
+                  { label: "move earlier", hint: "⌥↑", onSelect: () => move(-1), disabled: !upOk },
+                  { label: "move later", hint: "⌥↓", onSelect: () => move(1), disabled: !downOk },
+                ]
+              : []),
             { label: "duplicate", hint: "d", onSelect: duplicate, disabled: !dupOk },
             { label: "delete", hint: "⌫", onSelect: remove, danger: true },
           ]}
@@ -354,13 +425,29 @@ function getAtSafe(root: NodeJson, path: string) {
   }
 }
 
-function ActionChip({ onClick, keys, danger, children }: { onClick: () => void; keys: string; danger?: boolean; children: ReactNode }) {
+function ActionChip({
+  onClick,
+  keys,
+  danger,
+  disabled,
+  label,
+  children,
+}: {
+  onClick: () => void;
+  keys: string;
+  danger?: boolean;
+  disabled?: boolean;
+  label?: string;
+  children: ReactNode;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 border-soft px-1.5 font-mono text-[10.5px] lowercase transition-colors duration-(--dur-fast)",
+        "inline-flex h-6 items-center gap-1.5 border-soft px-1.5 font-mono text-[10.5px] lowercase transition-colors duration-(--dur-fast) disabled:pointer-events-none disabled:opacity-35",
         danger ? "text-ink-2 hover:border-fail hover:bg-fail-wash hover:text-fail" : "text-ink-2 hover:border-(--line) hover:bg-surface-2 hover:text-ink",
       )}
     >
@@ -375,6 +462,7 @@ function Toolbar({
   menu,
   setMenu,
   addAfter,
+  addBefore,
   changeKind,
   duplicate,
   dupOk,
@@ -382,9 +470,10 @@ function Toolbar({
   builder,
 }: {
   target: ReturnType<typeof editTarget>;
-  menu: "add" | "kind" | null;
-  setMenu: (m: "add" | "kind" | null) => void;
+  menu: Menu | null;
+  setMenu: (m: Menu | null) => void;
   addAfter: (k: BuilderKind) => void;
+  addBefore: (k: BuilderKind) => void;
   changeKind: (k: BuilderKind) => void;
   duplicate: () => void;
   dupOk: boolean;
@@ -396,12 +485,19 @@ function Toolbar({
   return (
     <div className="flex items-stretch border-hard bg-paper shadow-[3px_3px_0_0_var(--ink)]" role="toolbar" aria-label="edit the chain">
       <div className="relative">
-        <Tooltip label={target ? "add a node after this one · n" : "add a node at the end · n"}>
-          <button type="button" className={cn(btn, "text-ink", menu === "add" && "bg-accent text-accent-ink hover:bg-accent")} onClick={() => setMenu(menu === "add" ? null : "add")} aria-haspopup="menu" aria-expanded={menu === "add"}>
+        <Tooltip label={target ? "add a node after this one · n (before · ⇧n)" : "add a node at the end · n (start · ⇧n)"}>
+          <button
+            type="button"
+            className={cn(btn, "text-ink", (menu === "add" || menu === "before") && "bg-accent text-accent-ink hover:bg-accent")}
+            onClick={() => setMenu(menu === "add" || menu === "before" ? null : "add")}
+            aria-haspopup="menu"
+            aria-expanded={menu === "add" || menu === "before"}
+          >
             <span aria-hidden className="text-[13px] leading-none">+</span> add
           </button>
         </Tooltip>
         {menu === "add" && <KindMenu title={target ? "add after this" : "add at the end"} onPick={addAfter} onClose={() => setMenu(null)} />}
+        {menu === "before" && <KindMenu title={target ? "add before this" : "add at the start"} onPick={addBefore} onClose={() => setMenu(null)} />}
       </div>
       <div className="relative border-soft-l">
         <Tooltip label="change kind · k">
@@ -437,9 +533,10 @@ function Toolbar({
 
 function HotkeyCheatsheet() {
   const rows: [string, string][] = [
-    ["n", "add a node after"],
+    ["n / ⇧n", "add a node after / before"],
     ["k", "change kind"],
     ["d", "duplicate"],
+    ["⌥↑ / ⌥↓", "move a step earlier / later"],
     ["⌫", "delete"],
     ["⌘z / ⇧⌘z", "undo / redo"],
     ["e", "live code"],
