@@ -183,11 +183,15 @@ function exercise(doc: ChainDocument) {
   // every data-flow fix makes a document the json tab still takes, that jevchain likes no less, and that clears its warning
   for (const w of warnings) {
     for (const f of w.fixes) {
-      const fixed = withRoot(doc, updateAt(root, w.path, f.node));
+      const fixed = withRoot(doc, updateAt(root, f.at ?? w.path, f.node));
       if (!readDocumentEdit(JSON.stringify(fixed), doc).ok) throw new Error(`fix "${f.label}" at ${w.path} made a document the json tab refuses`);
       const after = resolveChain({ kind: "doc", doc: fixed, handlers: {} });
       if (!after.ok && after.issues.length > list.length) throw new Error(`fix "${f.label}" at ${w.path} added issues: ${after.issues.join("; ")}`);
-      if (flowWarnings(fixed.root as unknown as NodeJson).some((x) => x.path === w.path && x.tier === w.tier && x.rule === w.rule)) throw new Error(`fix "${f.label}" at ${w.path} didn't clear its warning`);
+      const fixedRoot = fixed.root as unknown as NodeJson;
+      // a fix that reshapes the chain moves what follows into the flagged slot, so it's the flagged node that must be clear
+      const was = getAt(root, w.path)!.id;
+      if (flowWarnings(fixedRoot).some((x) => x.path === w.path && x.tier === w.tier && x.rule === w.rule && getAt(fixedRoot, x.path)?.id === was)) throw new Error(`fix "${f.label}" at ${w.path} didn't clear its warning`);
+      if (f.select && !getAt(fixedRoot, f.select)) throw new Error(`fix "${f.label}" at ${w.path} selects ${f.select}, which isn't there`);
     }
   }
 
@@ -246,10 +250,26 @@ const surprises = () =>
     { name: "surprises" },
   );
 
+/** The same newcomer after taking the "read the run input" fixes: every step's output is thrown away by the next. */
+const deadEnds = () =>
+  toJSON(
+    chain(
+      "dead-ends",
+      ask("read", { questions: { vibe: choice("?", ["good", "bad"]) } }),
+      gate("spam", { ask: noul("spam?"), state: "{{run.message}}", pass: { max: 0.5 }, then: route("inner", { ask: choice("?", ["a", "b"]), state: "{{run}}", branches: { a: emit("A", { id: "ia" }), b: emit("B", { id: "ib" }) } }), otherwise: emit("blocked", { id: "blocked" }) }),
+      parallel("both", { branches: { x: ask("px", { state: "{{run}}", questions: { q: noul("?") } }), y: emit("y", { id: "py" }) } }),
+      cascade("tiers", { tiers: [{ id: "t1", ask: noul("?"), minConfidence: 0.8, state: "{{run}}" }], fallback: emit("f", { id: "cf" }) }),
+      route("tone", { ask: choice("tone?", ["calm", "mad"]), state: "{{run}}", branches: { calm: emit("calm", { id: "rc" }), mad: emit("mad", { id: "rm" }) } }),
+      emit({ done: true, who: "{{run.user}}" }, { id: "done" }),
+    ),
+    { name: "dead ends" },
+  );
+
 const docs = [
   ...examples.map((e) => ({ slug: e.slug, doc: toJSON(e.chain, { name: e.title, description: e.tagline, examples: e.inputs.map((i) => i.value as Json) }) })),
   { slug: "kitchen-sink", doc: kitchenSink() },
   { slug: "surprises", doc: surprises() },
+  { slug: "dead-ends", doc: deadEnds() },
 ];
 
 describe("the json tab's gate, against every example mutated every way", () => {
@@ -262,6 +282,17 @@ describe("the json tab's gate, against every example mutated every way", () => {
       "$/1/y/then missing-field",
       "$/2/t1 implicit-state",
       "$/2/t2 missing-field",
+    ]);
+  });
+
+  it("the dead-ends fixture really is full of unused outputs", () => {
+    const ws = flowWarnings(deadEnds().root as unknown as NodeJson);
+    expect(ws.map((w) => `${w.path} ${w.rule} ${w.fixes.length}`)).toEqual([
+      "$/0 unused-output 1",
+      "$/1 unused-output 2",
+      "$/2 unused-output 1",
+      "$/3 unused-output 1",
+      "$/4 unused-output 1",
     ]);
   });
 

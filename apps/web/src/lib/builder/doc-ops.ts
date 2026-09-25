@@ -204,7 +204,8 @@ export function template(kind: BuilderKind, taken: Set<string> = new Set()): Nod
     case "emit":
       return { kind, id, value: "hello from {{input}}" };
     case "chain":
-      return { kind, id, steps: [template("ask", taken), leaf("done", taken)] };
+      // the emit reads the ask's answer, so the starter shows data moving down a chain (and the ask isn't wasted)
+      return { kind, id, steps: [template("ask", taken), leaf("the vibe: {{input.vibe.choice}}", taken)] };
   }
 }
 
