@@ -17,7 +17,8 @@ import type { ResolvedChain } from "@/lib/trace/chain-source";
 import type { RunIssue } from "@/lib/trace/run-error";
 import type { Traffic } from "@/lib/trace/sweep";
 import { forkableEdges, forksOf } from "@/lib/trace/what-if";
-import { CompareSummary, diffHeadline } from "./compare-summary";
+import { hasReasks, splitHeadline } from "@/lib/trace/split";
+import { CompareSummary, type CompareAskControl } from "./compare-summary";
 
 export type Target = "a" | "b" | "diff";
 
@@ -62,6 +63,8 @@ export interface WorkbenchProps {
   sweep?: { traffic: Traffic; aside: ReactNode; summary: ReactNode };
   /** "Ask again" for run a: shown in its story and inspector (see `lib/trace/reask`). */
   reask?: ReaskControl;
+  /** "Ask both again" in compare mode: both inputs re-sent to Jev (see `lib/trace/split`). */
+  compareAsk?: CompareAskControl;
 }
 
 const TIMELINE_MIN = 72;
@@ -92,6 +95,7 @@ export function Workbench({
   onUndoWhatIf,
   sweep,
   reask,
+  compareAsk,
 }: WorkbenchProps) {
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
@@ -113,7 +117,8 @@ export function Workbench({
       forks: forksOf(focusTrace),
     };
   }, [onWhatIf, showB, focusTrace, chain.node]);
-  const head = comparing && trace && compare.trace && trace.status !== "running" && compare.trace.status !== "running" ? diffHeadline(trace, compare.trace) : null;
+  const head = comparing && trace && compare.trace && trace.status !== "running" && compare.trace.status !== "running" ? splitHeadline(trace, compare.trace, compareAsk?.splits && hasReasks(compareAsk.splits) ? compareAsk.splits : undefined)
+      : null;
 
   const onPointerDown = (e: React.PointerEvent) => {
     drag.current = { y: e.clientY, h: timelineH };
@@ -162,7 +167,7 @@ export function Workbench({
               <span className="size-2 border-hard bg-accent" />
               <span className="size-2 border-hard bg-compare" />
             </span>
-            <span className="truncate">{head.text}</span>
+            <span className="truncate" title={head.text}>{head.text}</span>
           </button>
         )}
         <div className="relative h-[62vh] min-h-[22rem] lg:h-auto lg:min-h-0 lg:flex-1">
@@ -271,7 +276,7 @@ export function Workbench({
           </div>
         )}
         {comparing && target === "diff" && !selected ? (
-          <CompareSummary a={trace} b={compare.trace} onSelect={select} canFork={Boolean(onWhatIf)} onUndo={onUndoWhatIf} />
+          <CompareSummary a={trace} b={compare.trace} onSelect={select} canFork={Boolean(onWhatIf)} onUndo={onUndoWhatIf} {...(compareAsk ? { ask: compareAsk } : {})} />
         ) : selected ? (
           <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} root={chain.node} {...(reask && !showB ? { reask } : {})} />
         ) : (
