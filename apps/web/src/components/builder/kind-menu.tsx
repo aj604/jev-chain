@@ -72,7 +72,10 @@ function useOutside(ref: React.RefObject<HTMLElement | null>, onClose: () => voi
   }, [ref]);
 }
 
-function KindList({ onPick, current, title }: { onPick: (k: BuilderKind) => void; current?: BuilderKind; title: string }) {
+/** What picking each kind would do to the selection ("keeps the question · drops 2 nodes"), shown instead of the blurb. */
+export type KindHints = Partial<Record<BuilderKind, { text: string; loses: boolean }>>;
+
+function KindList({ onPick, current, title, hints }: { onPick: (k: BuilderKind) => void; current?: BuilderKind; title: string; hints?: KindHints }) {
   return (
     <div role="menu" aria-label={title}>
       <div className="border-soft-b px-3 py-1.5 font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">{title}</div>
@@ -90,7 +93,11 @@ function KindList({ onPick, current, title }: { onPick: (k: BuilderKind) => void
           </span>
           <span className="min-w-0 flex-1">
             <span className="block font-mono text-[11.5px] leading-4 text-ink">{kind}</span>
-            <span className="block truncate text-[11px] leading-4 text-ink-3">{blurb}</span>
+            {hints?.[kind]?.text && kind !== current ? (
+              <span className={cn("block text-[10.5px] leading-[1.35]", hints[kind]!.loses ? "text-warn" : "text-ink-3")}>{hints[kind]!.text}</span>
+            ) : (
+              <span className="block truncate text-[11px] leading-4 text-ink-3">{blurb}</span>
+            )}
           </span>
           <Kbd className="shrink-0">{key}</Kbd>
         </button>
@@ -100,7 +107,21 @@ function KindList({ onPick, current, title }: { onPick: (k: BuilderKind) => void
 }
 
 /** A dropdown kind picker under a trigger. */
-export function KindMenu({ title, onPick, onClose, current, className }: { title: string; onPick: (k: BuilderKind) => void; onClose: () => void; current?: BuilderKind; className?: string }) {
+export function KindMenu({
+  title,
+  onPick,
+  onClose,
+  current,
+  hints,
+  className,
+}: {
+  title: string;
+  onPick: (k: BuilderKind) => void;
+  onClose: () => void;
+  current?: BuilderKind;
+  hints?: KindHints;
+  className?: string;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useMenuKeys(
     (k) => {
@@ -111,7 +132,7 @@ export function KindMenu({ title, onPick, onClose, current, className }: { title
   useOutside(ref, onClose);
   return (
     <div ref={ref} className={cn("fade-up absolute top-[calc(100%+4px)] left-0 z-40 w-64 border-hard bg-paper shadow-[4px_4px_0_0_var(--ink)]", className)}>
-      <KindList title={title} onPick={onPick} current={current} />
+      <KindList title={title} onPick={onPick} current={current} hints={hints} />
     </div>
   );
 }
@@ -156,6 +177,7 @@ export function ContextMenu({
   onAdd,
   onAddBefore,
   onChangeKind,
+  kindHints,
   actions,
   onClose,
 }: {
@@ -165,6 +187,7 @@ export function ContextMenu({
   onAdd: (k: BuilderKind) => void;
   onAddBefore: (k: BuilderKind) => void;
   onChangeKind: (k: BuilderKind) => void;
+  kindHints?: KindHints;
   actions: ContextAction[];
   onClose: () => void;
 }) {
@@ -210,6 +233,7 @@ export function ContextMenu({
             title={sub === "add" ? "add after" : sub === "before" ? "add before" : "change kind to"}
             onPick={sub === "add" ? onAdd : sub === "before" ? onAddBefore : onChangeKind}
             current={sub === "kind" ? kind : undefined}
+            hints={sub === "kind" ? kindHints : undefined}
           />
         </>
       ) : (
