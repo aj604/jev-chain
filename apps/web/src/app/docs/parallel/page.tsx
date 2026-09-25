@@ -36,10 +36,10 @@ const BATCH_TRACE = `// trace.spans[…].calls[0], for each of the three tribuna
 { "calls": 3, "requests": 1, "inputTokens": 212, "outputTokens": 3, "costUsd": 0.0000089 }`;
 
 const NO_BATCH = `// Off for a whole client…
-const jev = createJev({ batch: false });
+const unbatched = createJev({ batch: false });
 
 // …tuned…
-const jev = createJev({ batch: { windowMs: 5, maxQuestions: 32 } });
+const tuned = createJev({ batch: { windowMs: 5, maxQuestions: 32 } });
 
 // …or off for one direct call.
 await jev.ask(state, questions, { batch: false });`;

@@ -38,9 +38,10 @@ const RESULT = `const next = step("verdict", (r: OutputOf<typeof decide>) => {
   return r.answer.choice === "reply" ? "Reply." : "Leave them on read.";
 });`;
 
-const RESULT_TYPE = `type CascadeResult<Tiers, F> =
-  | { resolvedBy: "tier"; tier: string; answer: AnswerOf<Tiers[number]["ask"]> }
-  | { resolvedBy: "fallback"; output: F };`;
+const RESULT_TYPE = `/** What a cascade resolves to: which rung answered, and its answer. */
+export type CascadeResult<T extends readonly Tier[], F> =
+  | { readonly resolvedBy: "tier"; readonly tier: string; readonly answer: TierAnswers<T>["answer"] }
+  | { readonly resolvedBy: "fallback"; readonly output: F };`;
 
 export default function CascadePage() {
   return (
