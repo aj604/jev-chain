@@ -80,6 +80,23 @@ chain("c", ask("first", { questions }), ask("second", { questions, state: "{{res
 
 That covers unknown roots (`{{inptu}}`) and `results.<id>` of a missing id, of an ancestor or the node itself (results are set when a node finishes), or of a later step. (A `parallel` sibling is allowed: a fast one may have finished.) A hole that comes up empty at runtime, like `{{input.mesage}}`, renders as `""` and leaves a note on its span's `logs`, so a blank state is never a mystery.
 
+### Answers
+
+`{{answers.<id>.<key>}}` (and `ctx.answers` in a step or join) is what Jev said to a node, set the moment its call comes back rather than when the node finishes. So a branch can read the route or gate above it, including its `alsoAsk`, without paying for a second call:
+
+```ts
+route("desk", {
+  ask: choice("Which team?", ["billing", "bug"]),
+  alsoAsk: { angry: noul("Is the customer angry?") },
+  branches: {
+    billing: emit({ team: "billing", angry: "{{answers.desk.angry.noul}}", sure: "{{answers.desk.decision.confidence}}" }),
+    bug: step("file-bug", (ticket: string, ctx) => file(ticket, { angry: ctx.answers.desk?.angry })),
+  },
+});
+```
+
+The keys are an ask's question keys, a route or gate's `decision` plus its `alsoAsk` keys, and a cascade's tier ids (tiers that ran). The same checks apply before a run: the id has to ask Jev, its call has to have come back by then (an ancestor route, gate or cascade, anything `results` could read, or, in a cascade tier's `state`, the tiers before it), and the key has to be one it asks.
+
 ## Running
 
 ```ts
