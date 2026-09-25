@@ -41,6 +41,12 @@ const nextConfig: NextConfig = {
   transpilePackages: ["jevchain", "jevchain-examples"],
   turbopack: { root: repoRoot },
   outputFileTracingRoot: repoRoot,
+  // GoatCounter's script, served first-party so blockers keyed on its domain
+  // don't drop it. The count endpoint is a route handler (app/who) instead,
+  // because it needs the visitor's IP forwarded.
+  async rewrites() {
+    return [{ source: "/who.js", destination: "https://gc.zgo.at/count.js" }];
+  },
 };
 
 export default nextConfig;

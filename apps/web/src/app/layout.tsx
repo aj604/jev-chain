@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
+import { Analytics } from "@/components/shell/analytics";
 import { SiteFooter } from "@/components/shell/site-footer";
 import { SiteNav } from "@/components/shell/site-nav";
 import { ShellProvider } from "@/components/shell/shell-provider";
@@ -51,6 +52,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           </main>
           <SiteFooter />
         </ShellProvider>
+        <Analytics />
       </body>
     </html>
   );
