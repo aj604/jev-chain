@@ -35,7 +35,7 @@ import {
   type StepNode,
 } from "./nodes";
 import { confidenceOf, type Answer, type Entry, type Json, type Questions } from "./questions";
-import { renderJson, renderTemplate } from "./template";
+import { renderJson, renderTemplate, type OnMissing } from "./template";
 import { reduceTrace, type Decision, type JevCall, type RunStatus, type SpanStatus, type Trace, type TraceEvent } from "./trace";
 import { chainIssues, DECISION_KEY } from "./validate";
 
@@ -256,7 +256,7 @@ class Runner {
       case "step":
         return this.execStep(node, input, path, signal);
       case "emit":
-        return Promise.resolve(this.execEmit(node, input));
+        return Promise.resolve(this.execEmit(node, input, path));
       case "chain":
         return this.execChain(node, input, path, signal);
     }
@@ -268,8 +268,14 @@ class Runner {
     return { input, run: this.runInput, results: this.results };
   }
 
-  private resolveState(spec: StateSpec<unknown> | undefined, input: unknown): Entry {
-    const raw = spec === undefined ? input : typeof spec === "function" ? spec(input) : renderTemplate(spec, this.scope(input));
+  /** Notes an empty template hole on the span, so a blank state or emit isn't a mystery. */
+  private onMissing(path: string): OnMissing {
+    return (hole) =>
+      this.emit({ type: "log", path, log: { at: this.now(), message: `Template hole "{{${hole}}}" was empty: nothing at ${hole}`, data: { hole } } });
+  }
+
+  private resolveState(spec: StateSpec<unknown> | undefined, input: unknown, path: string): Entry {
+    const raw = spec === undefined ? input : typeof spec === "function" ? spec(input) : renderTemplate(spec, this.scope(input), this.onMissing(path));
     return toEntry(raw);
   }
 
@@ -332,13 +338,13 @@ class Runner {
   // --- node kinds -------------------------------------------------------------
 
   private async execAsk(node: AskNode, input: unknown, path: string, signal: AbortSignal) {
-    const r = await this.callJev(path, this.resolveState(node.state, input), node.questions, node.model, signal);
+    const r = await this.callJev(path, this.resolveState(node.state, input, path), node.questions, node.model, signal);
     return r.answers;
   }
 
   private async execRoute(node: RouteNode, input: unknown, path: string, signal: AbortSignal) {
     const questions = { [DECISION_KEY]: node.ask, ...node.alsoAsk };
-    const r = await this.callJev(path, this.resolveState(node.state, input), questions, node.model, signal);
+    const r = await this.callJev(path, this.resolveState(node.state, input, path), questions, node.model, signal);
     const answer = r.answers[DECISION_KEY] as Answer & { type: "choice" };
     const low = node.lowConfidence && answer.confidence < node.lowConfidence.below;
     const taken = low ? "lowConfidence" : answer.choice;
@@ -361,7 +367,7 @@ class Runner {
 
   private async execGate(node: GateNode, input: unknown, path: string, signal: AbortSignal) {
     const questions = { [DECISION_KEY]: node.ask, ...node.alsoAsk };
-    const r = await this.callJev(path, this.resolveState(node.state, input), questions, node.model, signal);
+    const r = await this.callJev(path, this.resolveState(node.state, input, path), questions, node.model, signal);
     const answer = r.answers[DECISION_KEY] as Answer;
     const { value, metric } = gateValue(answer, node.pass.label);
     const { min, max } = node.pass;
@@ -426,7 +432,7 @@ class Runner {
     const edges: Decision["edges"] = node.tiers.map((t) => ({ edge: t.id, value: null, taken: false }));
     edges.push({ edge: "fallback", value: null, taken: false });
     for (const [i, tier] of node.tiers.entries()) {
-      const r = await this.callJev(path, this.resolveState(tier.state, input), { [DECISION_KEY]: tier.ask }, tier.model, signal, tier.id);
+      const r = await this.callJev(path, this.resolveState(tier.state, input, path), { [DECISION_KEY]: tier.ask }, tier.model, signal, tier.id);
       const answer = r.answers[DECISION_KEY] as Answer;
       const confidence = confidenceOf(answer);
       edges[i] = { edge: tier.id, value: confidence, taken: confidence >= tier.minConfidence };
@@ -494,8 +500,8 @@ class Runner {
     });
   }
 
-  private execEmit(node: EmitNode, input: unknown) {
-    return renderJson(node.value, this.scope(input));
+  private execEmit(node: EmitNode, input: unknown, path: string) {
+    return renderJson(node.value, this.scope(input), this.onMissing(path));
   }
 
   private async execChain(node: ChainNode, input: unknown, path: string, signal: AbortSignal) {
