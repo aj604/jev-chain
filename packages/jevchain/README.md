@@ -114,7 +114,13 @@ const code = toTypeScript(doc);                                 // back to build
 
 ## Errors
 
-Everything extends `JevChainError` with a stable `code`: `JevAuthError`, `JevValidationError`, `JevRateLimitError` (`retryAfterMs`), `JevServerError`, `JevTimeoutError`, `JevConnectionError`, `JevAbortError`, `JevResponseError`, `ChainConfigError` (with a list of `issues`), and `NodeError` (with the failing `nodeId`).
+Everything extends `JevChainError` with a stable `code`: `JevAuthError`, `JevValidationError`, `JevRateLimitError` (`retryAfterMs`), `JevServerError`, `JevTimeoutError`, `JevConnectionError`, `JevAbortError`, `JevResponseError`, `ChainConfigError` (with a list of `issues`), `NodeError` (with the failing `nodeId` and its span `path`), and `CancelledError`.
+
+When a run fails, the trace says who broke and who was just caught up in it:
+
+- `trace.error.path` is the span where the failure started. Every errored span's `error.path` points there too, so ancestors link down to the culprit.
+- When one `parallel` branch fails, its siblings are aborted and their spans close with `code: "cancelled"` (`Cancelled because "boom" failed at $/boom`), not with a copy of the sibling's error.
+- A caller's abort or the run deadline stays `aborted` / `timeout` on the spans it interrupted; a halting branch still halts.
 
 ## License
 
