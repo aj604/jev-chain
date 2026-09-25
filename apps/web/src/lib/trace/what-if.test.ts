@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ask, cascade, chain, choice, createJev, emit, gate, noul, route, score, spanAt, tier, type AnyNode, type Json, type JevClient, type Trace } from "jevchain";
 import { examples } from "jevchain-examples";
 import { isRehearsal, rehearsalClient } from "./rehearsal";
+import { decodeShare, encodeShare } from "./share";
 import { forkableEdges, forkOf, isWhatIf, WHAT_IF_MODEL, whatIfClient } from "./what-if";
 
 /** The rehearsal client, counting what reaches it. */
@@ -87,6 +88,29 @@ describe("whatIfClient", () => {
     expect(b.spans.flatMap((s) => s.calls).filter((c) => c.model === WHAT_IF_MODEL)).toHaveLength(1);
     expect(forkOf(b)).toMatchObject({ path: TRIAGE, nodeId: "triage", edge });
     expect(forkOf(a)).toBeUndefined();
+  });
+
+  it("asks the inner client about the road that was never walked", async () => {
+    let tried = 0;
+    for (const input of ["the app crashes on save", "refund please", "hello", "my invoice is wrong", "it's on fire"]) {
+      const a = await base(triage, input);
+      if (spanAt(a, TRIAGE)!.decision!.taken === "bug") continue;
+      const { client, asked } = counted();
+      const b = await fork(triage, a, TRIAGE, "bug", client);
+      // The gate under "bug" never ran in a, so the inner client (here: rehearsal) answers it, and only it.
+      expect(asked).toEqual(["decision"]);
+      expect(spanAt(b, `${TRIAGE}/bug`)!.calls[0]!.model).not.toBe(WHAT_IF_MODEL);
+      tried++;
+    }
+    expect(tried).toBeGreaterThan(0);
+  });
+
+  it("still explains itself after a trip through a share link", async () => {
+    const a = await base(triage, "refund please");
+    const edge = forkableEdges(triage, a, TRIAGE)[0]!;
+    const b = await fork(triage, a, TRIAGE, edge);
+    const back = await decodeShare(await encodeShare({ v: 1, chain: { example: "x" }, input: b.input, trace: b }));
+    expect(forkOf(back.trace)).toEqual(forkOf(b));
   });
 
   it("walks a gate to then, otherwise and unsure, and to halt when there's no otherwise", async () => {
