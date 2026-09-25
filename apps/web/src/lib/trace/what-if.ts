@@ -19,8 +19,15 @@
  *   inner client, so what happens after the fork is real judgement.
  *
  * The runtime, decisions and trace are all real; the one made-up answer is
- * labelled in `trace.models`, and `forkOf(trace)` finds it again, so a what-if
+ * labelled in `trace.models`, and `forksOf(trace)` finds it again, so a what-if
  * trace explains itself wherever it's shown (saved runs, share links).
+ *
+ * A what-if trace can be forked again: pass it as `trace`. Its own bent answer
+ * is replayed like any other, so the earlier fork holds and the new one is
+ * added on top (`forksOf` lists both), and a decision that only exists on the
+ * new road can be forced too:
+ *
+ *   const c = await createJev(whatIfClient(inner, { root: chain, trace: b, fork: { path: "$/repair/0", edge: "otherwise" } })).run(chain, b.input);
  */
 import {
   confidenceOf,
@@ -65,12 +72,36 @@ export function isWhatIf(trace: Pick<Trace, "models"> | undefined): boolean {
   return Boolean(trace?.models.includes(WHAT_IF_MODEL));
 }
 
-/** Where a what-if trace was forced, and which way. */
-export function forkOf(trace: Trace | undefined): { path: string; nodeId: string; title?: string; edge: string } | undefined {
-  if (!trace || !isWhatIf(trace)) return undefined;
-  const span = trace.spans.find((s) => s.calls.some((c) => c.model === WHAT_IF_MODEL));
-  if (!span?.decision) return undefined;
-  return { path: span.path, nodeId: span.nodeId, ...(span.title ? { title: span.title } : {}), edge: span.decision.taken };
+/** One decision a what-if forced: where, and which way. */
+export interface ForcedDecision {
+  path: string;
+  nodeId: string;
+  title?: string;
+  edge: string;
+}
+
+/**
+ * Every decision a what-if trace was forced at, in the order the run reached
+ * them. A what-if of a what-if keeps its parent's forks (their bent answers
+ * are replayed), so this is the whole chain of "what ifs" that got here,
+ * minus any fork whose road no longer runs.
+ */
+export function forksOf(trace: Trace | undefined): ForcedDecision[] {
+  if (!trace || !isWhatIf(trace)) return [];
+  return trace.spans
+    .filter((s) => s.decision && s.calls.some((c) => c.model === WHAT_IF_MODEL))
+    .map((s) => ({ path: s.path, nodeId: s.nodeId, ...(s.title ? { title: s.title } : {}), edge: s.decision!.taken }));
+}
+
+/** An edge as people say it: the route's `lowConfidence` road is "unsure". */
+export const edgeName = (edge: string) => (edge === "lowConfidence" ? "unsure" : edge);
+
+/** "Front desk → paranormal". */
+export const forkLabel = (f: ForcedDecision) => `${f.title ?? f.nodeId} → ${edgeName(f.edge)}`;
+
+/** The first decision a what-if trace was forced at. See `forksOf` for all of them. */
+export function forkOf(trace: Trace | undefined): ForcedDecision | undefined {
+  return forksOf(trace)[0];
 }
 
 /**
@@ -119,7 +150,8 @@ export function whatIfClient(inner: JevClient, { root, trace, fork }: WhatIfOpti
         const steer = steers.splice(s, 1)[0]!;
         const base = replay ? fromCall<Q>(replay) : await inner.ask(state, questions, options);
         const answers = { ...base.answers, [DECISION]: steer.rewrite(base.answers[DECISION] as Answer) };
-        return { ...base, answers: answers as AskResult<Q>["answers"], model: WHAT_IF_MODEL, requestId: WHAT_IF_MODEL };
+        const source = sourceModel(base);
+        return { ...base, answers: answers as AskResult<Q>["answers"], model: WHAT_IF_MODEL, requestId: source ? `${WHAT_IF_MODEL}:${source}` : WHAT_IF_MODEL };
       }
       if (replay) return fromCall<Q>(replay);
       return inner.ask(state, questions, options);
@@ -328,8 +360,23 @@ function fromCall<Q extends Questions>(call: JevCall): AskResult<Q> {
     costUsd: 0,
     latencyMs: 0,
     attempts: 1,
-    requestId: `replay:${call.requestId ?? call.id}`,
+    requestId: replayId(call.requestId ?? call.id),
   };
+}
+
+const replayId = (id: string) => (id.startsWith("replay:") ? id : `replay:${id}`);
+
+/**
+ * Who really answered the call that got bent: the model the steered call
+ * reports is always `"what-if"`, so its requestId carries the original
+ * (`what-if:rehearsal`, `what-if:jev-…`). That's how a rehearsal stays a
+ * rehearsal after its only call was forced, however many forks deep.
+ */
+function sourceModel(result: Pick<AskResult<Questions>, "model" | "requestId">): string | undefined {
+  if (result.model !== WHAT_IF_MODEL) return result.model;
+  const id = result.requestId ?? "";
+  const at = id.lastIndexOf(`${WHAT_IF_MODEL}:`);
+  return at >= 0 ? id.slice(at + WHAT_IF_MODEL.length + 1) || undefined : undefined;
 }
 
 const round = (v: number) => Math.round(v * 1000) / 1000;

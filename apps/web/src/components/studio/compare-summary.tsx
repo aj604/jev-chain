@@ -3,7 +3,8 @@
 import { decisions, diffTraces, type Decision, type Trace } from "jevchain";
 import { cn } from "@/lib/cn";
 import { fmtMetric, fmtMs, fmtUsd, previewJson } from "@/lib/trace/format";
-import { forkOf } from "@/lib/trace/what-if";
+import { edgeName, forksOf } from "@/lib/trace/what-if";
+import { ForkList } from "@/components/trace/fork-list";
 
 /** One-line verdict on two runs of the same chain. */
 export function diffHeadline(a: Trace, b: Trace): { text: string; diverged: boolean; path?: string } {
@@ -43,7 +44,23 @@ function Side({ tone, decision, missing }: { tone: "a" | "b"; decision?: Decisio
   );
 }
 
-export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSelect?: (id: string) => void }) {
+/**
+ * `canFork` says run b can be forked again (the studio, not a share page);
+ * `onUndo` puts back the b this one was forked from, when there is one.
+ */
+export function CompareSummary({
+  a,
+  b,
+  onSelect,
+  canFork,
+  onUndo,
+}: {
+  a?: Trace;
+  b?: Trace;
+  onSelect?: (id: string) => void;
+  canFork?: boolean;
+  onUndo?: () => void;
+}) {
   if (!a || !b) {
     return (
       <p className="px-4 py-6 text-[13px] leading-relaxed text-ink-2">
@@ -56,15 +73,35 @@ export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSel
   const paths = [...new Set([...da.map((d) => d.path), ...db.map((d) => d.path)])];
   const done = a.status !== "running" && b.status !== "running";
   const head = done ? diffHeadline(a, b) : null;
-  const fork = forkOf(b);
+  const forks = forksOf(b);
 
   return (
     <div className="px-4 py-4">
       <h2 className="mb-3 font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">a vs b</h2>
-      {fork && (
+      {forks.length === 1 && (
         <p className="mb-3 text-[12.5px] leading-relaxed text-ink-2">
-          b is a what-if: same input, with <span className="font-mono text-[11px] text-ink">{fork.title ?? fork.nodeId}</span> forced to go &ldquo;
-          {fork.edge === "lowConfidence" ? "unsure" : fork.edge}&rdquo;. before it, b replays a&rsquo;s answers; after it, the new road was asked fresh.
+          b is a what-if: same input, with <span className="font-mono text-[11px] text-ink">{forks[0]!.title ?? forks[0]!.nodeId}</span> forced to go &ldquo;
+          {edgeName(forks[0]!.edge)}&rdquo;. before it, b replays a&rsquo;s answers; after it, the new road was asked fresh.
+        </p>
+      )}
+      {forks.length > 1 && (
+        <div className="mb-3 text-[12.5px] leading-relaxed text-ink-2">
+          <p>b is a what-if of a what-if: same input, with {forks.length} decisions forced in turn:</p>
+          <ForkList forks={forks} onSelect={onSelect} className="my-1.5" />
+          <p>everything jev already said is replayed; only roads no run had walked were asked fresh.</p>
+        </div>
+      )}
+      {forks.length > 0 && canFork && b.status !== "running" && (
+        <p className="mb-3 font-mono text-[10.5px] leading-relaxed text-ink-3">
+          open run b and pick any decision to force it too; what b already forced stays forced.
+          {onUndo && (
+            <>
+              {" "}
+              <button type="button" onClick={onUndo} className="text-ink-2 lowercase underline decoration-dotted underline-offset-4 hover:text-ink">
+                ↩ undo the last what-if
+              </button>
+            </>
+          )}
         </p>
       )}
       {head && (

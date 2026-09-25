@@ -19,7 +19,10 @@
  *
  * What if (from any road not taken in the inspector) re-runs run a's input
  * as run b with that one decision forced the other way (see
- * `lib/trace/what-if`), and opens the a-vs-b diff.
+ * `lib/trace/what-if`), and opens the a-vs-b diff. Forking run b instead
+ * stacks another what-if on top of b's (the chain of forks can be undone one
+ * at a time), which is how you reach decisions that only exist on a road
+ * run a never took.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -42,6 +45,7 @@ import { parseInput, toEditor } from "@/lib/trace/input";
 import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
+import type { Fork } from "@/lib/trace/what-if";
 import { ChainPicker } from "./chain-picker";
 import { ExportMenu } from "./export-menu";
 import { ImportDialog } from "./import-dialog";
@@ -52,6 +56,13 @@ import { sharePayload, useShare } from "./use-share";
 import { Workbench, type Target } from "./workbench";
 
 export type StudioMode = "run" | "build";
+
+/** A what-if run: `base` re-run on `input` with `fork` forced. */
+interface WhatIfRequest {
+  base: Trace;
+  input: Json;
+  fork: Fork;
+}
 
 export interface StudioProps {
   /** `?example=` deep link. */
@@ -153,6 +164,14 @@ export function Studio(props: StudioProps) {
   const [fitSignal, setFitSignal] = useState(0);
   const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  // The what-if behind run b (so a failed one retries as that what-if, not as a plain pull),
+  // and the runs b was forked from, newest last (so a fork of a fork can be undone).
+  const [lastWhatIf, setLastWhatIf] = useState<WhatIfRequest | null>(null);
+  const [forkedFrom, setForkedFrom] = useState<{ trace: Trace; input: Json }[]>([]);
+  const forgetWhatIfs = useCallback(() => {
+    setLastWhatIf(null);
+    setForkedFrom([]);
+  }, []);
 
   // Save finished runs against the chain they ran on.
   const sourceRef = useRef(source);
@@ -203,6 +222,7 @@ export function Studio(props: StudioProps) {
     if (!runnable || !parsedA.ok || (comparing && !parsedB.ok)) return;
     setSelected(null);
     setActiveSavedId(null);
+    forgetWhatIfs();
     if (building) {
       // Run what's on the canvas, then watch it in run mode.
       setSource(buildSource);
@@ -213,7 +233,7 @@ export function Studio(props: StudioProps) {
     void runA.start(runnable.node, parsedA.value, { rehearse });
     if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value, { rehearse });
     else runB.reset();
-  }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source]);
+  }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source, forgetWhatIfs]);
 
   const run = useCallback(() => pull(rehearsing), [pull, rehearsing]);
 
@@ -223,19 +243,55 @@ export function Studio(props: StudioProps) {
     pull(true);
   }, [pull]);
 
-  /** "What if it went the other way?": run a's input again as run b, with one decision forced. */
-  const whatIf = useCallback(
-    (path: string, edge: string) => {
-      const base = runA.trace;
-      if (!chain || !base || base.status === "running" || runA.input === undefined) return;
+  /** Run `request` as run b and open the a-vs-b diff. */
+  const startWhatIf = useCallback(
+    (request: WhatIfRequest, rehearse: boolean) => {
+      if (!chain) return;
+      setLastWhatIf(request);
       setComparing(true);
-      setInputB(toEditor(runA.input));
+      setInputB(toEditor(request.input));
       setTarget("diff");
       setSelected(null);
-      void runB.start(chain.node, runA.input, { rehearse: rehearsing || isRehearsal(base), whatIf: { trace: base, fork: { path, edge } } });
+      void runB.start(chain.node, request.input, { rehearse: rehearse || isRehearsal(request.base), whatIf: { trace: request.base, fork: request.fork } });
     },
-    [chain, runA.trace, runA.input, runB, rehearsing],
+    [chain, runB],
   );
+
+  /**
+   * "What if it went the other way?": run the input again as run b, with one
+   * decision forced. Forking run a starts a fresh what-if; forking run b stacks
+   * one more on top of b's, and remembers b so it can be undone.
+   */
+  const whatIf = useCallback(
+    (path: string, edge: string, from: "a" | "b" = "a") => {
+      const run = from === "b" ? runB : runA;
+      const base = run.trace;
+      if (!base || base.status === "running" || run.input === undefined) return;
+      const input = run.input;
+      setForkedFrom((h) => (from === "b" ? [...h, { trace: base, input }] : []));
+      startWhatIf({ base, input, fork: { path, edge } }, rehearsing);
+    },
+    [runA, runB, rehearsing, startWhatIf],
+  );
+
+  /** Put back the b the current what-if was forked from. */
+  const undoWhatIf = useCallback(() => {
+    const prev = forkedFrom.at(-1);
+    if (!prev) return;
+    setForkedFrom((h) => h.slice(0, -1));
+    setLastWhatIf(null);
+    setSelected(null);
+    setInputB(toEditor(prev.input));
+    runB.show(prev.trace, prev.input);
+  }, [forkedFrom, runB]);
+
+  /** Run b's issue buttons: a failed what-if retries (or rehearses) the same fork. */
+  const retryB = useCallback(() => (lastWhatIf ? startWhatIf(lastWhatIf, rehearsing) : run()), [lastWhatIf, startWhatIf, rehearsing, run]);
+  const rehearseB = useCallback(() => {
+    if (!lastWhatIf) return rehearseNow();
+    setRehearsing(true);
+    startWhatIf(lastWhatIf, true);
+  }, [lastWhatIf, startWhatIf, rehearseNow]);
 
   const stop = useCallback(() => {
     runA.stop();
@@ -246,6 +302,7 @@ export function Studio(props: StudioProps) {
     (next: ChainSource) => {
       runA.reset();
       runB.reset();
+      forgetWhatIfs();
       setSource(next);
       const r = resolveChain(next);
       const c = r.ok ? r.chain : undefined;
@@ -255,7 +312,7 @@ export function Studio(props: StudioProps) {
       setActiveSavedId(null);
       setTarget("a");
     },
-    [runA, runB],
+    [runA, runB, forgetWhatIfs],
   );
 
   const pickExample = useCallback((slug: string) => switchTo({ kind: "example", slug }), [switchTo]);
@@ -266,6 +323,7 @@ export function Studio(props: StudioProps) {
       builder.open(options);
       runA.reset();
       runB.reset();
+      forgetWhatIfs();
       setLastRunDoc(null);
       setSelected(null);
       setActiveSavedId(null);
@@ -274,7 +332,7 @@ export function Studio(props: StudioProps) {
       if (first !== undefined) setInputA(toEditor(first));
       setMode("build");
     },
-    [builder, runA, runB],
+    [builder, runA, runB, forgetWhatIfs],
   );
 
   const loadDoc = useCallback(
@@ -330,6 +388,7 @@ export function Studio(props: StudioProps) {
     (saved: SavedRun) => {
       if (!resolveChain(saved.source).ok) return;
       runB.reset();
+      forgetWhatIfs();
       setSource(saved.source);
       if (saved.source.kind === "doc") setCustomDoc(saved.source.doc);
       setInputA(toEditor(saved.input));
@@ -339,17 +398,18 @@ export function Studio(props: StudioProps) {
       runA.show(saved.trace, saved.input);
       setActiveSavedId(saved.id);
     },
-    [runA, runB],
+    [runA, runB, forgetWhatIfs],
   );
 
   const resetB = runB.reset;
   const toggleCompare = useCallback(() => {
     if (comparing) {
       resetB();
+      forgetWhatIfs();
       setTarget("a");
     }
     setComparing(!comparing);
-  }, [comparing, resetB]);
+  }, [comparing, resetB, forgetWhatIfs]);
 
   // What's on screen right now, for share / step-through.
   const view = building ? buildView : chain;
@@ -677,8 +737,8 @@ export function Studio(props: StudioProps) {
         header={header}
         rail={rail}
         issueAction={<IssueActions issue={runA.issue} onRetry={run} onRehearse={rehearseNow} />}
-        issueActionB={<IssueActions issue={runB.issue} onRetry={run} onRehearse={rehearseNow} />}
-        {...(building ? {} : { onWhatIf: whatIf })}
+        issueActionB={<IssueActions issue={runB.issue} onRetry={retryB} onRehearse={rehearseB} />}
+        {...(building ? {} : { onWhatIf: whatIf, ...(forkedFrom.length > 0 && runB.phase !== "running" ? { onUndoWhatIf: undoWhatIf } : {}) })}
         {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
       />
       {building && build.portals}

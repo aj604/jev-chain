@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { ask, cascade, chain, choice, createJev, emit, gate, noul, route, score, spanAt, tier, type AnyNode, type Json, type JevClient, type Trace } from "jevchain";
+import { ask, cascade, chain, choice, createJev, decisions, emit, gate, noul, route, score, spanAt, tier, type AnyNode, type Json, type JevClient, type Trace } from "jevchain";
 import { examples } from "jevchain-examples";
 import { isRehearsal, rehearsalClient } from "./rehearsal";
 import { decodeShare, encodeShare } from "./share";
-import { forkableEdges, forkOf, isWhatIf, WHAT_IF_MODEL, whatIfClient } from "./what-if";
+import { forkableEdges, forkOf, forksOf, isWhatIf, WHAT_IF_MODEL, whatIfClient } from "./what-if";
 
 /** The rehearsal client, counting what reaches it. */
 function counted(): { client: JevClient; asked: string[] } {
@@ -221,5 +221,106 @@ describe("whatIfClient", () => {
       }
     }
     expect(forced).toBeGreaterThan(10);
+  });
+});
+
+describe("forking a fork", () => {
+  /** A rehearsal run of `triage` whose triage went a way `want` accepts (trying inputs until one does). */
+  async function runThat(want: (taken: string) => boolean): Promise<Trace> {
+    for (let i = 0; i < 64; i++) {
+      const a = await base(triage, `ticket #${i}`);
+      if (want(spanAt(a, TRIAGE)!.decision!.taken)) return a;
+    }
+    throw new Error("no input took that road");
+  }
+  const GATE = `${TRIAGE}/bug`;
+
+  it("keeps the first fork and forces a decision that only exists on the new road", async () => {
+    const a = await runThat((t) => t !== "bug");
+    const b = await fork(triage, a, TRIAGE, "bug");
+    const edge = forkableEdges(triage, b, GATE)[0]!;
+    expect(edge).toBeDefined();
+    const { client, asked } = counted();
+    const c = await fork(triage, b, GATE, edge, client);
+    expect(spanAt(c, TRIAGE)!.decision!.taken).toBe("bug");
+    expect(spanAt(c, GATE)!.decision!.taken).toBe(edge);
+    expect(forksOf(c)).toEqual([
+      { path: TRIAGE, nodeId: "triage", edge: "bug" },
+      { path: GATE, nodeId: "urgent", edge },
+    ]);
+    // Everything was already said in b: nothing new reaches Jev.
+    expect(asked).toEqual([]);
+    // The first ask is still a's answer, served for free, and says so once.
+    expect(spanAt(c, "$/0")!.calls[0]!.answers).toEqual(spanAt(a, "$/0")!.calls[0]!.answers);
+    expect(spanAt(c, "$/0")!.calls[0]!.requestId).toMatch(/^replay:rehearsal_\d+$/);
+  });
+
+  it("re-forcing a forced decision leaves one fork, not two", async () => {
+    const a = await runThat((t) => t !== "bug" && t !== "billing");
+    const b = await fork(triage, a, TRIAGE, "bug");
+    const c = await fork(triage, b, TRIAGE, "billing");
+    expect(spanAt(c, TRIAGE)!.decision!.taken).toBe("billing");
+    expect(forksOf(c)).toEqual([{ path: TRIAGE, nodeId: "triage", edge: "billing" }]);
+  });
+
+  it("still lists every fork, and is still a rehearsal, after a trip through a share link", async () => {
+    const a = await runThat((t) => t !== "bug");
+    const b = await fork(triage, a, TRIAGE, "bug");
+    const c = await fork(triage, b, GATE, forkableEdges(triage, b, GATE)[0]!);
+    const back = await decodeShare(await encodeShare({ v: 1, chain: { example: "x" }, input: c.input, trace: c }));
+    expect(forksOf(back.trace)).toEqual(forksOf(c));
+    expect(forksOf(back.trace)).toHaveLength(2);
+    expect(isRehearsal(back.trace)).toBe(true);
+  });
+
+  it("forcing further up drops a fork whose road no longer runs", async () => {
+    const a = await runThat((t) => t === "bug");
+    const b = await fork(triage, a, GATE, forkableEdges(triage, a, GATE)[0]!);
+    const c = await fork(triage, b, TRIAGE, "other");
+    expect(forksOf(c)).toEqual([{ path: TRIAGE, nodeId: "triage", edge: "other" }]);
+  });
+
+  it("stays a rehearsal, even when every call left is a forced one", async () => {
+    const leafy = route("pick", { ask: choice("Which?", ["x", "y", "z"]), branches: { x: emit("x"), y: emit("y"), z: emit("z") } });
+    const a = await base(leafy, "hello");
+    const b = await fork(leafy, a, "$", forkableEdges(leafy, a, "$")[0]!);
+    expect(b.models).toEqual([WHAT_IF_MODEL]);
+    expect(isRehearsal(b)).toBe(true);
+    const c = await fork(leafy, b, "$", forkableEdges(leafy, b, "$")[0]!);
+    expect(isRehearsal(c)).toBe(true);
+    // ...and a what-if of a real run is not one.
+    const fake = rehearsalClient({ latencyMs: [0, 0] });
+    const real: JevClient = { model: "jev-test", usdPerMillionTokens: 1, ask: async (s, q, o) => ({ ...(await fake.ask(s, q, o)), model: "jev-test", requestId: "req_1" }) };
+    const r = (await createJev(real).run(leafy, "hello")).trace;
+    const rb = await fork(leafy, r, "$", forkableEdges(leafy, r, "$")[0]!, real);
+    expect(isWhatIf(rb)).toBe(true);
+    expect(isRehearsal(rb)).toBe(false);
+  });
+
+  it("can fork every fork of every example, two decisions deep, and every fork holds", async () => {
+    let deep = 0;
+    for (const ex of examples) {
+      for (const { value } of ex.inputs) {
+        const a = await base(ex.chain, value);
+        for (const d1 of decisions(a)) {
+          for (const e1 of forkableEdges(ex.chain, a, d1.path)) {
+            const b = await fork(ex.chain, a, d1.path, e1);
+            for (const d2 of decisions(b)) {
+              for (const e2 of forkableEdges(ex.chain, b, d2.path)) {
+                const c = await fork(ex.chain, b, d2.path, e2);
+                const where = `${ex.slug} ${d1.path}→${e1} then ${d2.path}→${e2}`;
+                expect(spanAt(c, d2.path)?.decision?.taken, where).toBe(e2);
+                // The first fork holds wherever it's still on the road.
+                if (d1.path !== d2.path && spanAt(c, d1.path)) expect(spanAt(c, d1.path)!.decision!.taken, where).toBe(e1);
+                expect(forksOf(c).map((f) => f.path), where).toContain(d2.path);
+                expect(isRehearsal(c), where).toBe(true);
+                if (d1.path !== d2.path) deep++;
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(deep).toBeGreaterThan(5);
   });
 });

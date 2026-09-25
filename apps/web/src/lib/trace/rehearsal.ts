@@ -75,9 +75,14 @@ export function rehearsalAnswer(state: Entry, key: string, question: Question): 
   }
 }
 
-/** True when any call in this trace was answered by the rehearsal client. */
-export function isRehearsal(trace: Pick<Trace, "models"> | undefined): boolean {
-  return Boolean(trace?.models.includes(REHEARSAL_MODEL));
+/**
+ * True when any call in this trace was answered by the rehearsal client,
+ * including a call a stand-in client relabelled (a what-if reports model
+ * `"what-if"` but keeps `…:rehearsal` at the end of the requestId).
+ */
+export function isRehearsal(trace: (Pick<Trace, "models"> & Partial<Pick<Trace, "spans">>) | undefined): boolean {
+  if (!trace) return false;
+  return trace.models.includes(REHEARSAL_MODEL) || Boolean(trace.spans?.some((s) => s.calls.some((c) => c.requestId?.endsWith(`:${REHEARSAL_MODEL}`))));
 }
 
 function softmax(logits: number[]): number[] {
