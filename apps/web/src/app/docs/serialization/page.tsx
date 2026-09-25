@@ -129,6 +129,10 @@ export default function SerializationPage() {
         Functions can&apos;t be recovered from a name, so each <C>$ref</C> becomes a clearly marked stub for you to fill in:
       </P>
       <Snippet code={nameTagTs} file="name-tag.ts" />
+      <P>
+        Both files compile as printed, stubs and all: this site&apos;s tests typecheck them against jevchain on every
+        change. Until you fill one in, a stub step returns its input unchanged.
+      </P>
       <ApiTable
         caption="toTypeScript options"
         rows={[

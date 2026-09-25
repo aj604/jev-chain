@@ -1,6 +1,7 @@
 import { DocExample } from "@/components/docs/doc-example";
-import { A, ApiTable, C, Callout, Cell, DocPage, H2, Li, List, P, Snippet, TwoUp } from "@/components/docs/doc-ui";
+import { A, ApiTable, C, Callout, Cell, DocPage, H2, H3, Li, List, P, Snippet, TwoUp } from "@/components/docs/doc-ui";
 import { Code } from "@/components/ui/code-block";
+import { claims } from "@/docs/claims";
 import { docMetadata } from "@/docs/nav";
 
 export const metadata = docMetadata("step-and-emit");
@@ -32,14 +33,27 @@ const EMIT = `emit("page on-call")                         // EmitNode<string>
 emit({ team: "billing", priority: 2 })       // EmitNode<{ readonly team: "billing"; readonly priority: 2 }>
 emit("Booked for {{input.name}}.", { id: "book" })   // give leaves ids: they show up in traces`;
 
-const TPL_INPUT = `{ "name": "Mo", "tags": ["karaoke", "chaos"],
-  "user": { "plan": "pro" } }`;
+// One key per line: this sits in a narrow column.
+const TPL_INPUT = JSON.stringify(claims.templateInput, null, 2)
+  .replace(/\[\s+([^\]]*?)\s+\]/g, (_, xs: string) => `[${xs.replace(/\s+/g, " ")}]`)
+  .replace(/\{\s+("plan": "pro")\s+\}/, "{ $1 }");
 
-const TPL_OUT = `"hi {{input.name}}"        → "hi Mo"
-"{{input.tags.0}} fan"      → "karaoke fan"
-"plan: {{input.user}}"      → 'plan: {"plan":"pro"}'
-"{{input.user}}"            → { plan: "pro" }   (raw value)
-"{{input.nope}}!"           → "!"`;
+// Checked against the real runtime in claims.test.ts. A raw (non-string) value is marked as such.
+const quote = (s: string) => (s.includes('"') ? `'${s}'` : `"${s}"`);
+const TPL_OUT = claims.templates
+  .map(({ template, output }) => {
+    const shown = typeof output === "string" ? quote(output) : `${JSON.stringify(output)}   (raw value)`;
+    return `${quote(template).padEnd(22)} → ${shown}`;
+  })
+  .join("\n");
+
+const TPL_CHECKS = `const greet = emit("Hi {{inptu.name}}", { id: "greet" });
+await jev.run(chain("welcome", greet, lookup), user);
+// throws ChainConfigError, nothing sent:
+//   ${claims.templateTypo}
+
+emit("{{results.lookup}}", { id: "greet" }) // same chain, lookup hasn't run yet:
+//   ${claims.templateTooEarly}`;
 
 export default function StepAndEmitPage() {
   return (
@@ -70,8 +84,19 @@ export default function StepAndEmitPage() {
             type: "Record<string, unknown>",
             children: "Outputs of every node that has finished so far, keyed by node id. Reused ids overwrite each other.",
           },
+          {
+            name: "answers",
+            type: "Record<string, Record<string, Answer>>",
+            children: (
+              <>
+                Every answer Jev has returned so far, by node id then question key: an ask&apos;s questions, a route or
+                gate&apos;s <code>decision</code> plus its <code>alsoAsk</code>, a cascade&apos;s rungs keyed by tier id. Filed
+                the moment the call returns, so a branch can read the answer that routed it.
+              </>
+            ),
+          },
           { name: "signal", type: "AbortSignal", children: "Aborted when the run is cancelled, times out, or this attempt times out. Pass it to fetch." },
-          { name: "jev", type: "JevClient", children: <>The client running this chain, for ad-hoc <code>jev.ask(state, questions)</code> calls.</> },
+          { name: "jev", type: "JevClient", children: <>The client running this chain, for ad-hoc <code>jev.ask(state, questions)</code> calls. They&apos;re cancelled along with the step.</> },
           { name: "log", type: "(message, data?) => void", children: "Attach a note, with optional JSON data, to this node's span in the trace." },
         ]}
       />
@@ -142,7 +167,7 @@ export default function StepAndEmitPage() {
       <H2 id="templates">Templates</H2>
       <P>
         <C>emit</C> strings and every <C>state</C> option (on <C>ask</C>, <C>route</C>, <C>gate</C> and cascade tiers)
-        take the same tiny template language: <C>{"{{path}}"}</C> holes. Paths are resolved against three roots:
+        take the same tiny template language: <C>{"{{path}}"}</C> holes. Paths are resolved against four roots:
       </P>
       <List>
         <Li>
@@ -153,6 +178,10 @@ export default function StepAndEmitPage() {
         </Li>
         <Li>
           <C>{"{{results.<nodeId>…}}"}</C>: the output of an earlier node.
+        </Li>
+        <Li>
+          <C>{"{{answers.<nodeId>.<key>…}}"}</C>: an answer Jev has already given, e.g.{" "}
+          <C>{"{{answers.front-desk.angry.noul}}"}</C> for a route&apos;s <A href="/docs/route#also-ask">alsoAsk</A>.
         </Li>
       </List>
       <TwoUp>
@@ -168,12 +197,24 @@ export default function StepAndEmitPage() {
           A template that is <strong>exactly one hole</strong> returns the raw value, so objects and arrays survive as
           structured state.
         </Li>
-        <Li>Holes inside text stringify objects as JSON; missing values render as an empty string.</Li>
+        <Li>
+          Holes inside text stringify objects as JSON. A value that&apos;s missing at runtime renders as an empty string
+          and leaves a note in the span&apos;s <C>logs</C>: <em>{claims.templateEmptyLog}</em>.
+        </Li>
         <Li>
           No expressions, no function calls, no <C>eval</C>. Just paths. Need logic? That&apos;s what <C>step</C> is for,
           and <C>state</C> also takes a function: <C>{"state: (t) => t.subject"}</C>.
         </Li>
       </List>
+      <H3 id="template-checks">Checked before the run</H3>
+      <P>
+        Some holes can only ever come up empty: a root that doesn&apos;t exist, <C>results</C> of a node that
+        hasn&apos;t finished by then (a later step, the node itself, an ancestor still running), <C>answers</C> of a
+        node that hasn&apos;t asked yet, or a question key it never asks. <C>run</C>, <C>stream</C> and{" "}
+        <C>fromJSON</C> reject those with a <C>ChainConfigError</C> before any call is made, naming the path, the hole
+        and a guess at what you meant:
+      </P>
+      <Snippet code={TPL_CHECKS} file="welcome.ts" />
       <DocExample
         id="docs-name-tag"
         caption={

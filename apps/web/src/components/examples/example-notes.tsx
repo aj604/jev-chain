@@ -122,8 +122,8 @@ export const EXAMPLE_NOTES: Record<string, Note[]> = {
       title: "Escalation runs on confidence",
       body: (
         <>
-          The gut check has to be 0.7 sure to answer. Full context gets away with 0.5. Most messages never pay for the
-          second call.
+          The gut check has to be 0.7 sure to answer. Full context gets away with 0.5. When the gut check is sure, that&apos;s
+          one call, and the second tier never runs.
         </>
       ),
       at: 'tier("gut-check"',
@@ -168,8 +168,8 @@ export const EXAMPLE_NOTES: Record<string, Note[]> = {
       title: "Close calls get their own path",
       body: (
         <>
-          Anything within 0.4 of the bar (2.1 to 2.9) takes the counter-offer instead of flipping a coin at the boundary. A
-          decision near the bar is a different decision.
+          Anything within 0.4 of the bar, so strictly between 2.1 and 2.9, takes the counter-offer instead of flipping a coin
+          at the boundary. Exactly 0.4 away is outside. A decision near the bar is a different decision.
         </>
       ),
       at: "unsure: {",

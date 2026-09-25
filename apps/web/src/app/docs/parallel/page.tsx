@@ -36,10 +36,10 @@ const BATCH_TRACE = `// trace.spans[…].calls[0], for each of the three tribuna
 { "calls": 3, "requests": 1, "inputTokens": 212, "outputTokens": 3, "costUsd": 0.0000089 }`;
 
 const NO_BATCH = `// Off for a whole client…
-const jev = createJev({ batch: false });
+const unbatched = createJev({ batch: false });
 
 // …tuned…
-const jev = createJev({ batch: { windowMs: 5, maxQuestions: 32 } });
+const tuned = createJev({ batch: { windowMs: 5, maxQuestions: 32 } });
 
 // …or off for one direct call.
 await jev.ask(state, questions, { batch: false });`;
@@ -159,12 +159,14 @@ export default function ParallelPage() {
           innermost failing node (see <A href="/docs/errors">Errors</A>).
         </Li>
         <Li>
-          Spans that were still running are closed in the trace with a <C>cancelled</C> error, so you can see what got
-          cut off.
+          Spans that were still running are closed in the trace with a <C>CancelledError</C> (code{" "}
+          <C>cancelled</C>) whose <C>cause</C> is the real failure, so you can see what got cut off without mistaking
+          it for the culprit.
         </Li>
         <Li>
-          A branch that <em>halts</em> (a <C>gate</C> with no <C>otherwise</C>) halts the whole run too. If you&apos;d
-          rather it didn&apos;t, give that gate an <C>otherwise</C>.
+          A branch that <em>halts</em> (a <C>gate</C> with no <C>otherwise</C>) halts the whole run too, and siblings
+          still running close as <C>halted</C>. If you&apos;d rather it didn&apos;t, give that gate an{" "}
+          <C>otherwise</C>.
         </Li>
       </List>
       <Callout tone="warn" title="parallel is all-or-nothing">

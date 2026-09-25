@@ -1,5 +1,6 @@
 import { DocExample } from "@/components/docs/doc-example";
 import { A, ApiTable, C, Callout, DocPage, H2, H3, Li, List, P, Snippet } from "@/components/docs/doc-ui";
+import { claims } from "@/docs/claims";
 import { docMetadata } from "@/docs/nav";
 
 export const metadata = docMetadata("gate");
@@ -54,7 +55,7 @@ result.status;        // "halted"
 result.output;        // undefined
 result.trace.halted;  // {
                       //   path: "$", nodeId: "dress-code",
-                      //   summary: "Blocked: p(yes) = 0.12, short of the 0.60 bar easily (by 0.48), so the run stopped here."
+                      //   summary: ${JSON.stringify(claims.gateHalted)}
                       // }`;
 
 export default function GatePage() {
@@ -93,7 +94,16 @@ export default function GatePage() {
             type: "{ margin?, minConfidence?, then }",
             children: <>A third path for close calls. Checked before pass/fail.</>,
           },
-          { name: "alsoAsk", type: "Questions", children: <>Extra questions in the same call, recorded in the trace.</> },
+          {
+            name: "alsoAsk",
+            type: "Questions",
+            children: (
+              <>
+                Extra questions in the same call. Downstream nodes read them as <code>{"{{answers.<id>.<key>}}"}</code>. See{" "}
+                <A href="/docs/route#also-ask">route</A>.
+              </>
+            ),
+          },
           { name: "state / model", type: "…", children: <>As in <A href="/docs/ask#state">ask</A>.</> },
         ]}
       />
@@ -138,15 +148,13 @@ export default function GatePage() {
       </P>
       <List>
         <Li>
-          <em>Passed: p(yes) = 0.83, clearing the 0.60 bar comfortably (by 0.23).</em>
+          <em>{claims.gatePassed}</em>
         </Li>
         <Li>
-          <em>
-            Blocked: the score came in at 1.40, short of the 2.50 bar easily (by 1.10), so took &ldquo;otherwise&rdquo;.
-          </em>
+          <em>{claims.gateBlockedScore}</em>
         </Li>
         <Li>
-          <em>Passed: p(yes) = 0.04, under the 0.50 ceiling easily (by 0.46).</em>
+          <em>{claims.gateUnderCeiling}</em>
         </Li>
       </List>
       <Callout tone="note" title="checked twice">
@@ -168,8 +176,9 @@ export default function GatePage() {
           <strong>
             <C>margin</C>
           </strong>
-          : unsure when <C>|value − bar| &lt; margin</C>, where the bar is <C>min</C>, or <C>max</C> if there&apos;s
-          no min.
+          : unsure when the value is less than <C>margin</C> from the bar&apos;s nearest edge. For a single{" "}
+          <C>min</C> or <C>max</C> that&apos;s just <C>|value − bar| &lt; margin</C>. For a window it&apos;s whichever
+          of <C>min</C> and <C>max</C> is closer, on either side of it. Exactly <C>margin</C> away is outside.
         </Li>
         <Li>
           <strong>
@@ -182,8 +191,13 @@ export default function GatePage() {
       </List>
       <Snippet code={UNSURE} file="unsure.ts" />
       <P>
-        The trace says so plainly: <em>Too close to call: p(yes) = 0.64, right next to the 0.60 bar, so it took the
-        &ldquo;unsure&rdquo; path.</em>
+        The trace says so plainly: <em>{claims.gateUnsure}</em>
+      </P>
+      <P>
+        A window has two edges, so it has two sets of close calls. Give the goldilocks gate above a <C>0.1</C> margin
+        and everything strictly between 0.3 and 0.7 is unsure, bar one value: <em>{claims.gateWindowUnsure}</em> Dead
+        centre, 0.5 is exactly 0.10 from both edges, which is outside the margin, so it passes. A window narrower than
+        two margins is mostly shrug.
       </P>
       <DocExample
         id="meeting-email"

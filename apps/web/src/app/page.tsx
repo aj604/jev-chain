@@ -25,31 +25,37 @@ const triage = route("triage", {
   },
 });`;
 
-const FEATURES: Array<{ title: string; body: string; code: string }> = [
+/** A card's `file` marks its code as TypeScript, which `docs/samples.test.ts` compiles against jevchain. */
+const FEATURES: Array<{ title: string; body: string; code: string; file?: string }> = [
   {
     title: "typed answers",
     body: "choice options come back as a literal union, not string. your editor knows what jev can say before jev does.",
-    code: `answers.vibe.choice // "billing" | "bug" | "vibes"`,
+    code: `type Team = AnswerOf<typeof team>["choice"]; // "billing" | "bug" | "vibes"`,
+    file: "team.ts",
   },
   {
     title: "exhaustive routing",
     body: "add a fourth option and forget its branch, and tsc tells you before production does.",
-    code: `// ✗ property 'refund' is missing in branches`,
+    code: `route("triage", { ask: team, branches: { billing, bug } }); // ✗ 'vibes' is missing`,
+    file: "triage.ts",
   },
   {
     title: "streaming traces",
     body: "every run emits events as it happens: node entered, question asked, distribution received, branch taken.",
-    code: `for await (const e of run.events) draw(e)`,
+    code: `for await (const e of jev.stream(triage, msg)) draw(e);`,
+    file: "stream.ts",
   },
   {
     title: "parallel + batching",
     body: "fan out asks concurrently. questions about the same input fold into a single jev call.",
-    code: `parallel({ tone, topic, urgency }, merge)`,
+    code: `parallel("read", { branches: { tone, topic, urgency } });`,
+    file: "read.ts",
   },
   {
     title: "serializable chains",
     body: "chains are data. json in, json out — the studio and your code share one definition.",
-    code: `fromJSON(toJSON(triage)) // same chain`,
+    code: `fromJSON(toJSON(triage)); // same chain`,
+    file: "roundtrip.ts",
   },
   {
     title: "zero dependencies",
