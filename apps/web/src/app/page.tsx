@@ -68,7 +68,7 @@ export default function Home() {
           <div className="lg:col-span-7">
             <div className="flex flex-wrap items-center gap-3 font-mono text-xs lowercase text-ink-3">
               <ChainLinks count={5} progress={1} className="text-ink" />
-              <span>v0.1 · a langchain parody that accidentally works</span>
+              <span>v0.1 · decision graphs that show their work</span>
             </div>
 
             <h1 className="mt-8 font-display text-[clamp(3.25rem,9vw,7.5rem)] leading-[0.88] tracking-[-0.02em] italic">

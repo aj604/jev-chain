@@ -10,7 +10,7 @@ A typed TypeScript framework for composing calls to [Jev](https://docs.typesafe.
 
 ---
 
-LangChain strings LLM calls together and hopes the prose parses. Jev doesn't write prose. You give it state and typed questions (*pick one of these*, *rate this 0–4*, *is this true?*) and it returns calibrated probabilities in tens of milliseconds. So a "chain" of Jev calls isn't a pipeline of text. It's a **graph of decisions**: each node asks something, and the answers pick the path.
+Jev doesn't write prose. You give it state and typed questions (*pick one of these*, *rate this 0–4*, *is this true?*) and it returns calibrated probabilities in tens of milliseconds. So a chain of Jev calls isn't a pipeline of prompts. It's a **graph of decisions**: each node asks something, and the answers pick the path.
 
 JevChain is that idea taken seriously:
 

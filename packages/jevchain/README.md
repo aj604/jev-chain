@@ -4,8 +4,6 @@ Chains of decisions for [Jev](https://docs.typesafe.ai), TypeSafe's classificati
 
 Jev doesn't generate text. You give it some state and typed questions, and it answers with calibrated probabilities in tens of milliseconds. `jevchain` composes those answers into graphs: route on a choice, gate on a probability, fan out in parallel, cascade from cheap to thorough. Every run leaves a complete, serializable trace of every decision it made.
 
-It's like LangChain, except it answers in probabilities and you can read the whole thing in an afternoon.
-
 ```sh
 npm install jevchain
 export TYPESAFE_API_KEY=...

@@ -10,7 +10,7 @@ export function SiteFooter() {
         <div className="space-y-3">
           <Logo />
           <p className="max-w-sm text-[13px] leading-relaxed text-ink-3">
-            not affiliated with langchain. barely affiliated with itself. built on{" "}
+            barely affiliated with itself. built on{" "}
             <a href="https://typesafe.ai" target="_blank" rel="noreferrer noopener" className="text-ink-2 underline decoration-dotted underline-offset-4 hover:text-ink">
               jev by typesafe
             </a>

@@ -1,7 +1,7 @@
 {
   "name": "jevchain",
   "version": "0.1.0",
-  "description": "Chains of decisions for Jev, TypeSafe's classification model. Like LangChain, but it answers in probabilities.",
+  "description": "Typed decision graphs for Jev, TypeSafe's classification model.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -21,7 +21,7 @@
     "types": "./dist/index.d.ts"
   },
   "files": ["dist", "README.md"],
-  "keywords": ["jev", "typesafe", "classification", "llm", "routing", "decision", "chain"],
+  "keywords": ["jev", "typesafe", "classification", "routing", "decision-graph", "trace"],
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "test": "vitest run",
