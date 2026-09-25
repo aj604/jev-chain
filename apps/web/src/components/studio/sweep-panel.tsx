@@ -2,25 +2,30 @@
 
 /**
  * "Where does everything go?": a sweep read three ways. How each decision
- * split the inputs that reached it, the roads no input took, and every input
- * with the road it went down (click one to open it as a normal run).
+ * split the inputs that reached it (and which inputs came closest to going
+ * another way), the roads no input took, and every input with the road it
+ * went down and how close each call was (click one to open it as a normal run).
  *
  * Selecting a node on the graph filters the inputs to the ones that got there.
  */
 import type { ReactNode } from "react";
-import type { FlowGraph } from "jevchain";
+import { spanAt, type AnyNode, type FlowGraph, type Trace } from "jevchain";
 import { ChainLinks } from "@/components/brand/chain-links";
 import { Badge } from "@/components/ui/badge";
 import { KbdCombo } from "@/components/ui/kbd";
 import { KindTag } from "@/components/trace/kinds";
 import { IssueBox } from "@/components/trace/why-panel";
+import { edgeName } from "@/lib/trace/what-if";
 import { cn } from "@/lib/cn";
 import { fmtUsd, previewJson } from "@/lib/trace/format";
+import { closestFlip, flipText, fmtBy } from "@/lib/trace/margin";
 import type { RunIssue } from "@/lib/trace/run-error";
-import { finishedTraces, routeOf, tallyDecisions, trafficOf, unfinished, unreachedRoads, visits, type SweepInput, type SweepRow } from "@/lib/trace/sweep";
+import { closeCallsAt, finishedTraces, routeOf, tallyDecisions, trafficOf, unfinished, unreachedRoads, visits, type SweepInput, type SweepRow } from "@/lib/trace/sweep";
 
 export interface SweepPanelProps {
   graph: FlowGraph;
+  /** The chain that was swept: its rules say how close each call came (see `lib/trace/margin`). */
+  root?: AnyNode;
   rows: SweepRow[];
   running: boolean;
   rehearsed: boolean;
@@ -29,15 +34,15 @@ export interface SweepPanelProps {
   queued: SweepInput[];
   selected: string | null;
   onSelect: (id: string | null) => void;
-  /** Open one input's run as run a. */
-  onOpen: (row: SweepRow) => void;
+  /** Open one input's run as run a, with `select` (a decision's path) selected if given. */
+  onOpen: (row: SweepRow, select?: string) => void;
   /** Rendered under `stoppedBy` (e.g. an "add key" button). */
   issueAction?: ReactNode;
 }
 
 const STATUS_TONE = { ok: "pass", halted: "warn", error: "fail", aborted: "warn", running: "accent" } as const;
 
-export function SweepPanel({ graph, rows, running, rehearsed, stoppedBy, queued, selected, onSelect, onOpen, issueAction }: SweepPanelProps) {
+export function SweepPanel({ graph, root, rows, running, rehearsed, stoppedBy, queued, selected, onSelect, onOpen, issueAction }: SweepPanelProps) {
   const traces = finishedTraces(rows);
   const done = traces.length;
 
@@ -131,6 +136,7 @@ export function SweepPanel({ graph, rows, running, rehearsed, stoppedBy, queued,
                     </li>
                   ))}
                 </ul>
+                {root && <ClosestCalls root={root} rows={rows} path={t.path} onOpen={onOpen} />}
               </li>
             ))}
           </ul>
@@ -207,9 +213,7 @@ export function SweepPanel({ graph, rows, running, rehearsed, stoppedBy, queued,
                   {r.trace && status !== "running" && (
                     <span className="mt-1 flex flex-wrap items-center gap-1 pl-5.5 font-mono text-[10px]">
                       {routeOf(r.trace).map((step) => (
-                        <span key={step.path} className="inline-flex h-[18px] items-center border-soft px-1 text-ink-2">
-                          {step.title} → <span className="ml-1 text-ink">{step.edge}</span>
-                        </span>
+                        <RouteStep key={step.path} step={step} trace={r.trace!} root={root} />
                       ))}
                       {r.trace.output !== undefined && <span className="min-w-0 truncate text-ink-3">= {previewJson(r.trace.output, 48)}</span>}
                       {r.issue && r.issue.kind !== "halted" && <span className="min-w-0 truncate text-fail">{r.issue.title}</span>}
@@ -220,9 +224,70 @@ export function SweepPanel({ graph, rows, running, rehearsed, stoppedBy, queued,
             );
           })}
         </ul>
-        {!running && done > 0 && <p className="mt-2 font-mono text-[10px] lowercase text-ink-3">click an input to open its run and ask why.</p>}
+        {!running && done > 0 && <p className="mt-2 font-mono text-[10px] lowercase text-ink-3">click an input to open its run and ask why.{root && tallies.length > 0 ? " the small number after each road is how close that call was: hover for what would have flipped it." : ""}</p>}
       </section>
     </div>
+  );
+}
+
+/** How many of a decision's closest calls to list under its split. */
+const CLOSEST = 3;
+
+/**
+ * The inputs that came nearest to going another way at one decision. A split
+ * reads very differently when every input sat a hair from the line: that's
+ * where a different phrasing (or a different day) sends it down another road.
+ * Clicking one opens its run with the decision selected.
+ */
+function ClosestCalls({ root, rows, path, onOpen }: { root: AnyNode; rows: SweepRow[]; path: string; onOpen: (row: SweepRow, select?: string) => void }) {
+  const calls = closeCallsAt(root, rows, path);
+  if (calls.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <p className="mb-1 font-mono text-[10px] text-ink-3">
+        closest call{calls.length === 1 ? "" : "s"} · tightest {fmtBy(calls[0]!.flip.by)}
+      </p>
+      <ul className="space-y-0.5">
+        {calls.slice(0, CLOSEST).map((c) => {
+          const text = flipText(c.flip, c.taken);
+          return (
+            <li key={c.index}>
+              <button
+                type="button"
+                onClick={() => onOpen(c.row, path)}
+                aria-label={`open ${c.row.label}: ${text}`}
+                className="-mx-1 block w-[calc(100%+0.5rem)] px-1 py-0.5 text-left transition-colors duration-(--dur-fast) hover:bg-surface-2"
+              >
+                <span className="flex items-baseline gap-1.5 font-mono text-[11px]">
+                  <span className="w-4 shrink-0 text-right text-[10px] text-ink-3 tabular-nums">{c.index + 1}</span>
+                  <span className="min-w-0 truncate text-ink-2">{c.row.label}</span>
+                  <span className="shrink-0 text-ink-3">→ {edgeName(c.taken)}</span>
+                  <span className="ml-auto shrink-0 text-ink tabular-nums">
+                    {fmtBy(c.flip.by)} from {c.flip.escalates ? "escalating" : edgeName(c.flip.edge)}
+                  </span>
+                </span>
+                <span className="block pl-5.5 text-[11.5px] leading-snug text-ink-3">{text}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** One "decision → road" chip on an input's row, with how close that call was. */
+function RouteStep({ step, trace, root }: { step: { path: string; title: string; edge: string }; trace: Trace; root?: AnyNode }) {
+  const span = spanAt(trace, step.path);
+  const flip = root ? closestFlip(root, span) : undefined;
+  return (
+    <span
+      className="inline-flex h-[18px] items-center border-soft px-1 text-ink-2"
+      title={flip ? flipText(flip, span?.decision?.taken) : undefined}
+    >
+      {step.title} → <span className="ml-1 text-ink">{step.edge}</span>
+      {flip && <span className="ml-1 text-ink-3 tabular-nums">· {fmtBy(flip.by)}</span>}
+    </span>
   );
 }
 

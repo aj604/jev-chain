@@ -462,14 +462,15 @@ export function Studio(props: StudioProps) {
   }, [sweeping, comparing, resetB, forgetWhatIfs]);
 
   /** A sweep row → a normal run a, ready for "why did it go here?" and what-ifs. */
+  /** Open one sweep input's run as run a, optionally with a node (e.g. the decision it nearly flipped) selected. */
   const openSweepRow = useCallback(
-    (row: SweepRow) => {
+    (row: SweepRow, select?: string) => {
       if (!row.trace) return;
       forgetWhatIfs();
       setInputA(toEditor(row.value));
       setSweeping(false);
       setTarget("a");
-      setSelected(null);
+      setSelected(select ?? null);
       setActiveSavedId(null);
       runA.show(row.trace, row.value);
     },
@@ -843,6 +844,7 @@ export function Studio(props: StudioProps) {
                 aside: (
                   <SweepPanel
                     graph={graph}
+                    {...(chain ? { root: chain.node } : {})}
                     rows={sweep.rows}
                     running={sweep.phase === "running"}
                     rehearsed={sweep.rehearsed}

@@ -13,8 +13,9 @@
  *   tallyDecisions(graph, traces) // how each decision split the inputs
  *   unreachedRoads(graph, traffic)// the first node of every road nothing took
  */
-import { createJev, decisions, overlayTrace, type AnyNode, type FlowGraph, type GraphOverlay, type JevClient, type Json, type Trace, type Vertex } from "jevchain";
+import { createJev, decisions, overlayTrace, spanAt, type AnyNode, type FlowGraph, type GraphOverlay, type JevClient, type Json, type Trace, type Vertex } from "jevchain";
 import { previewJson } from "./format";
+import { closestFlip, type Flip } from "./margin";
 import { traceIssue, type RunIssue } from "./run-error";
 import { edgeName } from "./what-if";
 
@@ -267,4 +268,32 @@ export function routeOf(trace: Trace): { path: string; title: string; edge: stri
     const span = trace.spans.find((s) => s.path === d.path);
     return { path: d.path, title: span?.title ?? d.nodeId, edge: edgeName(d.decision.taken) };
   });
+}
+
+export interface CloseCall {
+  /** Index into the sweep's rows. */
+  index: number;
+  row: SweepRow;
+  /** The nearest road this input's decision didn't take, and how far off it was. */
+  flip: Flip;
+  /** The road it did take. */
+  taken: string;
+}
+
+/**
+ * The inputs that came closest to going another way at decision `path`,
+ * nearest first: one per input that made the decision and finished, measured
+ * by `closestFlip` against the chain's own rule. A split of 3 to 2 reads very
+ * differently when all five sat a hair from the line.
+ */
+export function closeCallsAt(root: AnyNode, rows: readonly SweepRow[], path: string): CloseCall[] {
+  const out: CloseCall[] = [];
+  rows.forEach((row, index) => {
+    const t = row.trace;
+    if (!t || t.status === "running" || t.status === "aborted") return;
+    const span = spanAt(t, path);
+    const flip = closestFlip(root, span);
+    if (flip && span?.decision) out.push({ index, row, flip, taken: span.decision.taken });
+  });
+  return out.sort((a, b) => a.flip.by - b.flip.by || a.index - b.index);
 }

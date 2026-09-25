@@ -270,7 +270,7 @@ export function Workbench({
         {comparing && target === "diff" && !selected ? (
           <CompareSummary a={trace} b={compare.trace} onSelect={select} canFork={Boolean(onWhatIf)} onUndo={onUndoWhatIf} />
         ) : selected ? (
-          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} />
+          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} root={chain.node} />
         ) : (
           <WhyPanel trace={focusTrace} issue={focusIssue} onSelect={select} issueAction={showB ? issueActionB : issueAction} />
         )}
