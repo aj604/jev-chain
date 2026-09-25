@@ -53,6 +53,8 @@ export interface Flip {
   up: boolean;
   /** A cascade tier that answered would have passed the question on: `edge` is who'd be asked, not where it ends up. */
   escalates?: boolean;
+  /** A cascade flip: the tier whose confidence moves. */
+  tier?: string;
 }
 
 /**
@@ -98,6 +100,35 @@ export function flipText(flip: Flip, taken?: string): string {
   const moved = flip.by === 0 ? `any ${way} ${flip.measure}` : `${fmtBy(flip.by)} ${way} ${flip.measure}`;
   if (flip.escalates) return flip.edge === "fallback" ? `${moved} and it falls back` : `${moved} and it asks ${road} instead`;
   return `${moved} and it goes ${road}`;
+}
+
+/**
+ * The number `flip` moves, read off another run's `span` at the same decision
+ * (the same input asked again, say): how far Jev's own answer wobbled on the
+ * very quantity the flip is measured in. `taken` is the road the flip was
+ * measured from; a lead is the gap between it and `flip.edge`, and goes
+ * negative here when the other road won. Undefined when that span didn't
+ * answer the question (a cascade tier it never reached, say).
+ */
+export function measuredAt(root: AnyNode, span: Span | undefined, flip: Flip, taken: string): number | undefined {
+  if (!span?.decision) return undefined;
+  const node = nodeAt(root, span.path);
+  if (!node || node.kind !== span.decision.kind) return undefined;
+  if (node.kind === "cascade") {
+    const a = flip.tier === undefined ? undefined : decisionAnswer(span, flip.tier);
+    return a ? round(confidenceOf(a)) : undefined;
+  }
+  const a = decisionAnswer(span);
+  if (!a) return undefined;
+  if (node.kind === "route") {
+    if (a.type !== "choice") return undefined;
+    return round(flip.measure === "lead" ? (a.probabilities[taken] ?? 0) - (a.probabilities[flip.edge] ?? 0) : a.confidence);
+  }
+  if (node.kind === "gate") {
+    // A gate's "confidence" flip is the unsure minimum's own number (a yes/no measures p(yes) for that too).
+    return round(flip.measure === "confidence" && a.type !== "noul" ? confidenceOf(a) : gateValue(a, (node as GateNode).pass.label));
+  }
+  return undefined;
 }
 
 // ── per kind ─────────────────────────────────────────────────────────────────
@@ -183,10 +214,10 @@ function cascadeFlips(node: CascadeNode, span: Span, taken: string): Flip[] {
     if (tier.id === taken) {
       const next = node.tiers[i + 1]?.id ?? "fallback";
       // A bar of 0 can't be refused: confidence never goes below it.
-      if (tier.minConfidence > 0) flips.push({ edge: next, by: clamp0(c - tier.minConfidence), measure, from: c, to: tier.minConfidence, up: false, escalates: true });
+      if (tier.minConfidence > 0) flips.push({ edge: next, by: clamp0(c - tier.minConfidence), measure, from: c, to: tier.minConfidence, up: false, escalates: true, tier: tier.id });
       break;
     }
-    if (tier.minConfidence <= 1) flips.push({ edge: tier.id, by: clamp0(tier.minConfidence - c), measure, from: c, to: tier.minConfidence, up: true });
+    if (tier.minConfidence <= 1) flips.push({ edge: tier.id, by: clamp0(tier.minConfidence - c), measure, from: c, to: tier.minConfidence, up: true, tier: tier.id });
   }
   return flips;
 }
