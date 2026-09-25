@@ -129,7 +129,9 @@ describe("gate", () => {
     expect((await at(0.5)).output).toBe("eat");
     const over = await at(0.9);
     expect(over.output).toBe("wait");
-    expect(over.trace.spans[0]!.decision!.summary).toMatch(/over the 0.30–0.70 window comfortably \(by 0.20\)/);
+    expect(over.trace.spans[0]!.decision!.summary).toBe(
+      'Blocked: p(yes) = 0.90, 0.20 over the 0.30–0.70 window and clear of its 0.05 unsure margin comfortably (by 0.15), so took "otherwise".',
+    );
     expect((await at(0.72)).output).toBe("?"); // just over the ceiling is a close call too
   });
 
