@@ -98,13 +98,29 @@ export class ChainConfigError extends JevChainError {
   }
 }
 
-/** A node failed while running. `nodeId` points at the culprit; `cause` is the original error. */
+/**
+ * A node failed while running. `nodeId` points at the culprit, `path` at its
+ * span in the trace (ids can repeat, paths can't); `cause` is the original error.
+ */
 export class NodeError extends JevChainError {
   readonly nodeId: string;
-  constructor(nodeId: string, cause: unknown) {
+  readonly path: string | undefined;
+  constructor(nodeId: string, cause: unknown, path?: string) {
     const inner = cause instanceof Error ? cause.message : String(cause);
     super(cause instanceof JevChainError ? cause.code : "node_error", `Node "${nodeId}" failed: ${inner}`, { cause });
     this.nodeId = nodeId;
+    this.path = path;
+  }
+}
+
+/**
+ * Work that was stopped because something else failed first, e.g. a sibling
+ * branch of a `parallel`. It's collateral, not the culprit: `cause` (and the
+ * run's `error`) is the failure that set it off.
+ */
+export class CancelledError extends JevChainError {
+  constructor(message = "Cancelled", options?: { cause?: unknown }) {
+    super("cancelled", message, options);
   }
 }
 
@@ -117,13 +133,22 @@ export interface SerializedError {
   message: string;
   status?: number;
   nodeId?: string;
+  /**
+   * Span path where the failure started. On a span's own error this is the
+   * span's path if it failed there, or a descendant's if the failure came up
+   * from below.
+   */
+  path?: string;
 }
 
 export function serializeError(err: unknown): SerializedError {
   if (err instanceof JevChainError) {
     const out: SerializedError = { name: err.name, code: err.code, message: err.message };
     if (err instanceof JevAPIError) out.status = err.status;
-    if (err instanceof NodeError) out.nodeId = err.nodeId;
+    if (err instanceof NodeError) {
+      out.nodeId = err.nodeId;
+      if (err.path) out.path = err.path;
+    }
     return out;
   }
   if (err instanceof Error) return { name: err.name, code: "unknown", message: err.message };

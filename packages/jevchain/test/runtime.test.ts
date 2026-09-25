@@ -8,6 +8,7 @@ import {
   createJev,
   emit,
   gate,
+  NodeError,
   noul,
   parallel,
   route,
@@ -15,6 +16,7 @@ import {
   step,
   tier,
   traceFromEvents,
+  type JevClient,
   type TraceEvent,
 } from "../src/index.js";
 import { fakeFetch } from "./helpers";
@@ -109,6 +111,45 @@ describe("gate", () => {
     expect(r.trace.spans[0]!.decision!.summary).toMatch(/Too close to call/);
   });
 
+  it("measures the unsure margin from whichever edge of a window the value is next to", async () => {
+    const w = gate("w", {
+      ask: noul("warm?"),
+      pass: { min: 0.3, max: 0.7 },
+      then: emit("eat"),
+      otherwise: emit("wait"),
+      unsure: { margin: 0.05, then: emit("?") },
+    });
+    const at = (noul: number) => jevWith(fakeFetch(() => ({ noul }))).run(w, "x");
+    const ceiling = await at(0.69);
+    expect(ceiling.output).toBe("?");
+    expect(ceiling.trace.spans[0]!.decision!.summary).toBe(
+      'Too close to call: p(yes) = 0.69, 0.01 under the 0.70 ceiling of the 0.30–0.70 window, inside the 0.05 margin, so it took the "unsure" path.',
+    );
+    expect((await at(0.32)).output).toBe("?");
+    expect((await at(0.5)).output).toBe("eat");
+    const over = await at(0.9);
+    expect(over.output).toBe("wait");
+    expect(over.trace.spans[0]!.decision!.summary).toBe(
+      'Blocked: p(yes) = 0.90, 0.20 over the 0.30–0.70 window and clear of its 0.05 unsure margin comfortably (by 0.15), so took "otherwise".',
+    );
+    expect((await at(0.72)).output).toBe("?"); // just over the ceiling is a close call too
+  });
+
+  it("says when it's unsure because Jev isn't confident, not because the value is close", async () => {
+    const c = gate("c", {
+      ask: choice("?", ["yes", "no"]),
+      pass: { label: "yes", min: 0.2 },
+      then: emit("T"),
+      otherwise: emit("F"),
+      unsure: { margin: 0.05, minConfidence: 0.5, then: emit("?") },
+    });
+    const r = await jevWith(fakeFetch(() => ({ confidence: 0.3 }))).run(c, "x"); // p(yes) = 0.9, far from 0.2
+    expect(r.output).toBe("?");
+    expect(r.trace.spans[0]!.decision!.summary).toBe(
+      'Too unsure to call: p(yes) = 0.90, confidence 0.30 was under the 0.50 minimum, so it took the "unsure" path.',
+    );
+  });
+
   it("measures a choice label's probability", async () => {
     const c = gate("c", { ask: choice("?", ["yes", "no"]), pass: { label: "no", min: 0.5 }, then: emit("T"), otherwise: emit("F") });
     const r = await jevWith(fakeFetch()).run(c, "x"); // "yes" gets 0.9, "no" 0.1
@@ -178,6 +219,93 @@ describe("parallel", () => {
   });
 });
 
+describe("failure attribution", () => {
+  const boom = step("boom", async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    throw new Error("kaboom");
+  });
+  /** Resolves after `ms` unless its signal fires first. */
+  const waits = (id: string, ms: number) =>
+    step(id, (_: unknown, ctx) => new Promise((res, rej) => {
+      const t = setTimeout(res, ms);
+      ctx.signal.addEventListener("abort", () => { clearTimeout(t); rej(ctx.signal.reason); });
+    }));
+  const spans = (r: { trace: { spans: { path: string; status: string; error?: unknown }[] } }) =>
+    Object.fromEntries(r.trace.spans.map((s) => [s.path, { status: s.status, error: s.error }]));
+
+  it("closes cancelled siblings with a cancelled error, not the sibling's failure", async () => {
+    const p = parallel("p", {
+      branches: {
+        boom,
+        read: ask("read", { questions: { x: noul("?") } }),
+        wait: waits("wait", 200),
+        deaf: step("deaf", () => new Promise((r) => setTimeout(() => r("ignored the signal"), 200))),
+        seq: chain("seq", step("id", (x: unknown) => x), waits("later", 200)),
+      },
+    });
+    const r = await jevWith(fakeFetch(undefined, { latencyMs: 100 })).run(p, "x");
+    expect(r.status).toBe("error");
+    expect(r.error).toBeInstanceOf(NodeError);
+    expect(r.error).toMatchObject({ nodeId: "boom", path: "$/boom" });
+    expect(r.trace.error).toMatchObject({ code: "node_error", nodeId: "boom", path: "$/boom" });
+
+    const s = spans(r);
+    expect(s["$/boom"]!.error).toMatchObject({ message: "kaboom", path: "$/boom" });
+    expect(s["$"]!.error).toMatchObject({ message: "kaboom", path: "$/boom" });
+    const cancelled = { name: "CancelledError", code: "cancelled", message: 'Cancelled because "boom" failed at $/boom' };
+    for (const path of ["$/read", "$/wait", "$/deaf", "$/seq/1"]) {
+      expect(s[path], path).toEqual({ status: "error", error: { ...cancelled, path } });
+    }
+    // An ancestor of a cancelled span points down at where the cancellation landed.
+    expect(s["$/seq"]).toEqual({ status: "error", error: { ...cancelled, path: "$/seq/1" } });
+    expect(s["$/seq/0"]!.status).toBe("ok");
+    // No span but the culprit (and its ancestor) claims the culprit's error.
+    expect(r.trace.spans.filter((x) => x.error?.message === "kaboom").map((x) => x.path).sort()).toEqual(["$", "$/boom"]);
+  });
+
+  it("cascades cancellation into nested parallels", async () => {
+    const p = parallel("outer", {
+      branches: {
+        boom,
+        inner: parallel("inner", { branches: { a: waits("a", 200), b: waits("b", 200) } }),
+      },
+    });
+    const r = await jevWith(fakeFetch()).run(p, "x");
+    expect(r.trace.error).toMatchObject({ nodeId: "boom", path: "$/boom" });
+    const s = spans(r);
+    expect(s["$/inner/a"]!.error).toMatchObject({ code: "cancelled", path: "$/inner/a" });
+    expect(s["$/inner/b"]!.error).toMatchObject({ code: "cancelled", path: "$/inner/b" });
+    expect(s["$/inner"]!.error).toMatchObject({ code: "cancelled" });
+  });
+
+  it("keeps a caller's abort an abort, blamed on the node it interrupted", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 10);
+    const p = parallel("p", { branches: { a: waits("a", 200), b: waits("b", 200) } });
+    const r = await jevWith(fakeFetch()).run(p, "x", { signal: ac.signal });
+    expect(r.status).toBe("aborted");
+    expect(r.trace.error).toMatchObject({ code: "aborted", nodeId: "a", path: "$/a" });
+    for (const path of ["$/a", "$/b"]) expect(spans(r)[path]!.error).toMatchObject({ code: "aborted", path });
+  });
+
+  it("leaves a halting sibling's run halted", async () => {
+    const p = parallel("p", {
+      branches: { g: gate("g", { ask: noul("?"), pass: { min: 0.99 }, then: emit("ok") }), wait: waits("wait", 200) },
+    });
+    const r = await jevWith(fakeFetch()).run(p, "x");
+    expect(r.status).toBe("halted");
+    expect(spans(r)["$/wait"]).toEqual({ status: "halted", error: undefined });
+  });
+
+  it("points ancestors at the path that failed", async () => {
+    const c = chain("c", step("fine", (x: string) => x), chain("inner", step("bad", () => { throw new Error("nope"); })));
+    const r = await jevWith(fakeFetch()).run(c, "x");
+    expect(r.trace.error).toMatchObject({ nodeId: "bad", path: "$/1/0" });
+    const s = spans(r);
+    for (const path of ["$", "$/1", "$/1/0"]) expect(s[path]!.error).toMatchObject({ message: "nope", path: "$/1/0" });
+  });
+});
+
 describe("cascade", () => {
   const c = cascade("c", {
     tiers: [
@@ -204,6 +332,22 @@ describe("cascade", () => {
     expect(d.taken).toBe("fallback");
     expect(d.edges.map((e) => e.edge)).toEqual(["quick", "thorough", "fallback"]);
     expect(r.trace.spans[0]!.calls.map((x) => x.tier)).toEqual(["quick", "thorough"]);
+  });
+
+  it("records the number that sent it to the fallback: the last tier's confidence against its bar", async () => {
+    let n = 0;
+    const f = fakeFetch(() => ({ confidence: ++n === 1 ? 0.5 : 0.45 }));
+    const r = await jevWith(f).run(c, { preview: "hi" });
+    const d = r.trace.spans[0]!.decision!;
+    expect(d).toMatchObject({ taken: "fallback", metric: "confidence", value: 0.45, threshold: { min: 0.6 }, confidence: 0.45 });
+    expect(d.edges).toEqual([
+      { edge: "quick", value: 0.5, taken: false },
+      { edge: "thorough", value: 0.45, taken: false },
+      { edge: "fallback", value: null, taken: true },
+    ]);
+    expect(d.summary).toBe(
+      'Escalated past "quick" (0.50, needed 0.80), "thorough" (0.45, needed 0.60); no tier was confident enough, so it handed off to the fallback.',
+    );
   });
 });
 
@@ -291,5 +435,145 @@ describe("runs", () => {
     expect(r.status).toBe("ok");
     expect(r.trace.spans[0]!.retries.map((x) => x.error.code)).toEqual(["rate_limited", "overloaded"]);
     expect(r.trace.spans[0]!.calls[0]!.attempts).toBe(3);
+  });
+});
+
+describe("stopping a run", () => {
+  const q = { x: noul("?") };
+  const three = chain("three", ask("a", { questions: q, state: "a" }), ask("b", { questions: q, state: "b" }), ask("c", { questions: q, state: "c" }));
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("aborts the run when a stream's consumer breaks out early", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 20 });
+    const s = jevWith(f).stream(three, "x");
+    for await (const e of s) if (e.type === "jev:call") break;
+    // The loop only exits once the run has closed: nothing is left in flight.
+    const first = await Promise.race([s.result.then(() => "closed"), settle(0).then(() => "still running")]);
+    expect(first).toBe("closed");
+    await settle(100);
+    expect(f.calls.map((c) => c.state)).toEqual(["a"]);
+    const res = await s.result;
+    expect(res.status).toBe("aborted");
+    expect(res.error?.message).toMatch(/consumer stopped reading/);
+    expect(res.trace.error).toMatchObject({ code: "aborted", nodeId: "b", path: "$/1" });
+    expect(res.trace.spans.every((x) => x.status !== "running")).toBe(true);
+  });
+
+  it("aborts the run when a stream's consumer throws", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 20 });
+    const s = jevWith(f).stream(three, "x");
+    const consume = async () => {
+      for await (const e of s) if (e.type === "span:start" && e.span.nodeId === "a") throw new Error("render failed");
+    };
+    await expect(consume()).rejects.toThrow("render failed");
+    await settle(100);
+    expect(f.calls).toHaveLength(1);
+    expect((await s.result).status).toBe("aborted");
+  });
+
+  it("lets a stream nobody iterates run to the end, and still honours the caller's signal", async () => {
+    const f = fakeFetch();
+    expect((await jevWith(f).stream(three, "x").result).status).toBe("ok");
+    expect(f.calls).toHaveLength(3);
+
+    const ac = new AbortController();
+    const slow = fakeFetch(undefined, { latencyMs: 50 });
+    const s = jevWith(slow).stream(three, "x", { signal: ac.signal });
+    setTimeout(() => ac.abort(), 10);
+    const events: TraceEvent[] = [];
+    for await (const e of s) events.push(e);
+    expect(events.at(-1)!.type).toBe("run:end");
+    expect((await s.result).status).toBe("aborted");
+    expect(slow.calls).toHaveLength(1);
+  });
+
+  /** How long a `break` on the first event of `kind` takes to leave the loop. */
+  const breakOn = async (s: AsyncIterable<TraceEvent>, stopAt: (e: TraceEvent) => boolean) => {
+    let t0 = 0;
+    for await (const e of s) {
+      if (stopAt(e)) {
+        t0 = Date.now();
+        break;
+      }
+    }
+    return Date.now() - t0;
+  };
+
+  it("leaves the loop at once even when a parallel's join ignores the signal", async () => {
+    const p = parallel("p", {
+      branches: { a: emit("a"), b: emit("b") },
+      join: () => new Promise(() => {}), // never settles, never looks at ctx.signal
+    });
+    const s = jevWith(fakeFetch()).stream(p, "x");
+    expect(await breakOn(s, (e) => e.type === "span:end" && e.path === "$/b")).toBeLessThan(50);
+    expect((await s.result).status).toBe("aborted");
+  });
+
+  it("leaves the loop at once even when a custom client ignores the signal", async () => {
+    const deaf: JevClient = { model: "fake", usdPerMillionTokens: 0, ask: () => new Promise(() => {}) };
+    const s = createJev(deaf).stream(three, "x");
+    expect(await breakOn(s, (e) => e.type === "span:start" && e.span.nodeId === "a")).toBeLessThan(50);
+    const res = await s.result;
+    expect(res.status).toBe("aborted");
+    expect(res.trace.error).toMatchObject({ code: "aborted", nodeId: "a", path: "$/0" });
+  });
+
+  it("doesn't sleep through an abort between step retries", async () => {
+    const ac = new AbortController();
+    const flaky = step("flaky", () => { throw new Error("nope"); }, { retries: 5 }); // backoff: 100, 200, 400ms...
+    setTimeout(() => ac.abort(), 30);
+    const t0 = Date.now();
+    const r = await jevWith(fakeFetch()).run(flaky, "x", { signal: ac.signal });
+    expect(Date.now() - t0).toBeLessThan(90);
+    expect(r.status).toBe("aborted");
+    expect(r.trace.spans[0]!.retries).toHaveLength(1);
+  });
+
+  it("cancels a step's own ctx.jev calls with the step", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 60 });
+    const own = new AbortController(); // a signal the step passes itself still counts, alongside the step's
+    const deaf = step(
+      "deaf",
+      async (_: unknown, ctx) => {
+        await ctx.jev.ask("first", q, { signal: own.signal }).catch(() => {});
+        await ctx.jev.ask("second", q).catch(() => {});
+        return "done";
+      },
+      { timeoutMs: 20 },
+    );
+    const r = await jevWith(f).run(deaf, "x");
+    expect(r.error?.code).toBe("timeout");
+    await settle(150);
+    expect(f.calls.map((c) => c.state)).toEqual(["first"]);
+  });
+
+  it("halts every branch a halting sibling cuts short, asks included", async () => {
+    // The gate's call answers in 5ms; everything else takes 100ms, so it's cut short.
+    const base = fakeFetch();
+    const f = (async (url: string, init?: RequestInit) => {
+      const { state } = JSON.parse(String(init?.body)) as { state: string };
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, state === "gate" ? 5 : 100);
+        init?.signal?.addEventListener("abort", () => { clearTimeout(t); reject(init.signal!.reason); });
+      });
+      return base(url, init);
+    }) as typeof fetch;
+    const p = parallel("p", {
+      branches: {
+        g: gate("g", { ask: noul("?"), pass: { min: 0.99 }, then: emit("ok"), state: "gate" }),
+        read: ask("read", { questions: q, state: "read" }),
+        later: chain("later", step("pause", () => settle(1)), ask("late", { questions: q, state: "late" })),
+      },
+    });
+    const r = await createJev({ apiKey: "test", fetch: f }).run(p, "x");
+    expect(r.status).toBe("halted");
+    expect(Object.fromEntries(r.trace.spans.map((x) => [x.path, [x.status, x.error?.code]]))).toEqual({
+      $: ["halted", undefined],
+      "$/g": ["halted", undefined],
+      "$/read": ["halted", undefined],
+      "$/later": ["halted", undefined],
+      "$/later/0": ["ok", undefined],
+      "$/later/1": ["halted", undefined],
+    });
   });
 });

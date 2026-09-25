@@ -4,28 +4,42 @@
  *
  * If the whole template is a single hole (`"{{input.chat}}"`) the raw value is
  * returned, so objects and arrays survive as structured state.
+ *
+ * A hole's root must be `input`, `run`, `results` or `answers`. `chainIssues`
+ * checks that (and that `results.<id>` names a node that has finished by then,
+ * and `answers.<id>.<key>` a question that has been answered) before a run; a
+ * hole that still comes up empty at runtime is reported through `onMissing`.
  */
 import type { Json } from "./questions";
 
 const HOLE = /\{\{\s*([\w$.-]+)\s*\}\}/g;
 const WHOLE = /^\{\{\s*([\w$.-]+)\s*\}\}$/;
 
-export function renderTemplate(template: string, scope: Record<string, unknown>): unknown {
+/**
+ * What a template can read: the node's input, the run's input, finished nodes'
+ * outputs by id, and Jev's answers by node id (set as soon as a call returns).
+ */
+export const TEMPLATE_ROOTS = ["input", "run", "results", "answers"] as const;
+
+/** Called with a hole's path when there's nothing there, e.g. `"input.mesage"`. An explicit `null` isn't missing. */
+export type OnMissing = (path: string) => void;
+
+export function renderTemplate(template: string, scope: Record<string, unknown>, onMissing?: OnMissing): unknown {
   const whole = WHOLE.exec(template);
-  if (whole) return lookup(scope, whole[1]!);
+  if (whole) return lookup(scope, whole[1]!, onMissing);
   return template.replace(HOLE, (_, path: string) => {
-    const v = lookup(scope, path);
+    const v = lookup(scope, path, onMissing);
     if (v === undefined || v === null) return "";
     return typeof v === "string" ? v : JSON.stringify(v);
   });
 }
 
 /** Render every string inside a JSON value. */
-export function renderJson(value: Json, scope: Record<string, unknown>): unknown {
-  if (typeof value === "string") return renderTemplate(value, scope);
-  if (Array.isArray(value)) return value.map((v) => renderJson(v, scope));
+export function renderJson(value: Json, scope: Record<string, unknown>, onMissing?: OnMissing): unknown {
+  if (typeof value === "string") return renderTemplate(value, scope, onMissing);
+  if (Array.isArray(value)) return value.map((v) => renderJson(v, scope, onMissing));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, renderJson(v, scope)]));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, renderJson(v, scope, onMissing)]));
   }
   return value;
 }
@@ -35,11 +49,15 @@ export function templatePaths(template: string): string[] {
   return [...template.matchAll(HOLE)].map((m) => m[1]!);
 }
 
-function lookup(scope: Record<string, unknown>, path: string): unknown {
+function lookup(scope: Record<string, unknown>, path: string, onMissing?: OnMissing): unknown {
   let cur: unknown = scope;
   for (const part of path.split(".")) {
-    if (cur === null || cur === undefined) return undefined;
+    if (cur === null || cur === undefined) {
+      cur = undefined;
+      break;
+    }
     cur = (cur as Record<string, unknown>)[part];
   }
+  if (cur === undefined) onMissing?.(path);
   return cur;
 }

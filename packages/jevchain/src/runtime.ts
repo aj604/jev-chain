@@ -8,6 +8,7 @@
  */
 import { createJevClient, type AskResult, type JevClient, type JevClientOptions } from "./client";
 import {
+  CancelledError,
   ChainConfigError,
   JevAbortError,
   JevChainError,
@@ -16,7 +17,7 @@ import {
   serializeError,
   type SerializedError,
 } from "./errors";
-import { explainDecision, type ExplainInput } from "./explain";
+import { explainDecision, nearestEdge, type ExplainInput } from "./explain";
 import {
   childPath,
   ROOT_PATH,
@@ -33,8 +34,8 @@ import {
   type StepContext,
   type StepNode,
 } from "./nodes";
-import { confidenceOf, type Answer, type Entry, type Json, type Questions } from "./questions";
-import { renderJson, renderTemplate } from "./template";
+import { confidenceOf, distance, type Answer, type Entry, type Json, type Questions } from "./questions";
+import { renderJson, renderTemplate, type OnMissing } from "./template";
 import { reduceTrace, type Decision, type JevCall, type RunStatus, type SpanStatus, type Trace, type TraceEvent } from "./trace";
 import { chainIssues, DECISION_KEY } from "./validate";
 
@@ -88,13 +89,24 @@ export interface TraceStream<O> extends AsyncIterable<TraceEvent> {
  * for await (const e of s) render(e);
  * const { output } = await s.result;
  * ```
+ *
+ * Leaving the loop early (`break`, `return`, a throw) aborts the run: nothing
+ * new is sent to Jev, and the loop exits once the run has closed, so no call
+ * is still in flight. `result` then resolves with `status: "aborted"`. Only
+ * iterating counts: a stream nobody iterates just runs to the end.
  */
 export function stream<I, O>(node: JevNode<I, O>, input: I, options: RunOptions): TraceStream<O> {
   const buffer: TraceEvent[] = [];
   let wake: (() => void) | undefined;
   let done = false;
+  const stop = new AbortController();
+  const outer = options.signal;
+  const onOuterAbort = () => stop.abort(outer!.reason);
+  if (outer?.aborted) onOuterAbort();
+  else outer?.addEventListener("abort", onOuterAbort, { once: true });
   const result = run(node, input, {
     ...options,
+    signal: stop.signal,
     onEvent: (e) => {
       options.onEvent?.(e);
       buffer.push(e);
@@ -102,22 +114,30 @@ export function stream<I, O>(node: JevNode<I, O>, input: I, options: RunOptions)
     },
   }).finally(() => {
     done = true;
+    outer?.removeEventListener("abort", onOuterAbort);
     wake?.();
   });
   return {
     result,
     async *[Symbol.asyncIterator]() {
-      for (;;) {
-        if (buffer.length) {
-          yield buffer.shift()!;
-          continue;
+      try {
+        for (;;) {
+          if (buffer.length) {
+            yield buffer.shift()!;
+            continue;
+          }
+          if (done) {
+            await result; // surface config errors to the iterating caller
+            return;
+          }
+          await new Promise<void>((r) => (wake = r));
+          wake = undefined;
         }
-        if (done) {
-          await result; // surface config errors to the iterating caller
-          return;
+      } finally {
+        if (!done) {
+          stop.abort(new Error("the stream's consumer stopped reading"));
+          await result.catch(() => {});
         }
-        await new Promise<void>((r) => (wake = r));
-        wake = undefined;
       }
     },
   };
@@ -129,6 +149,8 @@ class Runner {
   private trace: Trace | undefined;
   private t0 = 0;
   private readonly results: Record<string, unknown> = {};
+  /** Jev's answers by node id, set as each call returns (see `StepContext.answers`). */
+  private readonly answers: Record<string, Record<string, Answer>> = {};
   private readonly controller = new AbortController();
   private runInput: unknown;
   private callSeq = 0;
@@ -188,7 +210,7 @@ class Runner {
     // Close anything left open (siblings cancelled by a failure or halt).
     for (const s of this.trace!.spans) {
       if (s.status === "running") {
-        this.emit({ type: "span:end", at: this.now(), path: s.path, status: status === "halted" ? "halted" : "error", error: { name: "Cancelled", code: "cancelled", message: "Cancelled when the run ended" } });
+        this.emit({ type: "span:end", at: this.now(), path: s.path, status: status === "halted" ? "halted" : "error", error: serializeError(new CancelledError("Cancelled when the run ended")) });
       }
     }
 
@@ -207,7 +229,7 @@ class Runner {
   }
 
   private async exec(node: AnyJevNode, input: unknown, path: string, parentPath: string | null, edge: string | null, signal: AbortSignal): Promise<unknown> {
-    if (signal.aborted) throw signal.reason instanceof JevChainError ? signal.reason : new JevAbortError(signal.reason);
+    if (signal.aborted) throw signal.reason instanceof JevChainError || signal.reason instanceof Halt ? signal.reason : new JevAbortError(signal.reason);
     this.emit({
       type: "span:start",
       at: this.now(),
@@ -227,13 +249,18 @@ class Runner {
       this.emit({ type: "span:end", at: this.now(), path, status: "ok", output: this.safe(output) });
       return output;
     } catch (e) {
-      if (e instanceof Halt) {
+      // A branch cut short by a halting sibling halts too, whatever it was
+      // doing (a step sees the Halt itself; an ask sees an abort wrapping it).
+      const halt = e instanceof Halt ? e : signal.aborted && signal.reason instanceof Halt ? signal.reason : undefined;
+      if (halt) {
         this.emit({ type: "span:end", at: this.now(), path, status: "halted" });
-        throw e;
+        throw halt;
       }
-      // Attribute the failure to the innermost node only.
-      const err = e instanceof NodeError ? e : new NodeError(node.id, e);
-      this.emit({ type: "span:end", at: this.now(), path, status: "error", error: serializeError(err.cause ?? err) });
+      // Attribute the failure to the innermost node only; ancestors point down at it.
+      const err = e instanceof NodeError ? e : new NodeError(node.id, e, path);
+      const error = serializeError(err.cause ?? err);
+      if (err.path) error.path = err.path;
+      this.emit({ type: "span:end", at: this.now(), path, status: "error", error });
       throw err;
     }
   }
@@ -253,7 +280,7 @@ class Runner {
       case "step":
         return this.execStep(node, input, path, signal);
       case "emit":
-        return Promise.resolve(this.execEmit(node, input));
+        return Promise.resolve(this.execEmit(node, input, path));
       case "chain":
         return this.execChain(node, input, path, signal);
     }
@@ -262,11 +289,17 @@ class Runner {
   // --- helpers ---------------------------------------------------------------
 
   private scope(input: unknown) {
-    return { input, run: this.runInput, results: this.results };
+    return { input, run: this.runInput, results: this.results, answers: this.answers };
   }
 
-  private resolveState(spec: StateSpec<unknown> | undefined, input: unknown): Entry {
-    const raw = spec === undefined ? input : typeof spec === "function" ? spec(input) : renderTemplate(spec, this.scope(input));
+  /** Notes an empty template hole on the span, so a blank state or emit isn't a mystery. */
+  private onMissing(path: string): OnMissing {
+    return (hole) =>
+      this.emit({ type: "log", path, log: { at: this.now(), message: `Template hole "{{${hole}}}" was empty`, data: { hole } } });
+  }
+
+  private resolveState(spec: StateSpec<unknown> | undefined, input: unknown, path: string): Entry {
+    const raw = spec === undefined ? input : typeof spec === "function" ? spec(input) : renderTemplate(spec, this.scope(input), this.onMissing(path));
     return toEntry(raw);
   }
 
@@ -274,20 +307,25 @@ class Runner {
     return {
       runInput: this.runInput,
       results: this.results,
+      answers: this.answers,
       signal,
-      jev: this.opts.jev,
+      jev: boundTo(this.opts.jev, signal),
       log: (message, data) => this.emit({ type: "log", path, log: { at: this.now(), message, ...(data !== undefined ? { data } : {}) } }),
     };
   }
 
   private async callJev(path: string, state: Entry, questions: Questions, model: string | undefined, signal: AbortSignal, tier?: string): Promise<AskResult> {
     const start = this.now();
-    const r = await this.opts.jev.ask(state, questions, {
-      ...(model ? { model } : {}),
+    // Raced against the signal: a custom client that ignores it can't hold up a stopped run.
+    const r = await untilAborted(
+      this.opts.jev.ask(state, questions, {
+        ...(model ? { model } : {}),
+        signal,
+        onRetry: ({ attempt, delayMs, error }) =>
+          this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(error), source: "jev" } }),
+      }),
       signal,
-      onRetry: ({ attempt, delayMs, error }) =>
-        this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(error), source: "jev" } }),
-    });
+    );
     const call: JevCall = {
       id: `call_${++this.callSeq}`,
       model: r.model,
@@ -320,6 +358,9 @@ class Runner {
       ...(d.threshold ? { threshold: d.threshold } : {}),
       ...(d.confidence !== undefined ? { confidence: d.confidence } : {}),
       ...(d.fallback ? { fallback: true } : {}),
+      ...(d.lowConfidence ? { lowConfidence: { below: d.lowConfidence.below } } : {}),
+      ...(d.unsure ? { unsure: { ...d.unsure } } : {}),
+      ...(d.tierBars ? { tierBars: { ...d.tierBars } } : {}),
       summary: explainDecision(d),
     };
     this.emit({ type: "decision", path, decision });
@@ -329,13 +370,15 @@ class Runner {
   // --- node kinds -------------------------------------------------------------
 
   private async execAsk(node: AskNode, input: unknown, path: string, signal: AbortSignal) {
-    const r = await this.callJev(path, this.resolveState(node.state, input), node.questions, node.model, signal);
+    const r = await this.callJev(path, this.resolveState(node.state, input, path), node.questions, node.model, signal);
+    this.answers[node.id] = r.answers as Record<string, Answer>;
     return r.answers;
   }
 
   private async execRoute(node: RouteNode, input: unknown, path: string, signal: AbortSignal) {
     const questions = { [DECISION_KEY]: node.ask, ...node.alsoAsk };
-    const r = await this.callJev(path, this.resolveState(node.state, input), questions, node.model, signal);
+    const r = await this.callJev(path, this.resolveState(node.state, input, path), questions, node.model, signal);
+    this.answers[node.id] = r.answers as Record<string, Answer>;
     const answer = r.answers[DECISION_KEY] as Answer & { type: "choice" };
     const low = node.lowConfidence && answer.confidence < node.lowConfidence.below;
     const taken = low ? "lowConfidence" : answer.choice;
@@ -349,6 +392,7 @@ class Runner {
       metric: "probability",
       value: answer.probabilities[answer.choice] ?? 0,
       confidence: answer.confidence,
+      ...(node.lowConfidence ? { lowConfidence: { below: node.lowConfidence.below } } : {}),
       ...(low ? { fallback: true, wouldHaveBeen: answer.choice, lowConfidenceBelow: node.lowConfidence!.below } : {}),
     });
     const next = low ? node.lowConfidence!.then : node.branches[taken];
@@ -358,20 +402,33 @@ class Runner {
 
   private async execGate(node: GateNode, input: unknown, path: string, signal: AbortSignal) {
     const questions = { [DECISION_KEY]: node.ask, ...node.alsoAsk };
-    const r = await this.callJev(path, this.resolveState(node.state, input), questions, node.model, signal);
+    const r = await this.callJev(path, this.resolveState(node.state, input, path), questions, node.model, signal);
+    this.answers[node.id] = r.answers as Record<string, Answer>;
     const answer = r.answers[DECISION_KEY] as Answer;
     const { value, metric } = gateValue(answer, node.pass.label);
     const { min, max } = node.pass;
     const passed = (min === undefined || value >= min) && (max === undefined || value <= max);
     const confidence = confidenceOf(answer);
+    const threshold = { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}), ...(node.pass.label ? { label: node.pass.label } : {}) };
     let unsure = false;
+    let unsureBecause: ExplainInput["unsureBecause"];
     if (node.unsure) {
-      const bar = min ?? max;
-      const nearBar = node.unsure.margin !== undefined && bar !== undefined && Math.abs(value - bar) < node.unsure.margin;
-      const lowConf = node.unsure.minConfidence !== undefined && confidence < node.unsure.minConfidence;
+      // Measured against the edge the value is next to: for a min–max window,
+      // a value just under `max` is as close a call as one just over `min`.
+      // The margin is strict and measured as a decimal: exactly `margin` away
+      // is outside it, on either side of the bar.
+      const edge = nearestEdge(value, threshold);
+      const { margin, minConfidence } = node.unsure;
+      const nearBar = margin !== undefined && edge !== undefined && distance(value, edge.bar) < margin;
+      const lowConf = minConfidence !== undefined && confidence < minConfidence;
       unsure = nearBar || lowConf;
+      if (unsure) unsureBecause = { ...(nearBar ? { margin } : {}), ...(lowConf ? { minConfidence, confidence } : {}) };
     }
     const taken = unsure ? "unsure" : passed ? "then" : node.otherwise ? "otherwise" : "halt";
+    // The unsure triggers as configured, recorded whether or not they fired.
+    const unsureRules = node.unsure
+      ? { ...(node.unsure.margin !== undefined ? { margin: node.unsure.margin } : {}), ...(node.unsure.minConfidence !== undefined ? { minConfidence: node.unsure.minConfidence } : {}) }
+      : undefined;
     const edges = [{ edge: "then", value, taken: taken === "then" }];
     if (node.otherwise) edges.push({ edge: "otherwise", value, taken: taken === "otherwise" });
     if (node.unsure) edges.push({ edge: "unsure", value, taken: taken === "unsure" });
@@ -382,8 +439,11 @@ class Runner {
       edges,
       metric,
       value,
-      threshold: { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}), ...(node.pass.label ? { label: node.pass.label } : {}) },
-      ...(answer.type !== "noul" ? { confidence } : {}),
+      threshold,
+      // A noul's confidence is derived; it's only worth recording when a rule compared it.
+      ...(answer.type !== "noul" || unsureRules?.minConfidence !== undefined ? { confidence } : {}),
+      ...(unsureRules ? { unsure: unsureRules } : {}),
+      ...(unsureBecause ? { unsureBecause } : {}),
     });
     if (taken === "halt") throw new Halt(path, node.id, decision.summary);
     const next = taken === "then" ? node.then : taken === "otherwise" ? node.otherwise! : node.unsure!.then;
@@ -391,25 +451,31 @@ class Runner {
   }
 
   private async execParallel(node: ParallelNode, input: unknown, path: string, signal: AbortSignal) {
-    // Siblings share a controller so one failure cancels the rest.
+    // Siblings share a controller so one failure cancels the rest. They're
+    // cancelled with a CancelledError, not the failure itself, so the trace
+    // blames only the branch that actually broke. (A halt stays a halt.)
     const local = new AbortController();
     const onAbort = () => local.abort(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     const entries = Object.entries(node.branches);
+    let first: { error: unknown } | undefined;
     try {
       const settled = await Promise.allSettled(
         entries.map(([key, child]) =>
           this.exec(child as AnyJevNode, input, childPath(path, key), path, key, local.signal).catch((e) => {
-            if (!local.signal.aborted) local.abort(e);
+            first ??= { error: e };
+            if (!local.signal.aborted) local.abort(e instanceof Halt ? e : cancelledBy(e));
             throw e;
           }),
         ),
       );
-      // The controller's reason is the first failure (or the outer abort).
+      if (first) throw first.error;
       const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
-      if (rejected) throw local.signal.reason ?? rejected.reason;
+      if (rejected) throw rejected.reason;
       const results = Object.fromEntries(entries.map(([key], i) => [key, (settled[i] as PromiseFulfilledResult<unknown>).value]));
-      return node.join ? await node.join(results, input, this.ctx(path, signal)) : results;
+      if (!node.join) return results;
+      const join = node.join;
+      return await untilAborted(Promise.resolve().then(() => join(results, input, this.ctx(path, signal))), signal);
     } finally {
       signal.removeEventListener("abort", onAbort);
     }
@@ -418,18 +484,34 @@ class Runner {
   private async execCascade(node: CascadeNode, input: unknown, path: string, signal: AbortSignal) {
     const edges: Decision["edges"] = node.tiers.map((t) => ({ edge: t.id, value: null, taken: false }));
     edges.push({ edge: "fallback", value: null, taken: false });
+    const tierBars = Object.fromEntries(node.tiers.map((t) => [t.id, t.minConfidence]));
+    let last = { confidence: 0, bar: 0 };
     for (const [i, tier] of node.tiers.entries()) {
-      const r = await this.callJev(path, this.resolveState(tier.state, input), { [DECISION_KEY]: tier.ask }, tier.model, signal, tier.id);
+      const r = await this.callJev(path, this.resolveState(tier.state, input, path), { [DECISION_KEY]: tier.ask }, tier.model, signal, tier.id);
       const answer = r.answers[DECISION_KEY] as Answer;
+      // Tiers accumulate; the first starts fresh, in case this cascade (by id) already ran.
+      this.answers[node.id] = { ...(i === 0 ? {} : this.answers[node.id]), [tier.id]: answer };
       const confidence = confidenceOf(answer);
       edges[i] = { edge: tier.id, value: confidence, taken: confidence >= tier.minConfidence };
       if (confidence >= tier.minConfidence) {
-        this.decide(path, { kind: "cascade", question: DECISION_KEY, taken: tier.id, edges, metric: "confidence", value: confidence, threshold: { min: tier.minConfidence }, confidence });
+        this.decide(path, { kind: "cascade", question: DECISION_KEY, taken: tier.id, edges, metric: "confidence", value: confidence, threshold: { min: tier.minConfidence }, confidence, tierBars });
         return { resolvedBy: "tier", tier: tier.id, answer };
       }
+      last = { confidence, bar: tier.minConfidence };
     }
+    // The number that sent it to the fallback: the last tier's confidence, short of that tier's bar.
     edges[edges.length - 1] = { edge: "fallback", value: null, taken: true };
-    this.decide(path, { kind: "cascade", question: DECISION_KEY, taken: "fallback", edges, metric: "confidence", value: 0 });
+    this.decide(path, {
+      kind: "cascade",
+      question: DECISION_KEY,
+      taken: "fallback",
+      edges,
+      metric: "confidence",
+      value: last.confidence,
+      threshold: { min: last.bar },
+      confidence: last.confidence,
+      tierBars,
+    });
     const output = await this.exec(node.fallback as AnyJevNode, input, childPath(path, "fallback"), path, "fallback", signal);
     return { resolvedBy: "fallback", output };
   }
@@ -443,7 +525,7 @@ class Runner {
         if (signal.aborted || attempt > retries) throw e;
         const delayMs = Math.min(2000, 100 * 2 ** (attempt - 1));
         this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(e), source: "step" } });
-        await new Promise((r) => setTimeout(r, delayMs));
+        await sleep(delayMs, signal);
       }
     }
   }
@@ -487,8 +569,8 @@ class Runner {
     });
   }
 
-  private execEmit(node: EmitNode, input: unknown) {
-    return renderJson(node.value, this.scope(input));
+  private execEmit(node: EmitNode, input: unknown, path: string) {
+    return renderJson(node.value, this.scope(input), this.onMissing(path));
   }
 
   private async execChain(node: ChainNode, input: unknown, path: string, signal: AbortSignal) {
@@ -498,6 +580,84 @@ class Runner {
     }
     return value;
   }
+}
+
+/** `jev`, but every ask is also cancelled by `signal`, so a step's own calls stop when it does. */
+function boundTo(jev: JevClient, signal: AbortSignal): JevClient {
+  return {
+    model: jev.model,
+    usdPerMillionTokens: jev.usdPerMillionTokens,
+    ask: (state, questions, options = {}) => jev.ask(state, questions, { ...options, signal: options.signal ? either(options.signal, signal) : signal }),
+  };
+}
+
+/** A signal that aborts when either input does, with that one's reason. */
+function either(a: AbortSignal, b: AbortSignal): AbortSignal {
+  if (a.aborted) return a;
+  if (b.aborted) return b;
+  const controller = new AbortController();
+  const onA = () => {
+    b.removeEventListener("abort", onB);
+    controller.abort(a.reason);
+  };
+  const onB = () => {
+    a.removeEventListener("abort", onA);
+    controller.abort(b.reason);
+  };
+  a.addEventListener("abort", onA, { once: true });
+  b.addEventListener("abort", onB, { once: true });
+  return controller.signal;
+}
+
+/**
+ * `work`, or a rejection with the signal's reason as soon as it aborts, so
+ * user code (a join, a custom client) that ignores the signal can't keep a
+ * stopped run from settling. Until the signal fires it's just `work`.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.catch(() => {}); // it may still reject later; nobody's listening
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** Waits `ms`, or rejects with the signal's reason as soon as it aborts. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** The reason a parallel's surviving branches are aborted with when a sibling fails. */
+function cancelledBy(cause: unknown): CancelledError {
+  const where = cause instanceof NodeError ? ` because "${cause.nodeId}" failed${cause.path ? ` at ${cause.path}` : ""}` : "";
+  return new CancelledError(`Cancelled${where}`, { cause });
 }
 
 function gateValue(answer: Answer, label?: string): { value: number; metric: Decision["metric"] } {
