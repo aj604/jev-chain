@@ -5,7 +5,8 @@
  * `readDocumentEdit` accepts, run it through everything build mode does with
  * a document: the canvas (graph, hints, layout, node cards), the checks strip,
  * the property editor for every vertex, the document panel, the code drawer,
- * the structural edits, and a draft save + reload. A mutation must either be
+ * the structural edits, the data-flow warnings and their fixes, and a draft
+ * save + reload. A mutation must either be
  * refused or survive all of it.
  */
 import { createElement } from "react";
@@ -21,6 +22,7 @@ import { TraceNode } from "@/components/trace/graph-node";
 import { resolveChain } from "@/lib/trace/chain-source";
 import { layoutGraph, nodeSize, vertexHints } from "@/lib/trace/layout";
 import { pasteAt } from "./clipboard";
+import { flowWarnings, inputAt } from "./data-flow";
 import {
   allIds,
   canDuplicate,
@@ -35,6 +37,7 @@ import {
   replaceKind,
   subtreeSize,
   template,
+  updateAt,
   withRoot,
   type NodeJson,
 } from "./doc-ops";
@@ -100,7 +103,8 @@ function exercise(doc: ChainDocument) {
     issueTarget(i);
     issueMessage(i);
   }
-  renderToString(createElement(IssuesPanel, { issues: list, onPick: noop }));
+  const warnings = flowWarnings(root);
+  renderToString(createElement(IssuesPanel, { issues: list, warnings, onPick: noop, onFix: noop }));
 
   // the canvas: studio falls back to an empty graph if graphOf throws, so only what follows it matters
   let graph;
@@ -141,6 +145,7 @@ function exercise(doc: ChainDocument) {
         onSelect: noop,
         confirmRemove: noop,
         actions: null,
+        flow: { input: inputAt(root, t.path), warnings: warnings.filter((w) => w.path === t.path), onFix: noop },
       }),
     );
   }
@@ -174,6 +179,17 @@ function exercise(doc: ChainDocument) {
     subtreeSize(root);
   }
   withRoot(doc, root);
+
+  // every data-flow fix makes a document the json tab still takes, that jevchain likes no less, and that clears its warning
+  for (const w of warnings) {
+    for (const f of w.fixes) {
+      const fixed = withRoot(doc, updateAt(root, w.path, f.node));
+      if (!readDocumentEdit(JSON.stringify(fixed), doc).ok) throw new Error(`fix "${f.label}" at ${w.path} made a document the json tab refuses`);
+      const after = resolveChain({ kind: "doc", doc: fixed, handlers: {} });
+      if (!after.ok && after.issues.length > list.length) throw new Error(`fix "${f.label}" at ${w.path} added issues: ${after.issues.join("; ")}`);
+      if (flowWarnings(fixed.root as unknown as NodeJson).some((x) => x.path === w.path && x.tier === w.tier && x.rule === w.rule)) throw new Error(`fix "${f.label}" at ${w.path} didn't clear its warning`);
+    }
+  }
 
   // a draft save and reload
   const store = memoryStore();
@@ -212,12 +228,43 @@ const kitchenSink = () =>
     { name: "kitchen sink", description: "every field", examples: ["hi", { a: 1 }] },
   );
 
+/** A chain a newcomer might build, full of data-flow warnings, so their fixes get mutated too. */
+const surprises = () =>
+  toJSON(
+    chain(
+      "flow",
+      ask("read", { questions: { vibe: choice("?", ["good", "bad"]), lvl: score("?", ["lo", "hi"]) } }),
+      route("then-route", {
+        ask: choice("which?", ["x", "y"]),
+        branches: {
+          x: emit({ who: "{{input.user}}", said: ["{{input.vibe.choice}}", "{{input.message}}"] }, { id: "ex" }),
+          y: gate("then-gate", { ask: noul("?"), state: "about {{input.message}}", pass: { min: 0.5 }, then: emit("ok {{input.nope}}", { id: "ey" }) }),
+        },
+      }),
+      cascade("then-cascade", { tiers: [{ id: "t1", ask: noul("?"), minConfidence: 0.8 }, { id: "t2", ask: noul("?"), minConfidence: 0.5, state: "{{input.nah}}" }], fallback: emit("f", { id: "cf" }) }),
+    ),
+    { name: "surprises" },
+  );
+
 const docs = [
   ...examples.map((e) => ({ slug: e.slug, doc: toJSON(e.chain, { name: e.title, description: e.tagline, examples: e.inputs.map((i) => i.value as Json) }) })),
   { slug: "kitchen-sink", doc: kitchenSink() },
+  { slug: "surprises", doc: surprises() },
 ];
 
 describe("the json tab's gate, against every example mutated every way", () => {
+  it("the surprises fixture really is full of data-flow warnings", () => {
+    const ws = flowWarnings(surprises().root as unknown as NodeJson);
+    expect(ws.map((w) => `${w.path}${w.tier ? `/${w.tier}` : ""} ${w.rule}`)).toEqual([
+      "$/1 implicit-state",
+      "$/1/x missing-field",
+      "$/1/y missing-field",
+      "$/1/y/then missing-field",
+      "$/2/t1 implicit-state",
+      "$/2/t2 missing-field",
+    ]);
+  });
+
   it("each example is accepted untouched and survives the whole build mode", () => {
     for (const { slug, doc } of docs) {
       const r = readDocumentEdit(formatDocument(doc), doc);

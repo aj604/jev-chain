@@ -10,6 +10,7 @@ import { useId, type ReactNode } from "react";
 import { DEFAULT_MODEL, type Entry, type Handler, type Json } from "jevchain";
 import { KindTag } from "@/components/trace/kinds";
 import { cn } from "@/lib/cn";
+import { describeShape, inputFields, producerName, type FlowFix, type FlowWarning, type Input } from "@/lib/builder/data-flow";
 import { childEdges, isPlaceholder, syncRouteBranches, template, type NodeJson } from "@/lib/builder/doc-ops";
 import {
   followLabel,
@@ -26,6 +27,7 @@ import {
   type ThresholdJson,
 } from "@/lib/builder/question-ops";
 import { AddRow, EntryField, Field, KeyInput, Label, NumberSlider, RowButton, Section, TextArea, TextInput, Toggle } from "./fields";
+import { FixButton } from "./issues-panel";
 import { QuestionEditor, QuestionsEditor, RESERVED_ALSO_ASK } from "./question-editor";
 
 export type Update = (fn: (n: NodeJson) => NodeJson, key?: string) => void;
@@ -45,6 +47,14 @@ export interface PropertyEditorProps {
   /** Ask before removing a subtree (a child slot being switched off). */
   confirmRemove: (what: string, child: NodeJson | undefined, go: () => void) => void;
   actions: ReactNode;
+  /** What this node receives, and the data-flow warnings about it (see `lib/builder/data-flow`). */
+  flow?: NodeFlow;
+}
+
+export interface NodeFlow {
+  input: Input;
+  warnings: FlowWarning[];
+  onFix: (warning: FlowWarning, fix: FlowFix) => void;
 }
 
 export function PropertyEditor(props: PropertyEditorProps) {
@@ -185,9 +195,10 @@ function StateField({ value, onChange, handlers, label = "state" }: { value: unk
   );
 }
 
-function JevCallSection({ node, update, handlers, path }: { node: NodeJson; update: Update; handlers: Record<string, Handler>; path: string }) {
+function JevCallSection({ node, update, handlers, path, flow, onSelect }: { node: NodeJson; update: Update; handlers: Record<string, Handler>; path: string; flow?: NodeFlow; onSelect: (p: string) => void }) {
   return (
     <Section title="jev call">
+      <Receives flow={flow} onSelect={onSelect} />
       <StateField value={node.state} handlers={handlers} onChange={(v, key) => update((n) => withOptional(n, "state", v), key ? `${path}:${key}` : undefined)} />
       <Field label="model" hint="pin a model for just this node. empty = the client's default.">
         {(id) => (
@@ -195,6 +206,67 @@ function JevCallSection({ node, update, handlers, path }: { node: NodeJson; upda
         )}
       </Field>
     </Section>
+  );
+}
+
+/**
+ * What arrives as `input` here: the run input, or the output of the chain
+ * step before (which is what `state` and `{{input.…}}` read by default).
+ */
+function Receives({ flow, onSelect }: { flow: NodeFlow | undefined; onSelect: (p: string) => void }) {
+  if (!flow) return null;
+  const { input } = flow;
+  const fields = input.from === "node" ? inputFields(input.shape, 3) : [];
+  return (
+    <div className="space-y-1" aria-label="input">
+      <Label>input</Label>
+      {input.from === "run" ? (
+        <p className="font-mono text-[11px] leading-relaxed text-ink-2">
+          the run input, as the chain was called. <span className="text-ink-3">here {"{{input}}"} and {"{{run}}"} are the same thing.</span>
+        </p>
+      ) : (
+        <>
+          <p className="font-mono text-[11px] leading-relaxed text-ink-2">
+            the output of{" "}
+            <button
+              type="button"
+              onClick={() => onSelect(input.node.path)}
+              className="inline-flex max-w-full items-center gap-1 align-bottom text-ink underline decoration-dotted underline-offset-2 hover:decoration-solid"
+            >
+              <KindTag kind={input.node.kind} />
+              <span className="truncate">{producerName(input.node)}</span>
+            </button>
+            , the step before: <span className="text-ink">{describeShape(input.shape)}</span>
+          </p>
+          <p className="font-mono text-[10.5px] leading-relaxed text-ink-3">
+            {fields.length > 0 && <>read it with {fields.map((f, i) => <span key={f} className="text-ink-2">{`${i ? ", " : ""}{{${f}}}`}</span>)}. </>}
+            the run input is still <span className="text-ink-2">{"{{run}}"}</span>.
+          </p>
+        </>
+      )}
+      <FlowWarnings warnings={flow.warnings} onFix={flow.onFix} />
+    </div>
+  );
+}
+
+function FlowWarnings({ warnings, onFix }: { warnings: FlowWarning[]; onFix: NodeFlow["onFix"] }) {
+  if (!warnings.length) return null;
+  return (
+    <ul className="space-y-1.5">
+      {warnings.map((w) => (
+        <li key={w.rule} role="alert" className="space-y-1.5 border-(length:--bw) border-warn bg-warn-wash px-2 py-1.5">
+          <p className="font-mono text-[10.5px] leading-relaxed text-ink">
+            <span aria-hidden className="text-warn">! </span>
+            {w.message}
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {w.fixes.map((f) => (
+              <FixButton key={f.label} fix={f} onClick={() => onFix(w, f)} />
+            ))}
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -238,7 +310,7 @@ function firstVertexPath(node: NodeJson, path: string): string {
 // kinds
 // ---------------------------------------------------------------------------
 
-function AskEditor({ node, update, handlers, path }: PropertyEditorProps) {
+function AskEditor({ node, update, handlers, path, flow, onSelect }: PropertyEditorProps) {
   const questions = (node.questions ?? {}) as Record<string, QuestionJson>;
   return (
     <>
@@ -251,12 +323,12 @@ function AskEditor({ node, update, handlers, path }: PropertyEditorProps) {
           onChange={(next, key) => update((n) => ({ ...n, questions: next }), key)}
         />
       </Section>
-      <JevCallSection node={node} update={update} handlers={handlers} path={path} />
+      <JevCallSection node={node} update={update} handlers={handlers} path={path} flow={flow} onSelect={onSelect} />
     </>
   );
 }
 
-function RouteEditor({ node, update, handlers, path, taken, onSelect, confirmRemove }: PropertyEditorProps) {
+function RouteEditor({ node, update, handlers, path, taken, onSelect, confirmRemove, flow }: PropertyEditorProps) {
   const ask = node.ask as QuestionJson;
   const branches = (node.branches ?? {}) as Record<string, NodeJson>;
   const lc = node.lowConfidence as { below: number; then: NodeJson } | undefined;
@@ -314,7 +386,7 @@ function RouteEditor({ node, update, handlers, path, taken, onSelect, confirmRem
         )}
       </Section>
       <AlsoAskSection alsoAsk={alsoAsk} path={path} update={update} />
-      <JevCallSection node={node} update={update} handlers={handlers} path={path} />
+      <JevCallSection node={node} update={update} handlers={handlers} path={path} flow={flow} onSelect={onSelect} />
     </>
   );
 }
@@ -333,7 +405,7 @@ function AlsoAskSection({ alsoAsk, path, update }: { alsoAsk: Record<string, Que
   );
 }
 
-function GateEditor({ node, update, handlers, path, taken, onSelect, confirmRemove }: PropertyEditorProps) {
+function GateEditor({ node, update, handlers, path, taken, onSelect, confirmRemove, flow }: PropertyEditorProps) {
   const ask = node.ask as QuestionJson;
   const pass = (node.pass ?? {}) as ThresholdJson;
   const unsure = node.unsure as { margin?: number; minConfidence?: number; then: NodeJson } | undefined;
@@ -450,7 +522,7 @@ function GateEditor({ node, update, handlers, path, taken, onSelect, confirmRemo
         )}
       </Section>
       <AlsoAskSection alsoAsk={node.alsoAsk as Record<string, QuestionJson> | undefined} path={path} update={update} />
-      <JevCallSection node={node} update={update} handlers={handlers} path={path} />
+      <JevCallSection node={node} update={update} handlers={handlers} path={path} flow={flow} onSelect={onSelect} />
     </>
   );
 }
@@ -537,7 +609,7 @@ function ParallelEditor({ node, update, path, taken, onSelect, handlers, confirm
   );
 }
 
-function CascadeEditor({ node, update, path, tier: focusTier, onSelect, handlers }: PropertyEditorProps) {
+function CascadeEditor({ node, update, path, tier: focusTier, onSelect, handlers, flow }: PropertyEditorProps) {
   type TierJson = { id: string; title?: string; ask: QuestionJson; minConfidence: number; state?: unknown; model?: string };
   const tiers = (node.tiers ?? []) as TierJson[];
   const ids = tiers.map((t) => t.id);
@@ -548,6 +620,7 @@ function CascadeEditor({ node, update, path, tier: focusTier, onSelect, handlers
     <>
       <Section title={`tiers · ${tiers.length}`}>
         <p className="-mt-1 font-mono text-[10.5px] leading-relaxed text-ink-3">cheapest first. each tier answers if it&apos;s confident enough, otherwise escalates.</p>
+        <Receives flow={flow && { ...flow, warnings: flow.warnings.filter((w) => !w.tier) }} onSelect={onSelect} />
         <ol className="space-y-2.5">
           {tiers.map((t, i) => (
             <li key={i} className={cn("border-soft bg-surface", focusTier === t.id && "border-hard shadow-[3px_3px_0_0_var(--accent)]")}>
@@ -586,6 +659,7 @@ function CascadeEditor({ node, update, path, tier: focusTier, onSelect, handlers
                   handlers={handlers}
                   onChange={(v, key) => setTier(i, (x) => withOptional(x as unknown as NodeJson, "state", v) as unknown as TierJson, key && `${path}:tier.${i}.state`)}
                 />
+                {flow && <FlowWarnings warnings={flow.warnings.filter((w) => w.tier === t.id)} onFix={flow.onFix} />}
                 <Field label="model">
                   {(id) => (
                     <TextInput
@@ -681,9 +755,10 @@ function toInt(v: string): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-function EmitEditor({ node, update, path }: PropertyEditorProps) {
+function EmitEditor({ node, update, path, flow, onSelect }: PropertyEditorProps) {
   return (
     <Section title="output">
+      <Receives flow={flow} onSelect={onSelect} />
       <EntryField
         label="value"
         value={node.value as Entry}
