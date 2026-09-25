@@ -6,6 +6,7 @@
  *   <TraceGraph chain={node} trace={trace} selected={id} onSelect={setId} />
  *   <TraceGraph graph={graphOf(node)} compact />            // no trace: just the shape
  *   <TraceGraph chain={node} trace={a} compare={b} />       // A/B paths in two colors
+ *   <TraceGraph chain={node} traffic={trafficOf(graph, traces)} />  // a sweep: how many inputs went where
  *
  * Layout is memoized per graph (dagre, left → right); streaming events only
  * change the overlay, so a live run restyles nodes and edges without moving
@@ -26,6 +27,7 @@ import {
 import { graphOf, overlayTrace, type AnyNode, type FlowGraph, type Trace, type Vertex } from "jevchain";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/lib/use-theme";
+import { trafficOverlay, type Traffic } from "@/lib/trace/sweep";
 import { layoutGraph, nodeSize, pickDirection, vertexHints, type Direction } from "@/lib/trace/layout";
 import { EdgeMarkers, TraceEdge, type FlowEdge } from "./graph-edge";
 import { TraceNode, type FlowNode, type VertexDecoration } from "./graph-node";
@@ -37,6 +39,8 @@ export interface TraceGraphProps {
   trace?: Trace;
   /** Compare mode: a second trace of the same chain, drawn in the compare color. */
   compare?: Trace;
+  /** Sweep mode: how many of a batch of runs reached each vertex / took each edge. Replaces `trace`. */
+  traffic?: Traffic;
   selected?: string | null;
   onSelect?: (id: string | null) => void;
   /** Smaller chrome, no controls, doesn't capture scroll. For docs and cards. */
@@ -89,6 +93,7 @@ function TraceGraphInner({
   graph: graphProp,
   trace,
   compare,
+  traffic,
   selected = null,
   onSelect,
   compact = false,
@@ -113,7 +118,7 @@ function TraceGraphInner({
   const direction: Direction = directionProp === "auto" ? pickDirection(layoutLR, layoutTB!, box.w, box.h) : directionProp;
   const layout = direction === "TB" && layoutTB ? layoutTB : layoutLR;
 
-  const overlay = useMemo(() => overlayTrace(graph, trace), [graph, trace]);
+  const overlay = useMemo(() => (traffic ? trafficOverlay(graph, traffic) : overlayTrace(graph, trace)), [graph, trace, traffic]);
   const overlayB = useMemo(() => (compare ? overlayTrace(graph, compare) : undefined), [graph, compare]);
 
   // Pass a stable `onSelect` (a state setter or useCallback) to keep nodes memoized.
@@ -138,6 +143,7 @@ function TraceGraphInner({
             hint: hints[v.id] ?? {},
             overlay: overlay.vertices[v.id] ?? { state: "idle" },
             ...(overlayB ? { overlayB: overlayB.vertices[v.id] ?? { state: "idle" } } : {}),
+            ...(traffic ? { traffic: { count: traffic.vertices[v.id] ?? 0, total: traffic.total } } : {}),
             selected: selected === v.id,
             ...(decorations?.[v.id] ? { decoration: decorations[v.id] } : {}),
             compact,
@@ -146,7 +152,7 @@ function TraceGraphInner({
           },
         };
       }),
-    [graph, layout, hints, overlay, overlayB, selected, compact, select, direction, decorations],
+    [graph, layout, hints, overlay, overlayB, traffic, selected, compact, select, direction, decorations],
   );
 
   const edges = useMemo<FlowEdge[]>(
@@ -166,6 +172,7 @@ function TraceGraphInner({
             edge: e,
             overlay: overlay.edges[e.id] ?? { state: "idle" },
             ...(overlayB ? { overlayB: overlayB.edges[e.id] ?? { state: "idle" } } : {}),
+            ...(traffic ? { traffic: { count: traffic.edges[e.id] ?? 0, total: traffic.total } } : {}),
             flowing: target === "running" || targetB === "running",
             markerPrefix,
             compact,
@@ -175,7 +182,7 @@ function TraceGraphInner({
           },
         };
       }),
-    [graph, layout, overlay, overlayB, markerPrefix, compact, select, direction],
+    [graph, layout, overlay, overlayB, traffic, markerPrefix, compact, select, direction],
   );
 
   const graphKey = useMemo(() => `${direction}:${graph.vertices.map((v) => v.id).join("|")}`, [graph, direction]);
@@ -223,7 +230,7 @@ function TraceGraphInner({
         <FitOnSignal signal={fitSignal} padding={compact ? 0.08 : 0.16} />
         <FitOnResize w={box.w} h={box.h} padding={compact ? 0.08 : 0.16} />
         {!compact && <GraphControls />}
-        {!compact && <Legend compare={Boolean(compare)} />}
+        {!compact && <Legend compare={Boolean(compare)} sweep={traffic?.total} />}
       </ReactFlow>
       )}
       {children && <div className="pointer-events-none absolute top-3 left-3 z-10 [&>*]:pointer-events-auto">{children}</div>}
@@ -284,7 +291,7 @@ function GraphControls() {
   );
 }
 
-function Legend({ compare }: { compare: boolean }) {
+function Legend({ compare, sweep }: { compare: boolean; sweep?: number }) {
   const line = (color: string, dashed = false, thick = true) => (
     <svg width="18" height="6" aria-hidden className="shrink-0">
       <line x1="0" y1="3" x2="18" y2="3" stroke={color} strokeWidth={thick ? 2.5 : 1.2} strokeDasharray={dashed ? "3 3" : undefined} />
@@ -292,7 +299,11 @@ function Legend({ compare }: { compare: boolean }) {
   );
   return (
     <FlowPanel position="top-right" className="!m-3 hidden items-center gap-3 border-soft bg-paper/90 px-2 py-1 font-mono text-[10px] lowercase text-ink-3 sm:flex">
-      {compare ? (
+      {sweep !== undefined ? (
+        <span className="flex items-center gap-1">
+          {line("var(--accent)")}n/{sweep} inputs went this way
+        </span>
+      ) : compare ? (
         <>
           <span className="flex items-center gap-1">{line("var(--accent)")}a</span>
           <span className="flex items-center gap-1">{line("var(--compare)")}b</span>

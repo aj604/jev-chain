@@ -15,6 +15,7 @@ import { WhyPanel } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import type { ResolvedChain } from "@/lib/trace/chain-source";
 import type { RunIssue } from "@/lib/trace/run-error";
+import type { Traffic } from "@/lib/trace/sweep";
 import { forkableEdges, forksOf } from "@/lib/trace/what-if";
 import { CompareSummary, diffHeadline } from "./compare-summary";
 
@@ -54,6 +55,11 @@ export interface WorkbenchProps {
   onWhatIf?: (path: string, edge: string, from: "a" | "b") => void;
   /** Put back the b the current what-if was forked from. */
   onUndoWhatIf?: () => void;
+  /**
+   * Sweep mode: the graph shows how many inputs went where instead of one
+   * trace, `aside` replaces the story / inspector and `summary` the run strip.
+   */
+  sweep?: { traffic: Traffic; aside: ReactNode; summary: ReactNode };
 }
 
 const TIMELINE_MIN = 72;
@@ -82,12 +88,13 @@ export function Workbench({
   graphProps,
   onWhatIf,
   onUndoWhatIf,
+  sweep,
 }: WorkbenchProps) {
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
   const drag = useRef<{ y: number; h: number } | null>(null);
 
-  const comparing = compare !== undefined;
+  const comparing = compare !== undefined && !sweep;
   const showB = comparing && target === "b";
   const focusTrace = showB ? compare.trace : trace;
   const focusIssue = showB ? compare.issue : issue;
@@ -130,8 +137,14 @@ export function Workbench({
       <section className="flex min-h-0 min-w-0 flex-col">
         <div className="border-hard-b bg-paper">{header}</div>
         <div className="border-soft-b bg-paper">
-          <RunSummary trace={trace} now={now} label={comparing ? "a" : undefined} />
-          {comparing && <RunSummary trace={compare.trace} now={compare.now} label="b" className="border-soft-t" />}
+          {sweep ? (
+            sweep.summary
+          ) : (
+            <>
+              <RunSummary trace={trace} now={now} label={comparing ? "a" : undefined} />
+              {comparing && <RunSummary trace={compare.trace} now={compare.now} label="b" className="border-soft-t" />}
+            </>
+          )}
         </div>
         {head && (
           <button
@@ -154,15 +167,14 @@ export function Workbench({
             {...graphProps}
             chain={graphNode ?? chain.node}
             graph={graph}
-            trace={trace}
-            {...(comparing ? { compare: compare.trace } : {})}
+            {...(sweep ? { traffic: sweep.traffic } : { trace, ...(comparing ? { compare: compare.trace } : {}) })}
             selected={selected}
             onSelect={select}
             fitSignal={fitSignal}
           />
           {canvasOverlay}
         </div>
-        {footer ?? (
+        {sweep ? null : footer ?? (
         <div className="border-hard-t bg-paper">
           <div className="flex h-8 items-center gap-2 border-soft-b px-3">
             <div
@@ -230,7 +242,7 @@ export function Workbench({
       </section>
 
       <aside className="min-h-0 border-hard-t bg-paper lg:overflow-y-auto lg:border-t-0 lg:border-hard-l" aria-label={aside ? "properties" : "inspector"}>
-        {aside ?? (
+        {aside ?? sweep?.aside ?? (
         <>
         {comparing && (
           <div className="sticky top-0 z-10 flex border-hard-b bg-paper" role="tablist" aria-label="which run">
