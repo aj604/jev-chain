@@ -15,7 +15,7 @@ import { WhyPanel } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import type { ResolvedChain } from "@/lib/trace/chain-source";
 import type { RunIssue } from "@/lib/trace/run-error";
-import { forkableEdges } from "@/lib/trace/what-if";
+import { forkableEdges, forksOf } from "@/lib/trace/what-if";
 import { CompareSummary, diffHeadline } from "./compare-summary";
 
 export type Target = "a" | "b" | "diff";
@@ -47,8 +47,13 @@ export interface WorkbenchProps {
   graphNode?: AnyNode;
   /** Extra TraceGraph props for the builder. */
   graphProps?: Pick<TraceGraphProps, "decorations" | "onNodeContextMenu" | "children">;
-  /** Re-run with the decision at `path` forced down `edge` (offered from run a's inspector). */
-  onWhatIf?: (path: string, edge: string) => void;
+  /**
+   * Re-run with the decision at `path` forced down `edge`, forking run `from`
+   * (whichever run's inspector it was offered in). Forking b keeps b's forks.
+   */
+  onWhatIf?: (path: string, edge: string, from: "a" | "b") => void;
+  /** Put back the b the current what-if was forked from. */
+  onUndoWhatIf?: () => void;
 }
 
 const TIMELINE_MIN = 72;
@@ -76,6 +81,7 @@ export function Workbench({
   graphNode,
   graphProps,
   onWhatIf,
+  onUndoWhatIf,
 }: WorkbenchProps) {
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
@@ -87,11 +93,16 @@ export function Workbench({
   const focusIssue = showB ? compare.issue : issue;
   const focusNow = showB ? compare.now : now;
   const select = useCallback((id: string | null) => onSelect(id), [onSelect]);
-  // What-ifs fork from run a, and only once it's finished (forkableEdges checks).
-  const whatIf = useMemo<WhatIfControl | undefined>(
-    () => (onWhatIf && !showB && trace ? { edges: (path) => forkableEdges(chain.node, trace, path), run: onWhatIf } : undefined),
-    [onWhatIf, showB, trace, chain.node],
-  );
+  // What-ifs fork whichever run is in focus, once it's finished (forkableEdges checks).
+  const whatIf = useMemo<WhatIfControl | undefined>(() => {
+    if (!onWhatIf || !focusTrace) return undefined;
+    const from = showB ? "b" : "a";
+    return {
+      edges: (path) => forkableEdges(chain.node, focusTrace, path),
+      run: (path, edge) => onWhatIf(path, edge, from),
+      forks: forksOf(focusTrace),
+    };
+  }, [onWhatIf, showB, focusTrace, chain.node]);
   const head = comparing && trace && compare.trace && trace.status !== "running" && compare.trace.status !== "running" ? diffHeadline(trace, compare.trace) : null;
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -245,7 +256,7 @@ export function Workbench({
           </div>
         )}
         {comparing && target === "diff" && !selected ? (
-          <CompareSummary a={trace} b={compare.trace} onSelect={select} />
+          <CompareSummary a={trace} b={compare.trace} onSelect={select} canFork={Boolean(onWhatIf)} onUndo={onUndoWhatIf} />
         ) : selected ? (
           <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} />
         ) : (

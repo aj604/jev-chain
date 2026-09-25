@@ -12,6 +12,7 @@
  *
  * Pass `whatIf` and every road a decision didn't take gets a "what if?"
  * button that re-runs the chain forced down it (see `lib/trace/what-if`).
+ * On a what-if trace that stacks: what it already forced stays forced.
  */
 import type { ReactNode } from "react";
 import { spanAt, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
@@ -19,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "@/lib/trace/format";
+import { edgeName, WHAT_IF_MODEL, type ForcedDecision } from "@/lib/trace/what-if";
 import { Distribution } from "./distribution";
 import { JsonView } from "./json-view";
 import { KindTag, StateMark, type AnyState } from "./kinds";
@@ -30,6 +32,8 @@ export interface WhatIfControl {
   /** The edges that can be forced at a decision's span path. */
   edges: (path: string) => string[];
   run: (path: string, edge: string) => void;
+  /** What the run being inspected already forced (they stay forced in the re-run). */
+  forks: ForcedDecision[];
 }
 
 export interface InspectorProps {
@@ -109,6 +113,8 @@ export function Inspector({ graph, trace, selected, onSelect, whatIf, className 
               decision={decision}
               tier={vertex?.kind === "tier" ? vertex.tier : undefined}
               title={span.title ?? span.nodeId}
+              forced={span.calls.some((c) => c.model === WHAT_IF_MODEL)}
+              stacked={(whatIf?.forks ?? []).some((f) => f.path !== span.path)}
               forkable={whatIf?.edges(span.path) ?? []}
               onWhatIf={whatIf ? (edge) => whatIf.run(span.path, edge) : undefined}
             />
@@ -215,12 +221,18 @@ function DecisionSection({
   decision,
   tier,
   title,
+  forced,
+  stacked,
   forkable,
   onWhatIf,
 }: {
   decision: Decision;
   tier?: string;
   title: string;
+  /** This decision was itself forced by a what-if. */
+  forced: boolean;
+  /** Forking here keeps other decisions this run already forced. */
+  stacked: boolean;
   forkable: string[];
   onWhatIf?: (edge: string) => void;
 }) {
@@ -229,9 +241,12 @@ function DecisionSection({
     <Section
       title="decision"
       actions={
-        <Badge tone={decision.fallback ? "warn" : "accent"}>
-          {decision.kind} → {decision.taken === "lowConfidence" ? "unsure" : decision.taken}
-        </Badge>
+        <span className="flex items-center gap-1.5">
+          {forced && <Badge tone="warn">forced</Badge>}
+          <Badge tone={decision.fallback ? "warn" : "accent"}>
+            {decision.kind} → {edgeName(decision.taken)}
+          </Badge>
+        </span>
       }
     >
       <p className="text-[13px] leading-relaxed text-ink">{decision.summary}</p>
@@ -253,12 +268,17 @@ function DecisionSection({
               <span className="tabular-nums">{v ?? (e.value === null ? "not tried" : "—")}</span>
               <span className="sr-only">{e.taken ? "taken" : "not taken"}</span>
               {onWhatIf && forkable.includes(e.edge) && (
-                <WhatIfButton label={edgeName(e.edge)} title={title} onClick={() => onWhatIf(e.edge)} />
+                <WhatIfButton label={edgeName(e.edge)} title={title} stacked={stacked} onClick={() => onWhatIf(e.edge)} />
               )}
             </li>
           );
         })}
       </ul>
+      {forced && (
+        <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">
+          forced: jev&rsquo;s numbers here were bent so the chain would go &ldquo;{edgeName(decision.taken)}&rdquo;.
+        </p>
+      )}
       <p className="mt-2 font-mono text-[10px] text-ink-3">
         metric {decision.metric}
         {threshold && ` · bar ${threshold}`}
@@ -355,6 +375,7 @@ function NotRun({
   const decider = incoming?.decidedBy && trace ? spanAt(trace, incoming.decidedBy.spanPath) : undefined;
   const road = incoming?.decidedBy;
   const canTake = Boolean(whatIf && decider?.decision && road && whatIf.edges(road.spanPath).includes(road.key));
+  const stacked = (whatIf?.forks ?? []).filter((f) => f.path !== road?.spanPath).length;
   return (
     <>
       <Section title={trace ? "not reached" : "not run yet"}>
@@ -364,7 +385,7 @@ function NotRun({
             : trace.status === "running"
               ? "hasn't happened yet. the chain is still being pulled."
               : decider?.decision
-                ? `the road not taken. ${decider.title ?? decider.nodeId} went "${decider.decision.taken}" instead of "${incoming!.label}".`
+                ? `the road not taken. ${decider.title ?? decider.nodeId} went "${edgeName(decider.decision.taken)}" instead of "${edgeName(incoming!.label)}".`
                 : "this node didn't run on this trace."}
         </p>
         {(canTake || (decider && onSelect)) && (
@@ -387,7 +408,9 @@ function NotRun({
         )}
         {canTake && (
           <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">
-            re-runs as b with {decider!.title ?? decider!.nodeId} forced this way. what jev already said is replayed; only the new road gets asked.
+            re-runs as b with {decider!.title ?? decider!.nodeId} forced this way
+            {stacked ? `, on top of the ${stacked} decision${stacked === 1 ? "" : "s"} this run already forced` : ""}. what jev already said is replayed; only the new
+            road gets asked.
           </p>
         )}
       </Section>
@@ -434,14 +457,13 @@ function QuestionDef({ question }: { question: Question }) {
   );
 }
 
-const edgeName = (edge: string) => (edge === "lowConfidence" ? "unsure" : edge);
 
-function WhatIfButton({ label, title, onClick }: { label: string; title: string; onClick: () => void }) {
+function WhatIfButton({ label, title, stacked, onClick }: { label: string; title: string; stacked: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      title={`re-run as b with ${title} forced to “${label}”`}
+      title={`re-run as b with ${title} forced to “${label}”${stacked ? ", keeping what this run already forced" : ""}`}
       aria-label={`what if ${title} went “${label}”? re-run it that way`}
       className="-my-0.5 shrink-0 border-(length:--bw) border-dashed border-ink-3 px-1 text-[10px] leading-4 lowercase text-ink-2 transition-colors duration-(--dur-fast) hover:border-compare hover:bg-surface-2 hover:text-ink"
     >

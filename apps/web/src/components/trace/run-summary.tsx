@@ -11,7 +11,7 @@ import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { cn } from "@/lib/cn";
 import { fmtMs, fmtTokens, fmtUsd } from "@/lib/trace/format";
 import { isRehearsal } from "@/lib/trace/rehearsal";
-import { forkOf } from "@/lib/trace/what-if";
+import { forkLabel, forksOf } from "@/lib/trace/what-if";
 
 const STATUS: Record<Trace["status"], { tone: BadgeTone; label: string }> = {
   running: { tone: "accent", label: "running" },
@@ -33,7 +33,7 @@ export function RunSummary({ trace, now, label, className }: { trace?: Trace; no
   const s = STATUS[trace.status];
   const u = trace.usage;
   const saved = u.calls - u.requests;
-  const fork = forkOf(trace);
+  const forks = forksOf(trace);
   return (
     <div className={cn("flex h-9 min-w-0 items-center gap-x-4 overflow-x-auto px-3 font-mono text-[11px] whitespace-nowrap text-ink-3", className)} aria-live="polite">
       {label && <span className="text-ink-2">{label}</span>}
@@ -46,10 +46,15 @@ export function RunSummary({ trace, now, label, className }: { trace?: Trace; no
           <Badge tone="warn">rehearsal · made-up answers</Badge>
         </span>
       )}
-      {fork && (
+      {forks.length === 1 && (
         <span title="one decision was forced down a road it didn't take. earlier answers are replayed; only the new road was asked.">
+          <Badge tone="warn">what if · {forkLabel(forks[0]!)}</Badge>
+        </span>
+      )}
+      {forks.length > 1 && (
+        <span title={`${forks.length} decisions were forced, one what-if on top of another: ${forks.map(forkLabel).join(", then ")}. answers jev already gave are replayed.`}>
           <Badge tone="warn">
-            what if · {fork.title ?? fork.nodeId} → {fork.edge === "lowConfidence" ? "unsure" : fork.edge}
+            what if ×{forks.length} · {forkLabel(forks.at(-1)!)}
           </Badge>
         </span>
       )}

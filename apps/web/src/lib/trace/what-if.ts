@@ -93,6 +93,12 @@ export function forksOf(trace: Trace | undefined): ForcedDecision[] {
     .map((s) => ({ path: s.path, nodeId: s.nodeId, ...(s.title ? { title: s.title } : {}), edge: s.decision!.taken }));
 }
 
+/** An edge as people say it: the route's `lowConfidence` road is "unsure". */
+export const edgeName = (edge: string) => (edge === "lowConfidence" ? "unsure" : edge);
+
+/** "Front desk → paranormal". */
+export const forkLabel = (f: ForcedDecision) => `${f.title ?? f.nodeId} → ${edgeName(f.edge)}`;
+
 /** The first decision a what-if trace was forced at. See `forksOf` for all of them. */
 export function forkOf(trace: Trace | undefined): ForcedDecision | undefined {
   return forksOf(trace)[0];
