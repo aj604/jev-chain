@@ -54,7 +54,7 @@ import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type Resolved
 import { parseInput, toEditor } from "@/lib/trace/input";
 import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
-import { finishedReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
+import { answeredReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
 import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
 import type { Fork } from "@/lib/trace/what-if";
@@ -495,10 +495,14 @@ export function Studio(props: StudioProps) {
 
   // ── ask again: run a's input, re-sent to jev ───────────────────────────────
   const reaskOn = reask.phase !== "idle" && reask.base !== undefined && reask.base === runA.trace;
+  // Only re-asks Jev actually answered count; a verdict needs at least one of them.
+  const reaskTraces = useMemo(() => reask.rows.map((r) => r.trace), [reask.rows]);
+  const answered = reaskOn ? answeredReasks(reaskTraces).length : 0;
   const steadiness = useMemo(
-    () => (reaskOn && chain && reask.base && finishedReasks(reask.rows.map((r) => r.trace)).length > 0 ? steadinessOf(chain.node, reask.base, reask.rows.map((r) => r.trace)) : undefined),
-    [reaskOn, chain, reask.base, reask.rows],
+    () => (reaskOn && chain && reask.base && answered > 0 ? steadinessOf(chain.node, reask.base, reaskTraces) : undefined),
+    [reaskOn, chain, reask.base, reaskTraces, answered],
   );
+  const reaskDone = reaskOn ? reask.rows.filter((r) => r.trace || r.issue).length : 0;
   const startReask = useCallback(() => {
     const base = runA.trace;
     if (!chain || !base || runA.input === undefined || running || reaskBlocker(base)) return;
@@ -522,7 +526,8 @@ export function Studio(props: StudioProps) {
   const reaskControl: ReaskControl = {
     blocker: running && !reaskOn ? "wait for the run to finish" : reaskBlocker(runA.trace),
     running: reaskOn && reask.phase === "running",
-    done: reaskOn ? reask.rows.filter((r) => r.trace || r.issue).length : 0,
+    done: reaskDone,
+    answered,
     total: REASKS,
     ...(steadiness ? { steadiness } : {}),
     ...(reaskOn && reask.stoppedBy ? { stoppedBy: reask.stoppedBy } : {}),

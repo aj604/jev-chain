@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { cascade, choice, createJev, emit, gate, noul, route, tier, type AnyNode, type Answer, type JevClient, type Json, type Question, type Trace } from "jevchain";
+import { cascade, choice, createJev, emit, gate, JevAuthError, JevRateLimitError, noul, route, tier, type AnyNode, type Answer, type JevClient, type Json, type Question, type Trace } from "jevchain";
 import { examples } from "jevchain-examples";
 import { rehearsalClient } from "./rehearsal";
-import { finishedReasks, REASKS, reaskBlocker, reaskInputs, steadinessOf, steadyHeadline, steadyText, type Steadiness } from "./reask";
+import { answeredReasks, REASKS, reaskBlocker, reaskInputs, steadinessOf, steadyHeadline, steadyText, type Steadiness } from "./reask";
 import { runSweep } from "./sweep";
 import { whatIfClient } from "./what-if";
 
@@ -143,18 +143,19 @@ describe("steadinessOf", () => {
       "Danger?": [yes(0.1)],
     });
     const partial: (Trace | undefined)[] = [reasks[0], undefined, { ...reasks[1]!, status: "aborted" }, reasks[2]];
-    expect(finishedReasks(partial)).toHaveLength(2);
+    expect(answeredReasks(partial)).toHaveLength(2);
     const s = one(steadinessOf(desk, base, partial), "$");
     expect(s).toMatchObject({ asked: 3, held: 2, missed: 0 });
     // The one that went unsure is partial[3]: that's the index "open" gets.
     expect(s.elsewhere).toEqual([{ edge: "lowConfidence", count: 1, first: 3 }]);
   });
 
-  it("with no re-asks back yet, every decision holds on its one ask", async () => {
+  it("with no re-asks back yet, no decision gets a verdict", async () => {
     const { base } = await asks(desk, { "Which desk?": [pick({ repair: 0.7, billing: 0.3 }, 0.8)], "Danger?": [yes(0.1)] });
     const all = steadinessOf(desk, base, []);
-    expect(all.every((s) => s.asked === 1 && s.held === 1 && s.moved === undefined && s.verdict === "held")).toBe(true);
-    expect(steadyText(all[0]!)).toBe("held (the only ask that got here)");
+    expect(all.every((s) => s.asked === 1 && s.held === 1 && s.moved === undefined && s.verdict === "unasked")).toBe(true);
+    expect(steadyText(all[0]!)).toBe("only this run got here, so there's no second answer to compare");
+    expect(steadyHeadline(all)).toBe("no re-ask got as far as any decision this run made, so there's nothing to compare.");
   });
 
   it("route leads: measured as the gap to the other road, negative once it wins", async () => {
@@ -167,6 +168,79 @@ describe("steadinessOf", () => {
     expect(s).toMatchObject({ verdict: "flipped", asked: 6, held: 2, flip: { edge: "b", measure: "lead", by: 0.1 } });
     expect(s!.moved).toMatchObject({ min: -0.2, max: 0.2 });
     expect(steadyText(s!)).toBe("went “b” on 4 of 6 asks · the lead over “b” ranged -0.20–0.20");
+  });
+});
+
+/** `client`, but ask number `n` (0-based, counting every ask the client gets: the run's, then each re-ask's) throws `error`. */
+function failingAt(client: JevClient, failures: Record<number, () => Error>): JevClient {
+  let n = 0;
+  return {
+    ...client,
+    ask: (async (...args: Parameters<JevClient["ask"]>) => {
+      const i = n++;
+      const fail = failures[i];
+      if (fail) throw fail();
+      return client.ask(...args);
+    }) as JevClient["ask"],
+  };
+}
+
+/** The run, then the re-asks the way the studio makes them, with some asks failing. */
+async function asksFailing(root: AnyNode, answers: Record<string, Answer[]>, failures: Record<number, () => Error>) {
+  const client = failingAt(scripted(answers), failures);
+  const base = (await createJev(client).run(root, "x")).trace;
+  const { rows, stoppedBy } = await runSweep(root, reaskInputs("x"), client);
+  return { base, rows, reasks: rows.map((r) => r.trace), stoppedBy };
+}
+
+describe("re-asks that fail", () => {
+  // desk → repair → danger: two asks per run. The run is asks 0–1; re-ask k is asks 2k+2 and 2k+3.
+  const steadyDesk = { "Which desk?": [pick({ repair: 0.7, billing: 0.3 }, 0.8)], "Danger?": [yes(0.1)] };
+
+  for (const [name, error, kind] of [
+    ["a 429", () => new JevRateLimitError(429, { error: { message: "slow down" } }), "rate-limited"],
+    ["a 401", () => new JevAuthError(401, { error: { message: "bad key" } }), "bad-key"],
+  ] as const) {
+    it(`the first re-ask gets ${name}: no ask counted, no verdict anywhere`, async () => {
+      const { base, rows, reasks, stoppedBy } = await asksFailing(desk, steadyDesk, { 2: error });
+      expect(stoppedBy?.kind).toBe(kind);
+      // The sweep kept the failed trace; it isn't an ask.
+      expect(rows[0]!.trace?.status).toBe("error");
+      expect(answeredReasks(reasks)).toHaveLength(0);
+      const all = steadinessOf(desk, base, reasks);
+      expect(all.map((s) => [s.verdict, s.asked, s.missed, s.failed])).toEqual([
+        ["unasked", 1, 0, 0],
+        ["unasked", 1, 0, 0],
+      ]);
+      expect(steadyHeadline(all)).not.toMatch(/same road|held/);
+      expect(all.some((s) => /held/.test(steadyText(s)))).toBe(false);
+    });
+  }
+
+  it("a 429 mid-way: only the re-asks jev answered count", async () => {
+    // Re-asks 0–2 answer; re-ask 3's first ask (ask 8) is rate limited and the sweep stops.
+    const { base, reasks, stoppedBy } = await asksFailing(desk, steadyDesk, { 8: () => new JevRateLimitError(429, { error: { message: "slow down" } }) });
+    expect(stoppedBy?.kind).toBe("rate-limited");
+    expect(reasks.filter(Boolean)).toHaveLength(4);
+    expect(answeredReasks(reasks)).toHaveLength(3);
+    const all = steadinessOf(desk, base, reasks);
+    expect(all.map((s) => [s.verdict, s.asked, s.held, s.missed, s.failed])).toEqual([
+      ["held", 4, 4, 0, 0],
+      ["held", 4, 4, 0, 0],
+    ]);
+    expect(steadyText(all[0]!)).toMatch(/^held on all 4 asks/);
+  });
+
+  it("a re-ask that breaks after deciding something counts for what it decided, and as failed (not “never got here”) for the rest", async () => {
+    // Re-ask 0 decides the front desk, then its danger ask (ask 3) is rate limited.
+    const { base, reasks } = await asksFailing(desk, steadyDesk, { 3: () => new JevRateLimitError(429, { error: { message: "slow down" } }) });
+    expect(reasks[0]!.status).toBe("error");
+    expect(answeredReasks(reasks)).toHaveLength(1);
+    const all = steadinessOf(desk, base, reasks);
+    expect(one(all, "$")).toMatchObject({ verdict: "held", asked: 2, held: 2, failed: 0, missed: 0 });
+    expect(one(all, "$/repair")).toMatchObject({ verdict: "unasked", asked: 1, failed: 1, missed: 0 });
+    expect(steadyText(one(all, "$/repair"))).toBe("only this run got here, so there's no second answer to compare · 1 re-ask failed before getting here");
+    expect(steadyHeadline(all)).toBe("every ask took the same road, and jev's numbers never moved far enough to flip it. one decision no re-ask got to.");
   });
 });
 

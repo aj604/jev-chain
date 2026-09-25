@@ -306,7 +306,7 @@ function DecisionSection({
         </p>
       )}
       {steady && (
-        <div className={cn("mt-2 border-(length:--bw) border-dashed px-2 py-1", steady.verdict === "held" ? "border-dim" : "border-warn")}>
+        <div className={cn("mt-2 border-(length:--bw) border-dashed px-2 py-1", steady.verdict === "held" || steady.verdict === "unasked" ? "border-dim" : "border-warn")}>
           <span className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">asked again</span>
           <SteadyLine steady={steady} {...(onOpenReask ? { onOpen: onOpenReask } : {})} className="mt-0.5" />
           {steady.moved && (

@@ -64,37 +64,52 @@ export interface Steadiness {
   held: number;
   /** Roads other asks took here, most first; `first` is the re-ask that took it first (its index in the re-asks passed in). */
   elsewhere: { edge: string; count: number; first: number }[];
-  /** Re-asks that finished without making this decision (an earlier one sent them elsewhere, or they broke first). */
+  /** Answered re-asks that finished on their own without making this decision (an earlier decision sent them elsewhere). */
   missed: number;
+  /** Answered re-asks that broke (an error mid-run) before making this decision. */
+  failed: number;
   /** The road not taken this is judged against: the nearest one Jev's wobble reaches, else the nearest. */
   flip?: Flip;
   /** How far `flip.measure` moved across the asks that answered it (the run included). */
   moved?: { min: number; max: number; by: number; n: number };
-  verdict: Verdict;
-}
-
-/** Re-asks that finished (a stopped or unstarted one says nothing about where the input goes). */
-export function finishedReasks(traces: readonly (Trace | undefined)[]): Trace[] {
-  return traces.filter((t): t is Trace => Boolean(t) && t!.status !== "running" && t!.status !== "aborted");
+  /** "unasked": no re-ask made this decision, so there's no second answer to judge it by. */
+  verdict: Verdict | "unasked";
 }
 
 /**
- * Every decision `base` made, read across `base` and `reasks` (the same input
- * asked again). Numbers are measured with the chain's own rule (`flipsOf`,
- * `measuredAt`), so "moved" is the very quantity a flip is measured in.
+ * Re-asks Jev actually answered: finished (not stopped or unstarted) and made
+ * at least one decision. A re-ask that failed before deciding anything (no
+ * key, a 429, a network error) is no ask at all: it says nothing about where
+ * the input goes. One that broke later still counts for what it decided.
+ */
+export function answeredReasks(traces: readonly (Trace | undefined)[]): Trace[] {
+  return traces.filter((t): t is Trace => Boolean(t) && t!.status !== "running" && t!.status !== "aborted" && decisions(t!).length > 0);
+}
+
+/**
+ * Every decision `base` made, read across `base` and the answered `reasks`
+ * (the same input asked again; see `answeredReasks`). Numbers are measured
+ * with the chain's own rule (`flipsOf`, `measuredAt`), so "moved" is the very
+ * quantity a flip is measured in.
  */
 export function steadinessOf(root: AnyNode, base: Trace, reasks: readonly (Trace | undefined)[]): Steadiness[] {
-  const done = finishedReasks(reasks);
+  const answered = answeredReasks(reasks);
   return decisions(base).map(({ path, nodeId, decision }) => {
     const span = spanAt(base, path)!;
     const taken = decision.taken;
     let asked = 1;
     let held = 1;
+    let missed = 0;
+    let failed = 0;
     const elsewhere = new Map<string, { edge: string; count: number; first: number }>();
     reasks.forEach((t, i) => {
-      if (!t || !done.includes(t)) return;
+      if (!t || !answered.includes(t)) return;
       const d = spanAt(t, path)?.decision;
-      if (!d) return;
+      if (!d) {
+        if (t.status === "error") failed++;
+        else missed++;
+        return;
+      }
       asked++;
       if (d.taken === taken) held++;
       else {
@@ -103,7 +118,7 @@ export function steadinessOf(root: AnyNode, base: Trace, reasks: readonly (Trace
         elsewhere.set(d.taken, e);
       }
     });
-    const spans = [span, ...done.map((t) => spanAt(t, path))];
+    const spans = [span, ...answered.map((t) => spanAt(t, path))];
     const judged = flipsOf(root, span).map((flip) => ({ flip, moved: spread(spans.map((s) => measuredAt(root, s, flip, taken))) }));
     const reached = judged.find((j) => j.moved && j.moved.by >= j.flip.by);
     const pick = reached ?? judged[0];
@@ -116,10 +131,11 @@ export function steadinessOf(root: AnyNode, base: Trace, reasks: readonly (Trace
       asked,
       held,
       elsewhere: [...elsewhere.values()].sort((a, b) => b.count - a.count || a.first - b.first),
-      missed: done.length - (asked - 1),
+      missed,
+      failed,
       ...(pick ? { flip: pick.flip } : {}),
       ...(pick?.moved ? { moved: pick.moved } : {}),
-      verdict: held < asked ? "flipped" : reached ? "could-flip" : "held",
+      verdict: asked === 1 ? "unasked" : held < asked ? "flipped" : reached ? "could-flip" : "held",
     };
   });
 }
@@ -152,29 +168,38 @@ function what(flip: Flip): string {
  *   "held on all 6 asks · jev's p(yes) moved 0.02; it'd take 0.30 to go “otherwise”"
  */
 export function steadyText(s: Steadiness): string {
-  const missed = s.missed > 0 ? ` · ${s.missed} re-ask${s.missed === 1 ? "" : "s"} never got here` : "";
+  const plural = (n: number) => `${n} re-ask${n === 1 ? "" : "s"}`;
+  const missed = `${s.missed > 0 ? ` · ${plural(s.missed)} never got here` : ""}${s.failed > 0 ? ` · ${plural(s.failed)} failed before getting here` : ""}`;
+  if (s.verdict === "unasked") return `only this run got here, so there's no second answer to compare${missed}`;
   if (s.verdict === "flipped") {
     const parts = s.elsewhere.map((e, i) => `${i === 0 ? "went " : ""}${road(e.edge)} on ${e.count}`);
     const range = s.flip && s.moved && s.moved.by > 0 ? ` · ${what(s.flip)} ranged ${fmtNum(s.moved.min)}–${fmtNum(s.moved.max)}` : "";
     return `${parts.join(", ")} of ${s.asked} asks${range}${missed}`;
   }
-  const all = s.asked === 1 ? "held (the only ask that got here)" : `held on all ${s.asked} asks`;
+  const all = `held on all ${s.asked} asks`;
   if (!s.flip || !s.moved) return `${all}${missed}`;
   const moved = s.moved.by === 0 ? `${what(s.flip)} didn't move` : `${what(s.flip)} moved ${fmtBy(s.moved.by)}`;
   if (s.verdict === "could-flip") {
-    const need = s.flip.by === 0 ? `it sits right on the line to ${goes(s.flip)}` : `more than the ${fmtBy(s.flip.by)} it takes to ${goes(s.flip)}`;
+    // Rounded to two places the two can read the same ("moved 0.23 … more than the 0.23").
+    const than = fmtBy(s.moved.by) === fmtBy(s.flip.by) ? "as far as" : "more than";
+    const need = s.flip.by === 0 ? `it sits right on the line to ${goes(s.flip)}` : `${than} the ${fmtBy(s.flip.by)} it takes to ${goes(s.flip)}`;
     return `${all}, but ${moved} between them: ${need}${missed}`;
   }
   return `${all} · ${moved}; it'd take ${fmtBy(s.flip.by)} to ${goes(s.flip)}${missed}`;
 }
 
 /** The run's whole story across the asks, in a line: "1 of 2 decisions went another way on at least one ask." */
-export function steadyHeadline(all: readonly Steadiness[]): string {
+export function steadyHeadline(everything: readonly Steadiness[]): string {
+  // Only decisions some re-ask also made have anything to say.
+  const all = everything.filter((s) => s.verdict !== "unasked");
+  const unasked = everything.length - all.length;
+  const unaskedNote = unasked === 0 ? "" : ` ${unasked === 1 ? "one decision" : `${unasked} decisions`} no re-ask got to.`;
+  if (all.length === 0) return `no re-ask got as far as ${everything.length === 1 ? "the decision" : "any decision this run made"}, so there's nothing to compare.`;
   const flipped = all.filter((s) => s.verdict === "flipped").length;
   const close = all.filter((s) => s.verdict === "could-flip").length;
-  const which = (n: number) => (all.length === 1 ? "the decision" : `${n} of ${all.length} decisions`);
+  const which = (n: number) => (everything.length === 1 ? "the decision" : `${n} of ${all.length} decisions`);
   const closeNote = close === 0 ? "" : ` ${close === 1 ? "one more" : `${close} more`} held, though jev's numbers moved as far as it takes to flip ${close === 1 ? "it" : "them"}.`;
-  if (flipped > 0) return `${which(flipped)} went another way on at least one ask.${closeNote}`;
-  if (close > 0) return `every ask took the same road, but on ${which(close)} jev's numbers moved as far as it takes to flip.`;
-  return "every ask took the same road, and jev's numbers never moved far enough to flip one.";
+  if (flipped > 0) return `${which(flipped)} went another way on at least one ask.${closeNote}${unaskedNote}`;
+  if (close > 0) return `every ask took the same road, but on ${which(close)} jev's numbers moved as far as it takes to flip.${unaskedNote}`;
+  return `every ask took the same road, and jev's numbers never moved far enough to flip ${all.length === 1 ? "it" : "one"}.${unaskedNote}`;
 }

@@ -29,8 +29,10 @@ export interface ReaskControl {
   /** Why this run can't be asked again (a rehearsal, a what-if…), or null. */
   blocker: string | null;
   running: boolean;
-  /** Re-asks finished so far, of `total`. */
+  /** Re-asks finished so far (answered or failed), of `total`. */
   done: number;
+  /** Of those, how many Jev answered (made at least one decision): the only ones that count as asks. */
+  answered: number;
   total: number;
   /** Every decision the run made, across the asks so far (once any finished). */
   steadiness?: Steadiness[];
@@ -217,8 +219,11 @@ function ReaskButton({ reask }: { reask: ReaskControl }) {
 }
 
 function ReaskBox({ reask }: { reask: ReaskControl }) {
-  const asks = (reask.steadiness?.[0]?.asked ?? 1) + (reask.steadiness?.[0]?.missed ?? 0);
+  // Asks are the run plus the re-asks jev answered; one that failed before deciding anything isn't an ask.
+  const asks = 1 + reask.answered;
+  const failed = reask.done - reask.answered;
   const flipped = reask.steadiness?.some((s) => s.verdict === "flipped");
+  const failedNote = failed > 0 ? ` ${failed} re-ask${failed === 1 ? "" : "s"} failed before jev decided anything, so ${failed === 1 ? "it isn't" : "they aren't"} counted.` : "";
   return (
     <div
       className={cn(
@@ -229,8 +234,10 @@ function ReaskBox({ reask }: { reask: ReaskControl }) {
       <p>
         <span className={cn("font-mono text-[11px] lowercase", flipped ? "text-warn" : "text-ink-3")}>asked again.</span>{" "}
         {reask.steadiness
-          ? `same input, ${asks} asks (this run and ${asks - 1} more${reask.running ? " so far" : ""}). ${steadyHeadline(reask.steadiness)}`
-          : `sending the same input to jev ${reask.total} more times…`}
+          ? `same input, ${asks} asks (this run and ${asks - 1} more${reask.running ? " so far" : ""}). ${steadyHeadline(reask.steadiness)}${failedNote}`
+          : reask.running
+            ? `sending the same input to jev ${reask.total} more times…${failedNote}`
+            : `no re-ask got an answer back from jev, so there's nothing to compare this run with.${failedNote}`}
       </p>
       {reask.stoppedBy && (
         <p className="mt-1 font-mono text-[11px] text-warn">
@@ -247,13 +254,13 @@ function ReaskBox({ reask }: { reask: ReaskControl }) {
   );
 }
 
-const STEADY_MARK: Record<Steadiness["verdict"], string> = { flipped: "⇄", "could-flip": "≈", held: "=" };
+const STEADY_MARK: Record<Steadiness["verdict"], string> = { flipped: "⇄", "could-flip": "≈", held: "=", unasked: "·" };
 
 /** One decision across the asks: did it hold, and (if not) a way to open an ask that went elsewhere. */
 export function SteadyLine({ steady, onOpen, className }: { steady: Steadiness; onOpen?: (index: number) => void; className?: string }) {
   const other = steady.elsewhere[0];
   return (
-    <div className={cn("grid grid-cols-[0.75rem_1fr] gap-x-1.5 font-mono text-[11px] leading-snug", steady.verdict === "held" ? "text-ink-3" : "text-warn", className)}>
+    <div className={cn("grid grid-cols-[0.75rem_1fr] gap-x-1.5 font-mono text-[11px] leading-snug", steady.verdict === "held" || steady.verdict === "unasked" ? "text-ink-3" : "text-warn", className)}>
       <span aria-hidden>{STEADY_MARK[steady.verdict]}</span>
       <p className="min-w-0">{steadyText(steady)}</p>
       {other && onOpen && (
