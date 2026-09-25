@@ -3,7 +3,8 @@
  * *and* chains loaded from JSON (where the type system never saw them).
  */
 import { questionIssues } from "./questions";
-import { walk, type AnyJevNode, type AnyNode } from "./nodes";
+import { childPath, childrenOf, ROOT_PATH, walk, type AnyJevNode, type AnyNode } from "./nodes";
+import { TEMPLATE_ROOTS, templatePaths } from "./template";
 
 /** Question key used for a route/gate/tier's deciding question. */
 export const DECISION_KEY = "decision";
@@ -81,7 +82,136 @@ export function chainIssues(root: AnyNode): string[] {
         issues.push(`${path}: unknown node kind "${(n as { kind: unknown }).kind}"`);
     }
   });
+  issues.push(...templateIssues(root));
   return issues;
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+/** Node ids mapped to the first path they appear at. */
+type Ids = ReadonlyMap<string, string>;
+
+/**
+ * What a node can see in `{{results.*}}` when it runs. In a `chain`, step N
+ * sees everything under steps 0..N-1. A `parallel` branch may see its
+ * siblings (a fast one can finish first), so they count too. Ancestors are
+ * still running.
+ */
+interface ResultScope {
+  readonly finished: Ids;
+  readonly running: Ids;
+}
+
+/**
+ * Holes that can only ever come up empty: an unknown root (`{{inptu}}`), a
+ * `results.<id>` no node has, or a node that can't have finished by the time
+ * this one reads it. Rendered, each would quietly become "" and Jev would be
+ * asked about nothing. (`input.*` and `run.*` aren't checked: they're data.)
+ */
+function templateIssues(root: AnyNode): string[] {
+  const issues: string[] = [];
+  const all = new Map<string, string>();
+  collectIds(root, ROOT_PATH, all);
+  const go = (node: AnyNode, path: string, scope: ResultScope) => {
+    const n = node as AnyJevNode;
+    const at = `${path} (${n.kind} "${n.id}")`;
+    for (const [where, template] of templatesOf(n)) {
+      for (const hole of new Set(templatePaths(template))) {
+        const problem = holeProblem(hole, n.id, scope, all);
+        if (problem) issues.push(`${at}${where}: "{{${hole}}}" ${problem}`);
+      }
+    }
+    const running = withId(scope.running, n.id, path);
+    const children = childrenOf(node);
+    children.forEach((c, i) => {
+      const before = n.kind === "chain" ? children.slice(0, i) : n.kind === "parallel" ? children.filter((other) => other !== c) : [];
+      let { finished } = scope;
+      if (before.length) {
+        const done = new Map(finished);
+        for (const prev of before) collectIds(prev.node, childPath(path, prev.edge), done);
+        finished = done;
+      }
+      go(c.node, childPath(path, c.edge), { finished, running });
+    });
+  };
+  go(root, ROOT_PATH, { finished: new Map(), running: new Map() });
+  return issues;
+}
+
+/** Why a hole can never resolve, or undefined if it might. */
+function holeProblem(hole: string, selfId: string, scope: ResultScope, all: Ids): string | undefined {
+  const [head = "", id] = hole.split(".");
+  if (!(TEMPLATE_ROOTS as readonly string[]).includes(head)) {
+    return `reads "${head}", which templates don't have; start with ${TEMPLATE_ROOTS.join(", ")}${didYouMean(head, TEMPLATE_ROOTS)}`;
+  }
+  if (head !== "results" || id === undefined || scope.finished.has(id)) return undefined;
+  const what = `reads results of "${id}"`;
+  if (id === selfId) return `${what}, this node's own output, which doesn't exist until it finishes`;
+  const ancestor = scope.running.get(id);
+  if (ancestor) return `${what}, which is still running at ${ancestor} (results are set when a node finishes)`;
+  const elsewhere = all.get(id);
+  if (elsewhere) return `${what}, which is at ${elsewhere} and never finishes before this node runs`;
+  return `${what}, but no node has that id${didYouMean(id, [...all.keys()])}`;
+}
+
+/** Every template in a node, with where it lives (appended to the issue's location). */
+function templatesOf(n: AnyJevNode): [string, string][] {
+  const out: [string, string][] = [];
+  switch (n.kind) {
+    case "ask":
+    case "route":
+    case "gate":
+      if (typeof n.state === "string") out.push([".state", n.state]);
+      break;
+    case "cascade":
+      for (const t of n.tiers ?? []) if (typeof t.state === "string") out.push([`.tiers.${t.id}.state`, t.state]);
+      break;
+    case "emit":
+      stringsIn(n.value, ".value", out);
+      break;
+  }
+  return out;
+}
+
+function stringsIn(value: unknown, where: string, out: [string, string][]) {
+  if (typeof value === "string") out.push([where, value]);
+  else if (Array.isArray(value)) value.forEach((v, i) => stringsIn(v, `${where}.${i}`, out));
+  else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) stringsIn(v, `${where}.${k}`, out);
+}
+
+function collectIds(node: AnyNode, path: string, into: Map<string, string>) {
+  walk(node, (n, info) => {
+    const at = info.path === ROOT_PATH ? path : path + info.path.slice(ROOT_PATH.length);
+    if (typeof n.id === "string" && !into.has(n.id)) into.set(n.id, at);
+  });
+}
+
+function withId(ids: Ids, id: string, path: string): Ids {
+  if (ids.has(id)) return ids;
+  return new Map(ids).set(id, path);
+}
+
+/** ` (did you mean "x"?)` for the closest candidate within two edits, else "". */
+function didYouMean(word: string, candidates: readonly string[]): string {
+  let best: string | undefined;
+  let bestDistance = 3;
+  for (const c of candidates) {
+    const d = editDistance(word, c);
+    if (d < bestDistance) [best, bestDistance] = [c, d];
+  }
+  return best === undefined ? "" : ` (did you mean "${best}"?)`;
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length]!;
 }
 
 function inUnit(v: unknown): boolean {

@@ -107,7 +107,7 @@ export { explainDecision, explainTrace, marginWord } from "./explain";
 export { toJSON, fromJSON, handlersOf, CHAIN_FORMAT, type ChainDocument, type FromJsonOptions, type Handler, type Ref } from "./serialize";
 export { toTypeScript, type CodegenOptions } from "./codegen";
 export { chainIssues, DECISION_KEY } from "./validate";
-export { renderTemplate } from "./template";
+export { renderTemplate, type OnMissing } from "./template";
 
 export {
   JevChainError,
