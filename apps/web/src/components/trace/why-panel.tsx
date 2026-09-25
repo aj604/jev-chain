@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { KbdCombo } from "@/components/ui/kbd";
 import { cn } from "@/lib/cn";
 import { answerBrief, fmtMetric, fmtMs } from "@/lib/trace/format";
+import { isRehearsal } from "@/lib/trace/rehearsal";
 import type { RunIssue } from "@/lib/trace/run-error";
 import { JsonView } from "./json-view";
 import { KindTag } from "./kinds";
@@ -56,6 +57,13 @@ export function WhyPanel({ trace, issue, onSelect, issueAction, className }: Why
         <h2 className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">why did it go here?</h2>
         {running && <ChainLinks variant="loading" count={5} size={10} label="running" />}
       </div>
+
+      {isRehearsal(trace) && (
+        <p className="mb-3 border-(length:--bw) border-dashed border-warn px-2.5 py-2 text-[12.5px] leading-relaxed text-ink-2">
+          <span className="font-mono text-[11px] lowercase text-warn">rehearsal.</span> jev wasn&rsquo;t asked. every number below came from a hash of
+          the input, so the roads are real but the judgement isn&rsquo;t. same input, same path.
+        </p>
+      )}
 
       {forks === 0 && trace.status === "ok" && (
         <p className="mb-3 text-[13px] leading-relaxed text-ink-2">

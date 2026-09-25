@@ -13,12 +13,14 @@ export default async function StudioPage({ searchParams }: PageProps<"/studio">)
   const example = first(params.example);
   const input = first(params.input);
   const mode = first(params.mode) === "build" ? "build" : undefined;
+  const rehearse = first(params.rehearse) === "1";
   return (
     <Studio
       key={`${example ?? ""}\u0000${input ?? ""}\u0000${mode ?? ""}`}
       {...(example ? { initialSlug: example } : {})}
       {...(input ? { initialInput: input } : {})}
       {...(mode ? { initialMode: mode } : {})}
+      {...(rehearse ? { initialRehearse: true } : {})}
     />
   );
 }
