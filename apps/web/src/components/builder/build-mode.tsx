@@ -9,7 +9,7 @@
  * Everything edits through `builder.commit`, so it's all undoable.
  */
 import { useCallback, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { FlowGraph, Json } from "jevchain";
+import type { ChainDocument, FlowGraph, Json } from "jevchain";
 import { KindTag } from "@/components/trace/kinds";
 import type { VertexDecoration } from "@/components/trace/graph-node";
 import type { TraceGraphProps } from "@/components/trace/trace-graph";
@@ -40,7 +40,7 @@ import {
 import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
 import { issueTarget } from "@/lib/builder/question-ops";
 import { editTarget, selectionAfterRemove, vertexFor } from "@/lib/builder/selection";
-import { CodeDrawer } from "./code-drawer";
+import { CodeDrawer, type JsonDraft } from "./code-drawer";
 import { ConfirmDialog, type ConfirmRequest } from "./confirm-dialog";
 import { IssuesPanel } from "./issues-panel";
 import { ContextMenu, KindGrid, KindMenu } from "./kind-menu";
@@ -100,6 +100,10 @@ export function useBuildMode({
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [codeOpen, setCodeOpen] = useState(false);
+  // JSON typed into the code drawer, kept while it's closed; tagged with the draft it belongs to so opening another chain drops it.
+  const [jsonEdit, setJsonEdit] = useState<(JsonDraft & { session?: string }) | null>(null);
+  const jsonDraft = jsonEdit && jsonEdit.session === builder.draftId ? jsonEdit : null;
+  const setJsonDraft = useCallback((d: JsonDraft | null) => setJsonEdit(d && { ...d, session: builder.draftId }), [builder.draftId]);
 
   const commitRoot = useCallback((next: NodeJson, key?: string) => commit(withRoot(doc, next), key), [commit, doc]);
   const selectPath = useCallback((path: string, tier?: string) => setSelected(vertexFor(root, path, tier)), [root, setSelected]);
@@ -473,7 +477,15 @@ export function useBuildMode({
   }, [canSaveSample, doc, commit, sample]);
 
   const footer = <IssuesPanel issues={issues} onPick={(path, tier) => selectPath(path, tier)} />;
-  const overlay = codeOpen ? <CodeDrawer doc={doc} onClose={() => setCodeOpen(false)} /> : null;
+  const applyJson = useCallback(
+    (next: ChainDocument) => {
+      commit(next);
+      // keep the selection if it still points at something, else fall back to the document
+      if (selected && !editTarget(graph, next.root as unknown as NodeJson, selected)) setSelected(null);
+    },
+    [commit, selected, graph, setSelected],
+  );
+  const overlay = codeOpen ? <CodeDrawer doc={doc} onClose={() => setCodeOpen(false)} draft={jsonDraft} setDraft={setJsonDraft} onApply={applyJson} /> : null;
 
   const portals = (
     <>
