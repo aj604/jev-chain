@@ -153,7 +153,8 @@ export default function RunningPage() {
       <H2 id="stream">Streaming</H2>
       <P>
         <C>jev.stream(chain, input, options?)</C> starts the same run and hands you its events as an async iterable.{" "}
-        <C>s.result</C> resolves to the same <C>RunResult</C> <C>run</C> would have returned.
+        <C>s.result</C> resolves to the same <C>RunResult</C> <C>run</C> would have returned. Break out of the loop and
+        the run is <A href="#cancellation">aborted</A>; a stream nobody iterates just runs to the end.
       </P>
       <Snippet code={STREAM} file="stream.ts" />
       <ApiTable
@@ -199,12 +200,23 @@ export default function RunningPage() {
           You asked for an answer by a time; not getting one is a failure.
         </Li>
         <Li>
-          Either way, spans still running are closed as cancelled, and the partial trace comes back as usual.
+          Either way, spans still running are closed with status <C>error</C> and that same reason as their error
+          (code <C>aborted</C> or <C>timeout</C>), and the partial trace comes back as usual.
+        </Li>
+        <Li>
+          Stopping means stopping: calls still queued for a concurrency slot are never sent, a retry backoff wakes up
+          and quits, and nothing new starts.
+        </Li>
+        <Li>
+          Leaving a <A href="#stream">stream</A>&apos;s <C>for await</C> loop early (<C>break</C>, <C>return</C>, a
+          throw) aborts the run the same way. <C>s.result</C> resolves with status <C>&quot;aborted&quot;</C>.
         </Li>
       </List>
       <P>
-        A failure inside a <C>parallel</C> cancels its sibling branches too. Your own code gets the signal as{" "}
-        <C>ctx.signal</C>; pass it along to anything that can be cancelled:
+        A failure inside a <C>parallel</C> cancels its sibling branches too; they close with a <C>cancelled</C> error
+        whose cause is the real failure (see <A href="/docs/parallel#failures">parallel</A>). Your own code gets the
+        signal as <C>ctx.signal</C>; pass it along to anything that can be cancelled. Calls a step makes through{" "}
+        <C>ctx.jev</C> are cancelled with it already:
       </P>
       <Snippet code={STEP_SIGNAL} file="lookup.ts" />
     </DocPage>

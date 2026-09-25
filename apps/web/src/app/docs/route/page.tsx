@@ -1,6 +1,7 @@
 import { DocExample } from "@/components/docs/doc-example";
 import { A, ApiTable, C, Callout, CompileError, DocPage, H2, Li, List, P, Snippet } from "@/components/docs/doc-ui";
 import { Code } from "@/components/ui/code-block";
+import { claims } from "@/docs/claims";
 import { docMetadata } from "@/docs/nav";
 
 export const metadata = docMetadata("route");
@@ -31,8 +32,7 @@ const MISSING = `const triage = route("triage", {
 const MISSING_ERR = `error TS2322: Type '{ billing: …; bug: …; }' is not assignable to type 'NoExtraKeys<RouteBranches<"billing" | "bug" | "vibes">, …>'.
   Property 'vibes' is missing in type '{ billing: …; bug: …; }' but required in type 'RouteBranches<"billing" | "bug" | "vibes">'.`;
 
-const RUNTIME_ISSUES = `$ (route "triage"): no branch for "vibes"
-$ (route "triage"): branches "refunds" aren't options of the question`;
+const RUNTIME_ISSUES = claims.routeIssues.join("\n");
 
 const LOW = `route("front-desk", {
   ask: choice("Which team should handle this ticket?", ["repair", "billing", "paranormal"]),
@@ -40,21 +40,7 @@ const LOW = `route("front-desk", {
   branches: { repair, billing, paranormal },
 });`;
 
-const DECISION = `{
-  "kind": "route",
-  "question": "decision",
-  "taken": "paranormal",
-  "edges": [
-    { "edge": "repair",        "value": 0.02,  "taken": false },
-    { "edge": "billing",       "value": 0.004, "taken": false },
-    { "edge": "paranormal",    "value": 0.976, "taken": true  },
-    { "edge": "lowConfidence", "value": 0.887, "taken": false }
-  ],
-  "metric": "probability",
-  "value": 0.976,
-  "confidence": 0.887,
-  "summary": "Went to \\"paranormal\\" with 98%, a landslide over \\"repair\\" at 2% (confidence 0.89)."
-}`;
+const DECISION = claims.routeDecision;
 
 const ALSO = `route("front-desk", {
   ask: choice("Which team should handle this ticket?", ["repair", "billing", "paranormal"]),
@@ -62,7 +48,16 @@ const ALSO = `route("front-desk", {
     sarcastic: noul("Is the customer joking or being sarcastic?"),
     angry: noul("Is the customer angry?"),
   },
-  branches: { repair, billing, paranormal },
+  branches: {
+    // A template reads them by route id and key…
+    repair: emit("Repair ticket. p(angry) = {{answers.front-desk.angry.noul}}"),
+    // …and so does a step, where each one is a typed Answer.
+    billing: step("apologise", (ticket: string, ctx) => {
+      const angry = ctx.answers["front-desk"]?.angry;
+      return angry?.type === "noul" && angry.noul > 0.5 ? \`Sorry! \${ticket}\` : ticket;
+    }),
+    paranormal,
+  },
 });`;
 
 export default function RoutePage() {
@@ -101,7 +96,12 @@ export default function RoutePage() {
           {
             name: "alsoAsk",
             type: "Questions",
-            children: <>Extra questions in the same call, recorded in the trace.</>,
+            children: (
+              <>
+                Extra questions in the same call. The branch and later nodes can read the answers. See{" "}
+                <A href="#also-ask">alsoAsk</A>.
+              </>
+            ),
           },
           { name: "state", type: "string | (input) => Entry", default: "the input", children: <>What Jev reads. Same as <A href="/docs/ask#state">ask</A>.</> },
           { name: "model", type: "string", default: "client's model", children: <>Pin this node to a model.</> },
@@ -148,13 +148,13 @@ export default function RoutePage() {
         not, alongside a templated, human-readable <C>summary</C>:
       </P>
       <Code code={DECISION} className="my-4 overflow-x-auto border-soft bg-surface px-4 py-3" />
-      <P>When the fallback wins, the decision is flagged and the summary says what it would have picked:</P>
+      <P>
+        The bar is recorded as <C>lowConfidence.below</C> whether or not it fired, so the summary can say how close the
+        call was. When the fallback wins, the decision is flagged and the summary says what it would have picked:
+      </P>
       <List>
         <Li>
-          <em>
-            Jev leaned &ldquo;repair&rdquo; but only at 0.31 confidence, under the 0.40 bar, so it took the
-            low-confidence path instead of guessing.
-          </em>
+          <em>{claims.routeLowConfidence}</em>
         </Li>
       </List>
       <P>
@@ -166,10 +166,18 @@ export default function RoutePage() {
       <P>
         Sometimes you&apos;re already paying for a call and want to know something else about the same input for later:
         sentiment, language, whether the customer is joking. <C>alsoAsk</C> adds questions to the route&apos;s request.
-        Their answers land in the call recorded in the trace, but they don&apos;t influence the branch and aren&apos;t
-        part of the output.
+        They don&apos;t influence the branch and they aren&apos;t part of the route&apos;s output, but they aren&apos;t
+        lost either: the moment the call returns, every answer is filed under the route&apos;s id. The branch it picks,
+        and anything after it, reads them as <C>{"{{answers.front-desk.angry}}"}</C> in a template or{" "}
+        <C>{'ctx.answers["front-desk"]'}</C> in a step.
       </P>
       <Snippet code={ALSO} file="front-desk.ts" />
+      <P>
+        The route&apos;s own answer is filed there too, under <C>decision</C>, so a branch can check how sure Jev was
+        about sending it there: <C>{"{{answers.front-desk.decision.confidence}}"}</C>. A template that reads a key the
+        route never asks, or a route that can&apos;t have answered yet, is{" "}
+        <A href="/docs/step-and-emit#template-checks">rejected before the run</A>.
+      </P>
       <Callout tone="warn" title="“decision” is reserved">
         <p>
           The deciding question is sent under the key <C>decision</C>, so an <C>alsoAsk</C> key with that name is a{" "}

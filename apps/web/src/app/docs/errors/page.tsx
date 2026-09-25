@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { DocExample } from "@/components/docs/doc-example";
 import { A, C, Callout, DocPage, H2, P, Snippet } from "@/components/docs/doc-ui";
+import { claims } from "@/docs/claims";
 import { docMetadata } from "@/docs/nav";
 
 export const metadata = docMetadata("errors");
@@ -37,19 +38,21 @@ if (result.status === "error" || result.status === "aborted") {
   }
 }`;
 
+/** A serialized error on two lines: the fields, then the message. */
+const twoLines = ({ message, ...rest }: { message: string }) =>
+  `${JSON.stringify(rest, null, 1).replace(/\n\s*/g, " ").slice(0, -2)},\n  "message": ${JSON.stringify(message)} }`;
+
 const TRACE_ERR = `// trace.error: the NodeError, flattened
-{ "name": "NodeError", "code": "rate_limited", "nodeId": "front-desk",
-  "message": "Node \\"front-desk\\" failed: Rate limited by TypeSafe (retry after 2000ms)" }
+${twoLines(claims.errorTrace.run)}
 
 // the failing span's error: the original cause
-{ "name": "JevRateLimitError", "code": "rate_limited", "status": 429,
-  "message": "Rate limited by TypeSafe (retry after 2000ms)" }`;
+${twoLines(claims.errorTrace.span)}`;
 
 const CONFIG = `try {
   await jev.run(fromJSON(doc, { handlers }), input);
 } catch (e) {
   if (e instanceof ChainConfigError) console.error(e.issues);
-  // [ '$ (route "fridge-verdict"): no branch for "compost"' ]
+  // [ '${claims.errorConfig[0]}' ]
 }`;
 
 interface ErrorRow {
@@ -123,7 +126,8 @@ export default function ErrorsPage() {
           { name: "JevAbortError", type: "aborted", default: "no", children: <>Your <code>AbortSignal</code> fired. The run&apos;s status is <code>aborted</code>. Nothing to fix.</> },
           { name: "JevResponseError", type: "bad_response", default: "no", children: <>A 200 whose body wasn&apos;t right: no <code>answers</code>, a missing answer, or an answer of the wrong type. Has <code>body</code>.</> },
           { name: "ChainConfigError", type: "chain_config", default: "—", children: <>The chain itself is invalid. Has <code>issues: string[]</code>. Thrown, not returned.</> },
-          { name: "NodeError", type: "cause's code", default: "—", children: <>Wraps whatever failed inside a node. Has <code>nodeId</code> and <code>cause</code>; its code is the cause&apos;s code, or <code>node_error</code> for plain exceptions from your code.</> },
+          { name: "NodeError", type: "cause's code", default: "—", children: <>Wraps whatever failed inside a node. Has <code>nodeId</code>, <code>path</code> and <code>cause</code>; its code is the cause&apos;s code, or <code>node_error</code> for plain exceptions from your code.</> },
+          { name: "CancelledError", type: "cancelled", default: "no", children: <>Work stopped because something else failed first, like a <A href="/docs/parallel#failures">parallel</A> sibling. Collateral, not the culprit: its <code>cause</code>, and the run&apos;s <code>error</code>, is the real failure.</> },
         ]}
       />
       <P>
@@ -152,7 +156,8 @@ export default function ErrorsPage() {
       <P>
         In a trace, the failure is recorded twice: <C>trace.error</C> is the <C>NodeError</C> and the failing span&apos;s{" "}
         <C>error</C> is the original cause, both flattened by <C>serializeError</C> into{" "}
-        <C>{`{ name, code, message, status?, nodeId? }`}</C>:
+        <C>{`{ name, code, message, status?, nodeId?, path? }`}</C>. <C>path</C> is the span where the failure started,
+        so you can find it in the trace even when ids repeat:
       </P>
       <Snippet code={TRACE_ERR} file="trace.json" />
       <P>
