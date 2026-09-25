@@ -335,10 +335,11 @@ export function emit<const V extends Json>(value: V, options: { id?: string } & 
   return { kind: "emit", id: id ?? "emit", value, ...meta } as EmitNode<V extends string ? string : V>;
 }
 
-type LongChain = readonly [AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, AnyNode, ...AnyNode[]];
-/** `T` with every node after the first required to accept the output of the node before it. */
-type Linked<T extends readonly AnyNode[], Prev = unknown, First = true> = T extends readonly [infer H extends AnyNode, ...infer R extends AnyNode[]]
-  ? [First extends true ? H : JevNode<Prev, OutputOf<H>>, ...Linked<R, OutputOf<H>, false>]
+/** A node that accepts `P`'s output. */
+type Feeds<P> = JevNode<OutputOf<P>, any>;
+/** `T` with every node required to accept the output of the node before it (`Prev` feeds the first). */
+type Linked<T extends readonly AnyNode[], Prev> = T extends readonly [infer H extends AnyNode, ...infer R extends AnyNode[]]
+  ? [JevNode<Prev, OutputOf<H>>, ...Linked<R, OutputOf<H>>]
   : [];
 type Last<T extends readonly AnyNode[]> = T extends readonly [...AnyNode[], infer L] ? L : AnyNode;
 
@@ -385,7 +386,29 @@ export function chain<A, B, C, D, E, F, G, H>(
 ): ChainNode<A, H>;
 // Eight or more: still checked hand-off by hand-off, but a step's parameter
 // isn't inferred from the node before it, so annotate it (or nest chains).
-export function chain<const T extends LongChain>(id: string, ...steps: T & Linked<T>): ChainNode<InputOf<T[0]>, OutputOf<Last<T>>>;
+// (Eight positional nodes, so shorter calls never reach this overload and keep their errors.)
+export function chain<
+  N1 extends AnyNode,
+  N2 extends AnyNode,
+  N3 extends AnyNode,
+  N4 extends AnyNode,
+  N5 extends AnyNode,
+  N6 extends AnyNode,
+  N7 extends AnyNode,
+  N8 extends AnyNode,
+  const R extends readonly AnyNode[],
+>(
+  id: string,
+  n1: N1,
+  n2: N2 & Feeds<N1>,
+  n3: N3 & Feeds<N2>,
+  n4: N4 & Feeds<N3>,
+  n5: N5 & Feeds<N4>,
+  n6: N6 & Feeds<N5>,
+  n7: N7 & Feeds<N6>,
+  n8: N8 & Feeds<N7>,
+  ...rest: R & Linked<R, OutputOf<N8>>
+): ChainNode<InputOf<N1>, OutputOf<Last<[N8, ...R]>>>;
 export function chain(id: string, ...steps: AnyNode[]): ChainNode {
   if (steps.length === 0) throw new TypeError(`chain("${id}"): needs at least one node`);
   return { kind: "chain", id, steps };

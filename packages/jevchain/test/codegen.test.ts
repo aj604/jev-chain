@@ -132,10 +132,14 @@ describe("toTypeScript output", () => {
   it("keeps generated code valid for awkward names and half-built documents", () => {
     const root = gate("gate", { ask: noul("Go?"), pass: { min: 0.5 }, then: emit(1), unsure: { then: emit(2) } });
     const doc = toJSON(root);
-    const files = generate({ awkward: { ...doc, description: "line one\nline two */ not code" } });
+    const evalDoc = toJSON(chain("eval", emit(1)));
+    const argsDoc = toJSON(chain("arguments", emit(1)));
+    const files = generate({ awkward: { ...doc, description: "line one\nline two */ not code" }, "eval-root": evalDoc, "arguments-root": argsDoc });
     const code = toTypeScript(doc);
     expect(code).toContain("export const gateChain = gate(");
     expect(code).toContain("unsure: { then: emit(2) }");
+    expect(toTypeScript(evalDoc)).toContain("export const evalChain = chain(");
+    expect(toTypeScript(argsDoc)).toContain("export const argumentsChain = chain(");
     expect(typeErrors(Object.values(files))).toEqual([]);
   }, 60_000);
 });

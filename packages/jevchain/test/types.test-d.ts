@@ -96,7 +96,6 @@ test("chains of eight or more still thread types and reject mismatches", () => {
   chain("loose", loose("1"), loose("2"), loose("3"), loose("4"), loose("5"), loose("6"), loose("7"), loose("8"), loose("9"), loose("10"));
   chain(
     "bad",
-    // @ts-expect-error: the eighth node takes a number but gets the string before it
     inc("a"),
     inc("b"),
     inc("c"),
@@ -104,6 +103,30 @@ test("chains of eight or more still thread types and reject mismatches", () => {
     inc("e"),
     inc("f"),
     step("show", (n: number) => `${n}!`),
+    // @ts-expect-error: the eighth node takes a number but gets the string before it
     inc("g"),
+  );
+  chain(
+    "bad-tail",
+    inc("a"),
+    inc("b"),
+    inc("c"),
+    inc("d"),
+    inc("e"),
+    inc("f"),
+    inc("g"),
+    step("show", (n: number) => `${n}!`),
+    // @ts-expect-error: a node past the eighth is checked too
+    inc("h"),
+  );
+});
+
+test("a mismatch in a short chain is reported at the broken hand-off, not on chain()", () => {
+  chain(
+    "short",
+    step("n", (_: unknown) => 1),
+    // @ts-expect-error: this number output can't feed the string-only step after it
+    step("m", (n: number) => n * 2),
+    step("s", (x: string) => x),
   );
 });
