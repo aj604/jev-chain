@@ -34,7 +34,7 @@ import {
   type StepContext,
   type StepNode,
 } from "./nodes";
-import { confidenceOf, type Answer, type Entry, type Json, type Questions } from "./questions";
+import { confidenceOf, distance, type Answer, type Entry, type Json, type Questions } from "./questions";
 import { renderJson, renderTemplate, type OnMissing } from "./template";
 import { reduceTrace, type Decision, type JevCall, type RunStatus, type SpanStatus, type Trace, type TraceEvent } from "./trace";
 import { chainIssues, DECISION_KEY } from "./validate";
@@ -415,9 +415,11 @@ class Runner {
     if (node.unsure) {
       // Measured against the edge the value is next to: for a min–max window,
       // a value just under `max` is as close a call as one just over `min`.
+      // The margin is strict and measured as a decimal: exactly `margin` away
+      // is outside it, on either side of the bar.
       const edge = nearestEdge(value, threshold);
       const { margin, minConfidence } = node.unsure;
-      const nearBar = margin !== undefined && edge !== undefined && Math.abs(value - edge.bar) < margin;
+      const nearBar = margin !== undefined && edge !== undefined && distance(value, edge.bar) < margin;
       const lowConf = minConfidence !== undefined && confidence < minConfidence;
       unsure = nearBar || lowConf;
       if (unsure) unsureBecause = { ...(nearBar ? { margin } : {}), ...(lowConf ? { minConfidence, confidence } : {}) };
