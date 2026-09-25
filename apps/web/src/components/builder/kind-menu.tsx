@@ -22,7 +22,7 @@ export const KINDS: { kind: BuilderKind; key: string; blurb: string }[] = [
 ];
 
 /** Swallow keys while a menu is open: letters pick, escape closes. */
-function useMenuKeys(onPick: ((k: BuilderKind) => void) | null, onClose: () => void, extra?: (key: string) => boolean) {
+function useMenuKeys(onPick: ((k: BuilderKind) => void) | null, onClose: () => void, extra?: (key: string, shift: boolean) => boolean) {
   const pick = useRef(onPick);
   const close = useRef(onClose);
   const more = useRef(extra);
@@ -41,7 +41,7 @@ function useMenuKeys(onPick: ((k: BuilderKind) => void) | null, onClose: () => v
         close.current();
         return;
       }
-      if (more.current?.(key)) {
+      if (more.current?.(key, e.shiftKey)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -72,7 +72,10 @@ function useOutside(ref: React.RefObject<HTMLElement | null>, onClose: () => voi
   }, [ref]);
 }
 
-function KindList({ onPick, current, title }: { onPick: (k: BuilderKind) => void; current?: BuilderKind; title: string }) {
+/** What picking each kind would do to the selection ("keeps the question · drops 2 nodes"), shown instead of the blurb. */
+export type KindHints = Partial<Record<BuilderKind, { text: string; loses: boolean }>>;
+
+function KindList({ onPick, current, title, hints }: { onPick: (k: BuilderKind) => void; current?: BuilderKind; title: string; hints?: KindHints }) {
   return (
     <div role="menu" aria-label={title}>
       <div className="border-soft-b px-3 py-1.5 font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">{title}</div>
@@ -90,7 +93,11 @@ function KindList({ onPick, current, title }: { onPick: (k: BuilderKind) => void
           </span>
           <span className="min-w-0 flex-1">
             <span className="block font-mono text-[11.5px] leading-4 text-ink">{kind}</span>
-            <span className="block truncate text-[11px] leading-4 text-ink-3">{blurb}</span>
+            {hints?.[kind]?.text && kind !== current ? (
+              <span className={cn("block text-[10.5px] leading-[1.35]", hints[kind]!.loses ? "text-warn" : "text-ink-3")}>{hints[kind]!.text}</span>
+            ) : (
+              <span className="block truncate text-[11px] leading-4 text-ink-3">{blurb}</span>
+            )}
           </span>
           <Kbd className="shrink-0">{key}</Kbd>
         </button>
@@ -100,7 +107,21 @@ function KindList({ onPick, current, title }: { onPick: (k: BuilderKind) => void
 }
 
 /** A dropdown kind picker under a trigger. */
-export function KindMenu({ title, onPick, onClose, current, className }: { title: string; onPick: (k: BuilderKind) => void; onClose: () => void; current?: BuilderKind; className?: string }) {
+export function KindMenu({
+  title,
+  onPick,
+  onClose,
+  current,
+  hints,
+  className,
+}: {
+  title: string;
+  onPick: (k: BuilderKind) => void;
+  onClose: () => void;
+  current?: BuilderKind;
+  hints?: KindHints;
+  className?: string;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useMenuKeys(
     (k) => {
@@ -111,7 +132,7 @@ export function KindMenu({ title, onPick, onClose, current, className }: { title
   useOutside(ref, onClose);
   return (
     <div ref={ref} className={cn("fade-up absolute top-[calc(100%+4px)] left-0 z-40 w-64 border-hard bg-paper shadow-[4px_4px_0_0_var(--ink)]", className)}>
-      <KindList title={title} onPick={onPick} current={current} />
+      <KindList title={title} onPick={onPick} current={current} hints={hints} />
     </div>
   );
 }
@@ -154,7 +175,9 @@ export function ContextMenu({
   title,
   kind,
   onAdd,
+  onAddBefore,
   onChangeKind,
+  kindHints,
   actions,
   onClose,
 }: {
@@ -162,12 +185,14 @@ export function ContextMenu({
   title: ReactNode;
   kind?: BuilderKind;
   onAdd: (k: BuilderKind) => void;
+  onAddBefore: (k: BuilderKind) => void;
   onChangeKind: (k: BuilderKind) => void;
+  kindHints?: KindHints;
   actions: ContextAction[];
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [sub, setSub] = useState<"add" | "kind" | null>(null);
+  const [sub, setSub] = useState<"add" | "before" | "kind" | null>(null);
   const [pos, setPos] = useState(at);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -181,13 +206,14 @@ export function ContextMenu({
     sub
       ? (k) => {
           if (sub === "add") onAdd(k);
+          else if (sub === "before") onAddBefore(k);
           else if (k !== kind) onChangeKind(k);
         }
       : null,
     () => (sub ? setSub(null) : onClose()),
-    (key) => {
+    (key, shift) => {
       if (sub) return false;
-      if (key === "n") setSub("add");
+      if (key === "n") setSub(shift ? "before" : "add");
       else if (key === "k") setSub("kind");
       else return false;
       return true;
@@ -203,11 +229,19 @@ export function ContextMenu({
           <button type="button" onClick={() => setSub(null)} className="flex w-full items-center gap-1.5 border-soft-b px-3 py-1.5 font-mono text-[10.5px] text-ink-3 hover:text-ink">
             ← back
           </button>
-          <KindList title={sub === "add" ? "add after" : "change kind to"} onPick={sub === "add" ? onAdd : onChangeKind} current={sub === "kind" ? kind : undefined} />
+          <KindList
+            title={sub === "add" ? "add after" : sub === "before" ? "add before" : "change kind to"}
+            onPick={sub === "add" ? onAdd : sub === "before" ? onAddBefore : onChangeKind}
+            current={sub === "kind" ? kind : undefined}
+            hints={sub === "kind" ? kindHints : undefined}
+          />
         </>
       ) : (
         <>
           <div className="truncate border-soft-b px-3 py-1.5 font-mono text-[10.5px] text-ink-3">{title}</div>
+          <button type="button" role="menuitem" className={cn(item, "text-ink hover:bg-surface-2")} onClick={() => setSub("before")}>
+            add node before <span className="flex items-center gap-1.5 text-ink-3"><Kbd>⇧n</Kbd>▸</span>
+          </button>
           <button type="button" role="menuitem" className={cn(item, "text-ink hover:bg-surface-2")} onClick={() => setSub("add")}>
             add node after <span className="flex items-center gap-1.5 text-ink-3"><Kbd>n</Kbd>▸</span>
           </button>

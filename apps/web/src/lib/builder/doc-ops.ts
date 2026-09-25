@@ -6,6 +6,7 @@
  * stack of documents and React re-renders stay cheap.
  */
 import { CHAIN_FORMAT, ChainConfigError, fromJSON, type ChainDocument, type Json } from "jevchain";
+import { canBeRead, withReadsRenamed } from "./reads";
 
 export type NodeJson = { kind: BuilderKind; id: string; title?: string; [key: string]: unknown };
 export type BuilderKind = "ask" | "route" | "gate" | "parallel" | "cascade" | "step" | "emit" | "chain";
@@ -204,7 +205,8 @@ export function template(kind: BuilderKind, taken: Set<string> = new Set()): Nod
     case "emit":
       return { kind, id, value: "hello from {{input}}" };
     case "chain":
-      return { kind, id, steps: [template("ask", taken), leaf("done", taken)] };
+      // the emit reads the ask's answer, so the starter shows data moving down a chain (and the ask isn't wasted)
+      return { kind, id, steps: [template("ask", taken), leaf("the vibe: {{input.vibe.choice}}", taken)] };
   }
 }
 
@@ -297,17 +299,73 @@ export function insertAfterPath(root: NodeJson, path: string, node: NodeJson, ta
   return { root: insertAfter(root, path, node, taken), path: joinPath(path, "1") };
 }
 
+/**
+ * Insert `node` before the one at `path`, and report where it landed: into the
+ * parent chain if there is one, at the front of the target if it's a chain,
+ * else wrap both in a new chain with `node` first. Works on the root too, so
+ * a chain can always grow at the front.
+ */
+export function insertBeforePath(root: NodeJson, path: string, node: NodeJson, taken: Set<string> = allIds(root)): { root: NodeJson; path: string } {
+  const p = parentOf(path);
+  if (p && getAt(root, p.parent)?.kind === "chain") {
+    const i = Number(p.edge);
+    const next = updateAt(root, p.parent, (c) => {
+      const steps = [...(c.steps as NodeJson[])];
+      steps.splice(i, 0, node);
+      return { ...c, steps };
+    });
+    return { root: next, path };
+  }
+  const target = getAt(root, path)!;
+  if (target.kind === "chain") return { root: updateAt(root, path, (c) => ({ ...c, steps: [node, ...(c.steps as NodeJson[])] })), path: joinPath(path, "0") };
+  const id = freshId("chain", taken);
+  return { root: updateAt(root, path, { kind: "chain", id, steps: [node, target] }), path: joinPath(path, "0") };
+}
+
+/** Whether the node at `path` is a chain step that can shift `delta` places and stay in its chain. */
+export function canMove(root: NodeJson, path: string, delta: number): boolean {
+  const p = parentOf(path);
+  const parent = p ? getAt(root, p.parent) : undefined;
+  if (!p || parent?.kind !== "chain") return false;
+  const to = Number(p.edge) + delta;
+  return delta !== 0 && to >= 0 && to < (parent.steps as unknown[]).length;
+}
+
+/**
+ * Move a chain step `delta` places within its chain (-1 = earlier), keeping its
+ * whole subtree. Returns the new root and the step's new path, or null when it
+ * isn't in a chain or would fall off either end.
+ */
+export function moveStep(root: NodeJson, path: string, delta: number): { root: NodeJson; path: string } | null {
+  if (!canMove(root, path, delta)) return null;
+  const p = parentOf(path)!;
+  const from = Number(p.edge);
+  const to = from + delta;
+  const next = updateAt(root, p.parent, (c) => {
+    const steps = [...(c.steps as NodeJson[])];
+    const [step] = steps.splice(from, 1);
+    steps.splice(to, 0, step!);
+    return { ...c, steps };
+  });
+  return { root: next, path: joinPath(p.parent, String(to)) };
+}
+
 /** Number of nodes in the subtree at `node` (1 for a leaf). */
 export function subtreeSize(node: NodeJson): number {
   return 1 + childEdges(node).reduce((n, c) => n + subtreeSize(c.node), 0);
 }
 
-/** A deep copy of `node` with fresh ids (`x` → `x-copy`, `x-copy-2`…). `$ref`s are kept, so copied steps stay bound. */
+/**
+ * A deep copy of `node` with fresh ids (`x` → `x-copy`, `x-copy-2`…). `$ref`s are kept, so copied steps stay bound.
+ * A `{{results.<id>}}` read inside the copy, of a node inside the copy, follows it to its new id.
+ */
 export function cloneWithFreshIds(node: NodeJson, taken: Set<string>): NodeJson {
+  const renames: [string, string][] = [];
   const rename = (id: string) => {
     let next = `${id}-copy`;
     for (let i = 2; taken.has(next); i++) next = `${id}-copy-${i}`;
     taken.add(next);
+    renames.push([id, next]);
     return next;
   };
   const go = (n: NodeJson): NodeJson => {
@@ -315,7 +373,70 @@ export function cloneWithFreshIds(node: NodeJson, taken: Set<string>): NodeJson 
     for (const c of childEdges(n)) out = withChild(out, c.edge, go(c.node));
     return out;
   };
-  return go(node);
+  return renameReads(go(node), followable(renames));
+}
+
+/**
+ * The renames a copy's reads can follow. An id the original subtree held
+ * more than once is ambiguous (which copy did a read mean?), so reads of it
+ * are left alone.
+ */
+export function followable(renames: [string, string][]): Map<string, string> {
+  const seen = new Map<string, number>();
+  for (const [from] of renames) seen.set(from, (seen.get(from) ?? 0) + 1);
+  return new Map(renames.filter(([from, to]) => from !== to && seen.get(from) === 1 && canBeRead(to)));
+}
+
+/** Rewrite `{{results.<id>…}}` reads everywhere under `root`, old id → new. Untouched subtrees keep their identity. */
+export function renameReads(root: NodeJson, map: ReadonlyMap<string, string>, depth = 0): NodeJson {
+  if (!map.size || depth > 300) return root;
+  let out = withReadsRenamed(root, map);
+  for (const c of childEdges(root)) {
+    const next = renameReads(c.node, map, depth + 1);
+    if (next !== c.node) out = withChild(out, c.edge, next);
+  }
+  return out;
+}
+
+/**
+ * Give the node at `path` a new id, and point every `{{results.<old>…}}` read
+ * in the chain at it. Reads only follow when they can only have meant this
+ * node (no other node had the old id), the new id is free, and a hole can
+ * name it; otherwise just the id changes, and the old reads show up as dead.
+ */
+export function renameNode(root: NodeJson, path: string, next: string): NodeJson {
+  const node = getAt(root, path);
+  if (!node || node.id === next) return root;
+  const from = node.id;
+  let owners = 0;
+  const count = (n: NodeJson) => {
+    if (n.id === from) owners++;
+    for (const c of childEdges(n)) count(c.node);
+  };
+  count(root);
+  const follow = owners === 1 && !allIds(root).has(next) && canBeRead(from) && canBeRead(next);
+  const renamed = updateAt(root, path, { ...node, id: next });
+  return follow ? renameReads(renamed, new Map([[from, next]])) : renamed;
+}
+
+/** An id being typed: the root it started from, and the root its last keystroke produced. */
+export interface IdEdit {
+  path: string;
+  base: NodeJson;
+  last: NodeJson;
+}
+
+/**
+ * One keystroke of typing an id. The id field commits every keystroke, but
+ * each is a single rename from the root as it was when the typing began, so
+ * an intermediate id never picks up reads that happen to name it (a dead
+ * `{{results.urgency}}` on the way to `urgency-check`). A new edit starts
+ * whenever the root isn't the one the last keystroke produced (another edit,
+ * an undo) or the path changed.
+ */
+export function renameTyped(edit: IdEdit | null, root: NodeJson, path: string, next: string): IdEdit {
+  const base = edit && edit.path === path && edit.last === root ? edit.base : root;
+  return { path, base, last: renameNode(base, path, next) };
 }
 
 /**
@@ -346,11 +467,6 @@ export function duplicateAt(root: NodeJson, path: string, taken: Set<string> = a
     return { root: updateAt(root, p.parent, { ...parent, branches: Object.fromEntries(entries) }), path: joinPath(p.parent, key) };
   }
   return null;
-}
-
-/** Swap the node at `path` for a fresh template of another kind. */
-export function replaceKind(root: NodeJson, path: string, kind: BuilderKind, taken: Set<string> = allIds(root)): NodeJson {
-  return updateAt(root, path, template(kind, taken));
 }
 
 // ---------------------------------------------------------------------------

@@ -3,13 +3,14 @@
 /**
  * Build mode's moving parts, as one hook the Studio plugs into its Workbench:
  * structural actions on the selection (add after, change kind, duplicate,
- * delete), the canvas toolbar and right-click menu, the property editor, the
- * issues strip, the live-code drawer, and their hotkeys.
+ * cut / copy / paste, delete), the canvas toolbar and right-click menu, the
+ * property editor, the issues strip (with data-flow warnings and their
+ * fixes), the live-code drawer, and their hotkeys.
  *
  * Everything edits through `builder.commit`, so it's all undoable.
  */
-import { useCallback, useMemo, useState, type ReactNode } from "react";
-import type { FlowGraph, Json } from "jevchain";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { ChainDocument, FlowGraph, Json } from "jevchain";
 import { KindTag } from "@/components/trace/kinds";
 import type { VertexDecoration } from "@/components/trace/graph-node";
 import type { TraceGraphProps } from "@/components/trace/trace-graph";
@@ -20,37 +21,58 @@ import { useHotkey } from "@/lib/hotkeys";
 import {
   allIds,
   canDuplicate,
+  canMove,
   childEdges,
   duplicateAt,
   getAt,
   insertAfterPath,
+  insertBeforePath,
   isPlaceholder,
+  moveStep,
   removeAt,
-  replaceKind,
+  renameTyped,
   subtreeSize,
   template,
   updateAt,
   withRoot,
   type BuilderKind,
+  type IdEdit,
   type NodeJson,
 } from "@/lib/builder/doc-ops";
+import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
+import { convertKind, describeChange, losesWork } from "@/lib/builder/convert-kind";
+import { flowWarnings, inputAt, type FlowFix, type FlowWarning } from "@/lib/builder/data-flow";
 import { issueTarget } from "@/lib/builder/question-ops";
 import { editTarget, selectionAfterRemove, vertexFor } from "@/lib/builder/selection";
-import { CodeDrawer } from "./code-drawer";
+import { CodeDrawer, type JsonDraft } from "./code-drawer";
 import { ConfirmDialog, type ConfirmRequest } from "./confirm-dialog";
 import { IssuesPanel } from "./issues-panel";
-import { ContextMenu, KindGrid, KindMenu } from "./kind-menu";
+import { ContextMenu, KindGrid, KindMenu, KINDS, type KindHints } from "./kind-menu";
 import { DocumentEditor, PropertyEditor, type Update } from "./property-editor";
 import type { Builder } from "./use-builder";
 
 const GROUP = "builder";
 
+type Menu = "add" | "before" | "kind";
+
+const NOT_TEXT = new Set(["checkbox", "radio", "button", "submit", "reset", "range", "color", "file"]);
+
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
   if (!t) return false;
   if (t.isContentEditable) return true;
-  return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT";
+  if (t.tagName === "INPUT") return !NOT_TEXT.has((t as HTMLInputElement).type);
+  return t.tagName === "TEXTAREA" || t.tagName === "SELECT";
 }
+
+/** ⌘c / ⌘x / ⌘v belong to the browser while typing or while page text is selected. */
+function nativeClipboard(e: KeyboardEvent): boolean {
+  if (isTyping(e)) return true;
+  const sel = typeof window === "undefined" ? null : window.getSelection();
+  return Boolean(sel && !sel.isCollapsed && sel.toString().trim());
+}
+
+const clipName = (clip: Clip) => clip.node.title || clip.node.id;
 
 function count(n: number, word: string) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -78,10 +100,14 @@ export function useBuildMode({
   const { doc, commit, handlers } = builder;
   const root = doc.root as unknown as NodeJson;
   const target = useMemo(() => editTarget(graph, root, selected), [graph, root, selected]);
-  const [menu, setMenu] = useState<"add" | "kind" | null>(null);
+  const [menu, setMenu] = useState<Menu | null>(null);
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [codeOpen, setCodeOpen] = useState(false);
+  // JSON typed into the code drawer, kept while it's closed; tagged with the draft it belongs to so opening another chain drops it.
+  const [jsonEdit, setJsonEdit] = useState<(JsonDraft & { session?: string }) | null>(null);
+  const jsonDraft = jsonEdit && jsonEdit.session === builder.draftId ? jsonEdit : null;
+  const setJsonDraft = useCallback((d: JsonDraft | null) => setJsonEdit(d && { ...d, session: builder.draftId }), [builder.draftId]);
 
   const commitRoot = useCallback((next: NodeJson, key?: string) => commit(withRoot(doc, next), key), [commit, doc]);
   const selectPath = useCallback((path: string, tier?: string) => setSelected(vertexFor(root, path, tier)), [root, setSelected]);
@@ -100,32 +126,95 @@ export function useBuildMode({
     [target, root, commitRoot, setSelected],
   );
 
-  const changeKind = useCallback(
+  const addBefore = useCallback(
     (kind: BuilderKind) => {
-      if (!target) return;
-      const go = () => {
-        const next = replaceKind(root, target.path, kind);
-        commitRoot(next);
-        setSelected(vertexFor(next, target.path));
-      };
+      const path = target?.path ?? "$";
+      const taken = allIds(root);
+      const r = insertBeforePath(root, path, template(kind, taken), taken);
+      commitRoot(r.root);
+      setSelected(vertexFor(r.root, r.path));
       setMenu(null);
       setCtx(null);
-      const size = subtreeSize(target.node);
-      if (size > 1)
-        setConfirm({
-          title: `turn this ${target.node.kind} into a ${kind}?`,
-          body: (
-            <>
-              <span className="font-mono text-ink">{target.node.title || target.node.id}</span> and the {count(size - 1, "node")} under it get replaced by a fresh {kind}. undo brings them back.
-            </>
-          ),
-          confirmLabel: `replace ${count(size, "node")}`,
-          onConfirm: go,
-        });
-      else go();
     },
     [target, root, commitRoot, setSelected],
   );
+
+  const move = useCallback(
+    (delta: number) => {
+      if (!target) return;
+      const r = moveStep(root, target.path, delta);
+      if (!r) return;
+      commitRoot(r.root);
+      setSelected(vertexFor(r.root, r.path, target.tier));
+    },
+    [target, root, commitRoot, setSelected],
+  );
+
+  // a kind change keeps what the new kind has room for (id, questions, paths) and says up front what it can't
+  const changeKind = useCallback(
+    (kind: BuilderKind) => {
+      if (!target) return;
+      const change = convertKind(root, target.path, kind);
+      const go = () => {
+        commitRoot(change.root);
+        setSelected(vertexFor(change.root, change.path));
+      };
+      setMenu(null);
+      setCtx(null);
+      if (!losesWork(change)) return go();
+      const nodes = change.dropped.reduce((n, d) => n + d.nodes, 0);
+      setConfirm({
+        title: `turn this ${target.node.kind} into a ${kind}?`,
+        body: (
+          <>
+            {change.kept.length > 0 && (
+              <span className="mb-2 block">
+                <span className="font-mono text-ink">{target.node.title || target.node.id}</span> keeps {change.kept.join(", ")}.
+              </span>
+            )}
+            {change.dropped.length > 0 && (
+              <>
+                <span className="block">a {kind} has nowhere to put:</span>
+                <ul className="mb-2 space-y-0.5 font-mono text-[12px] text-ink">
+                  {change.dropped.map((d) => (
+                    <li key={d.what}>
+                      − {d.what}
+                      {d.nodes > 0 && <span className="text-ink-3"> ({count(d.nodes, "node")})</span>}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {change.changed.length > 0 && (
+              <>
+                <span className="block">as a {kind}, it {change.dropped.length > 0 ? "also " : ""}picks its path differently. it:</span>
+                <ul className="mb-2 space-y-0.5 font-mono text-[12px] text-ink">
+                  {change.changed.map((c) => (
+                    <li key={c}>≠ {c}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            undo puts it back as it was.
+          </>
+        ),
+        confirmLabel: nodes ? `drop ${count(nodes, "node")}` : `make it a ${kind}`,
+        onConfirm: go,
+      });
+    },
+    [target, root, commitRoot, setSelected],
+  );
+  // what each kind in the menu would keep and drop, worked out only while a kind menu can be open
+  const kindHints = useMemo((): KindHints | undefined => {
+    if (!target || isPlaceholder(target.node) || (menu !== "kind" && !ctx)) return undefined;
+    const out: KindHints = {};
+    for (const { kind } of KINDS) {
+      if (kind === target.node.kind) continue;
+      const c = convertKind(root, target.path, kind);
+      out[kind] = { text: describeChange(c), loses: losesWork(c) };
+    }
+    return out;
+  }, [target, root, menu, ctx]);
 
   const remove = useCallback(() => {
     if (!target) return;
@@ -153,6 +242,56 @@ export function useBuildMode({
     setSelected(vertexFor(r.root, r.path));
   }, [target, root, commitRoot, setSelected]);
 
+  // ── clipboard ──────────────────────────────────────────────────────────────
+  const clip = useSyncExternalStore(clipboard.subscribe, clipboard.get, () => null);
+
+  const copy = useCallback(() => {
+    if (!target) return false;
+    clipboard.set(target.node, "copy");
+    return true;
+  }, [target]);
+
+  const cut = useCallback(() => {
+    if (!target) return false;
+    clipboard.set(target.node, "cut");
+    const next = removeAt(root, target.path);
+    commitRoot(next);
+    setSelected(selectionAfterRemove(next, target.path));
+    return true;
+  }, [target, root, commitRoot, setSelected]);
+
+  /** Paste the clipboard after / before the selection, or in its place. A placeholder is always filled in place. */
+  const paste = useCallback(
+    (mode: PasteMode) => {
+      const held = clipboard.get();
+      if (!held || (mode === "replace" && !target)) return false;
+      const how: PasteMode = target && isPlaceholder(target.node) ? "replace" : mode;
+      const go = () => {
+        const r = pasteAt(root, target?.path ?? null, held.node, how);
+        commitRoot(r.root);
+        setSelected(vertexFor(r.root, r.path));
+      };
+      setMenu(null);
+      setCtx(null);
+      const size = how === "replace" && target ? subtreeSize(target.node) : 0;
+      if (size > 1)
+        setConfirm({
+          title: `paste over this ${target!.node.kind}?`,
+          body: (
+            <>
+              <span className="font-mono text-ink">{target!.node.title || target!.node.id}</span> and the {count(size - 1, "node")} under it get replaced by{" "}
+              <span className="font-mono text-ink">{clipName(held)}</span>. undo brings them back.
+            </>
+          ),
+          confirmLabel: `replace ${count(size, "node")}`,
+          onConfirm: go,
+        });
+      else go();
+      return true;
+    },
+    [target, root, commitRoot, setSelected],
+  );
+
   const confirmRemove = useCallback((what: string, child: NodeJson | undefined, go: () => void) => {
     const size = child ? subtreeSize(child) : 0;
     if (size <= 1 || (child && isPlaceholder(child))) return go();
@@ -167,15 +306,68 @@ export function useBuildMode({
     [target, root, commitRoot],
   );
 
+  // keyed like the field's other edits, so typing a new id is one undo step; each keystroke renames from where the typing began
+  const idEdit = useRef<IdEdit | null>(null);
+  const rename = useCallback(
+    (id: string) => {
+      if (!target) return;
+      idEdit.current = renameTyped(idEdit.current, root, target.path, id);
+      commitRoot(idEdit.current.last, `${target.path}:id`);
+    },
+    [target, root, commitRoot],
+  );
+
+  // ── data flow ────────────────────────────────────────────────────────────
+  const warnings = useMemo(() => flowWarnings(root), [root]);
+  const applyFix = useCallback(
+    (w: FlowWarning, fix: FlowFix) => {
+      const next = updateAt(root, fix.at ?? w.path, fix.node);
+      commitRoot(next);
+      if (fix.select) setSelected(vertexFor(next, fix.select));
+    },
+    [root, commitRoot, setSelected],
+  );
+
   const dupOk = Boolean(target && canDuplicate(root, target.path));
+  const upOk = Boolean(target && canMove(root, target.path, -1));
+  const downOk = Boolean(target && canMove(root, target.path, 1));
 
   // ── hotkeys ──────────────────────────────────────────────────────────────
   const on = { group: GROUP, enabled: active };
   useHotkey("n", () => setMenu("add"), { ...on, description: "add a node after the selection" });
+  useHotkey("shift+n", () => setMenu("before"), { ...on, description: "add a node before the selection" });
+  useHotkey(
+    "alt+up",
+    (e) => {
+      if (isTyping(e)) return;
+      e.preventDefault();
+      move(-1);
+    },
+    { ...on, preventDefault: false, description: "move the selected step earlier in its chain" },
+  );
+  useHotkey(
+    "alt+down",
+    (e) => {
+      if (isTyping(e)) return;
+      e.preventDefault();
+      move(1);
+    },
+    { ...on, preventDefault: false, description: "move the selected step later in its chain" },
+  );
   useHotkey("k", () => target && setMenu("kind"), { ...on, description: "change the selected node's kind" });
   useHotkey("d", duplicate, { ...on, description: "duplicate the selected node (chains, parallels)" });
   useHotkey("backspace", remove, { ...on, description: "delete the selected node" });
   useHotkey("delete", remove, { ...on });
+  const onClip = (run: () => boolean) => (e: KeyboardEvent) => {
+    if (nativeClipboard(e)) return;
+    if (run()) e.preventDefault();
+  };
+  const clipOn = { ...on, preventDefault: false };
+  useHotkey("mod+x", onClip(cut), { ...clipOn, description: "cut the selected node and everything under it" });
+  useHotkey("mod+c", onClip(copy), { ...clipOn, description: "copy the selected node and everything under it" });
+  useHotkey("mod+v", onClip(() => paste("after")), { ...clipOn, description: "paste after the selection (fills a placeholder)" });
+  useHotkey("shift+mod+v", onClip(() => paste("before")), { ...clipOn, description: "paste before the selection" });
+  useHotkey("alt+mod+v", onClip(() => paste("replace")), { ...clipOn, description: "paste in place of the selection" });
   useHotkey("e", () => setCodeOpen((o) => !o), { ...on, description: "show / hide the live code" });
   useHotkey(
     "mod+z",
@@ -201,6 +393,9 @@ export function useBuildMode({
   const decorations = useMemo(() => {
     const out: Record<string, VertexDecoration> = {};
     const bad = new Set(issues.map((i) => issueTarget(i)).filter(Boolean).map((t) => (t!.tier ? `${t!.path}/${t!.tier}` : t!.path)));
+    const checks = new Set(warnings.map((w) => (w.tier ? `${w.path}/${w.tier}` : w.path)));
+    const unused = new Set(warnings.filter((w) => w.rule === "unused-output").map((w) => w.path));
+    const dead = new Set(warnings.filter((w) => w.rule === "dead-read").map((w) => (w.tier ? `${w.path}/${w.tier}` : w.path)));
     for (const v of graph.vertices) {
       if (v.kind === "halt" || v.kind === "join") continue;
       const node = getAtSafe(root, v.spanPath);
@@ -214,6 +409,10 @@ export function useBuildMode({
         d.noteTone = bound ? "pass" : "warn";
       }
       if (bad.has(v.id)) d.issue = true;
+      else if (!d.note && checks.has(v.id)) {
+        d.note = dead.has(v.id) ? "empty read" : unused.has(v.id) ? "output unused" : "check input";
+        d.noteTone = "warn";
+      }
       if (Object.keys(d).length) out[v.id] = d;
     }
     // chain-level issues land on their first step
@@ -223,7 +422,7 @@ export function useBuildMode({
       if (v) out[v] = { ...out[v], issue: true };
     }
     return out;
-  }, [graph, root, handlers, issues]);
+  }, [graph, root, handlers, issues, warnings]);
 
   const graphProps: Pick<TraceGraphProps, "decorations" | "onNodeContextMenu" | "children"> = {
     decorations,
@@ -234,7 +433,9 @@ export function useBuildMode({
         menu={menu}
         setMenu={setMenu}
         addAfter={addAfter}
+        addBefore={addBefore}
         changeKind={changeKind}
+        kindHints={kindHints}
         duplicate={duplicate}
         dupOk={dupOk}
         remove={remove}
@@ -263,17 +464,29 @@ export function useBuildMode({
         ids={ids}
         handlers={handlers}
         update={update}
+        rename={rename}
         taken={() => allIds(root)}
         onSelect={selectPath}
         confirmRemove={confirmRemove}
+        flow={{ input: inputAt(root, target.path), warnings: warnings.filter((w) => w.path === target.path), onFix: applyFix }}
         actions={
           isPlaceholder(target.node) ? (
             <div className="space-y-2 pt-1">
               <p className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">what goes here?</p>
+              {clip && (
+                <ActionChip onClick={() => paste("replace")} keys="⌘v" label={`paste ${clipName(clip)} here`}>
+                  <span className="truncate">
+                    paste <KindTag kind={clip.node.kind} /> {clipName(clip)} here
+                  </span>
+                </ActionChip>
+              )}
               <KindGrid onPick={changeKind} />
             </div>
           ) : (
             <div className="flex flex-wrap gap-1 pt-0.5">
+              <ActionChip onClick={() => setMenu("before")} keys="⇧n">
+                + add before
+              </ActionChip>
               <ActionChip onClick={() => setMenu("add")} keys="n">
                 + add after
               </ActionChip>
@@ -285,9 +498,26 @@ export function useBuildMode({
                   duplicate
                 </ActionChip>
               )}
+              <ActionChip onClick={cut} keys="⌘x" label="cut this node and everything under it">
+                cut
+              </ActionChip>
+              <ActionChip onClick={copy} keys="⌘c" label="copy this node and everything under it">
+                copy
+              </ActionChip>
+              {(upOk || downOk) && (
+                <>
+                  <ActionChip onClick={() => move(-1)} keys="⌥↑" disabled={!upOk} label="move earlier in the chain">
+                    ↑ earlier
+                  </ActionChip>
+                  <ActionChip onClick={() => move(1)} keys="⌥↓" disabled={!downOk} label="move later in the chain">
+                    ↓ later
+                  </ActionChip>
+                </>
+              )}
               <ActionChip onClick={remove} keys="⌫" danger>
                 delete
               </ActionChip>
+              {clip && <ClipboardStrip clip={clip} paste={paste} />}
             </div>
           )
         }
@@ -306,6 +536,11 @@ export function useBuildMode({
       }}
       onRemoveExample={(i) => commit({ ...doc, examples: (doc.examples ?? []).filter((_, j) => j !== i) })}
     >
+      {clip && (
+        <div className="flex flex-wrap gap-1 px-4 pt-3">
+          <ClipboardStrip clip={clip} paste={paste} atEnds />
+        </div>
+      )}
       <HotkeyCheatsheet />
     </DocumentEditor>
   );
@@ -316,8 +551,16 @@ export function useBuildMode({
     if (canSaveSample) commit({ ...doc, examples: [...(doc.examples ?? []), sample as Json] });
   }, [canSaveSample, doc, commit, sample]);
 
-  const footer = <IssuesPanel issues={issues} onPick={(path, tier) => selectPath(path, tier)} />;
-  const overlay = codeOpen ? <CodeDrawer doc={doc} onClose={() => setCodeOpen(false)} /> : null;
+  const footer = <IssuesPanel issues={issues} warnings={warnings} onPick={(path, tier) => selectPath(path, tier)} onFix={applyFix} />;
+  const applyJson = useCallback(
+    (next: ChainDocument) => {
+      commit(next);
+      // keep the selection if it still points at something, else fall back to the document
+      if (selected && !editTarget(graph, next.root as unknown as NodeJson, selected)) setSelected(null);
+    },
+    [commit, selected, graph, setSelected],
+  );
+  const overlay = codeOpen ? <CodeDrawer doc={doc} onClose={() => setCodeOpen(false)} draft={jsonDraft} setDraft={setJsonDraft} onApply={applyJson} /> : null;
 
   const portals = (
     <>
@@ -332,10 +575,29 @@ export function useBuildMode({
           }
           kind={target.node.kind}
           onAdd={addAfter}
+          onAddBefore={addBefore}
           onChangeKind={changeKind}
+          kindHints={kindHints}
           onClose={() => setCtx(null)}
           actions={[
+            ...((upOk || downOk) && !isPlaceholder(target.node)
+              ? [
+                  { label: "move earlier", hint: "⌥↑", onSelect: () => move(-1), disabled: !upOk },
+                  { label: "move later", hint: "⌥↓", onSelect: () => move(1), disabled: !downOk },
+                ]
+              : []),
             { label: "duplicate", hint: "d", onSelect: duplicate, disabled: !dupOk },
+            { label: "cut", hint: "⌘x", onSelect: cut },
+            { label: "copy", hint: "⌘c", onSelect: copy },
+            ...(clip
+              ? isPlaceholder(target.node)
+                ? [{ label: `paste ${clipName(clip)} here`, hint: "⌘v", onSelect: () => paste("replace") }]
+                : [
+                    { label: "paste after", hint: "⌘v", onSelect: () => paste("after") },
+                    { label: "paste before", hint: "⇧⌘v", onSelect: () => paste("before") },
+                    { label: "paste in place", hint: "⌥⌘v", onSelect: () => paste("replace") },
+                  ]
+              : []),
             { label: "delete", hint: "⌫", onSelect: remove, danger: true },
           ]}
         />
@@ -354,13 +616,29 @@ function getAtSafe(root: NodeJson, path: string) {
   }
 }
 
-function ActionChip({ onClick, keys, danger, children }: { onClick: () => void; keys: string; danger?: boolean; children: ReactNode }) {
+function ActionChip({
+  onClick,
+  keys,
+  danger,
+  disabled,
+  label,
+  children,
+}: {
+  onClick: () => void;
+  keys: string;
+  danger?: boolean;
+  disabled?: boolean;
+  label?: string;
+  children: ReactNode;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 border-soft px-1.5 font-mono text-[10.5px] lowercase transition-colors duration-(--dur-fast)",
+        "inline-flex h-6 items-center gap-1.5 border-soft px-1.5 font-mono text-[10.5px] lowercase transition-colors duration-(--dur-fast) disabled:pointer-events-none disabled:opacity-35",
         danger ? "text-ink-2 hover:border-fail hover:bg-fail-wash hover:text-fail" : "text-ink-2 hover:border-(--line) hover:bg-surface-2 hover:text-ink",
       )}
     >
@@ -370,22 +648,53 @@ function ActionChip({ onClick, keys, danger, children }: { onClick: () => void; 
   );
 }
 
+/** What's on the clipboard, and where it can go relative to the selection (or the whole chain, when nothing is selected). */
+function ClipboardStrip({ clip, paste, atEnds }: { clip: Clip; paste: (mode: PasteMode) => boolean; atEnds?: boolean }) {
+  const size = subtreeSize(clip.node);
+  return (
+    <div className="flex w-full flex-wrap items-center gap-1 border-soft-t pt-1.5" aria-label="clipboard">
+      <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px] text-ink-3">
+        {clip.via === "cut" ? "cut" : "copied"} <KindTag kind={clip.node.kind} />
+        <span className="truncate text-ink-2">{clipName(clip)}</span>
+        {size > 1 && <span>· {count(size, "node")}</span>}
+      </span>
+      <span className="ml-auto flex flex-wrap gap-1">
+        <ActionChip onClick={() => paste("before")} keys="⇧⌘v" label={atEnds ? "paste at the start" : "paste before this node"}>
+          {atEnds ? "paste at start" : "paste before"}
+        </ActionChip>
+        <ActionChip onClick={() => paste("after")} keys="⌘v" label={atEnds ? "paste at the end" : "paste after this node"}>
+          {atEnds ? "paste at end" : "paste after"}
+        </ActionChip>
+        {!atEnds && (
+          <ActionChip onClick={() => paste("replace")} keys="⌥⌘v" label="paste in place of this node">
+            in place
+          </ActionChip>
+        )}
+      </span>
+    </div>
+  );
+}
+
 function Toolbar({
   target,
   menu,
   setMenu,
   addAfter,
+  addBefore,
   changeKind,
+  kindHints,
   duplicate,
   dupOk,
   remove,
   builder,
 }: {
   target: ReturnType<typeof editTarget>;
-  menu: "add" | "kind" | null;
-  setMenu: (m: "add" | "kind" | null) => void;
+  menu: Menu | null;
+  setMenu: (m: Menu | null) => void;
   addAfter: (k: BuilderKind) => void;
+  addBefore: (k: BuilderKind) => void;
   changeKind: (k: BuilderKind) => void;
+  kindHints?: KindHints;
   duplicate: () => void;
   dupOk: boolean;
   remove: () => void;
@@ -396,12 +705,19 @@ function Toolbar({
   return (
     <div className="flex items-stretch border-hard bg-paper shadow-[3px_3px_0_0_var(--ink)]" role="toolbar" aria-label="edit the chain">
       <div className="relative">
-        <Tooltip label={target ? "add a node after this one · n" : "add a node at the end · n"}>
-          <button type="button" className={cn(btn, "text-ink", menu === "add" && "bg-accent text-accent-ink hover:bg-accent")} onClick={() => setMenu(menu === "add" ? null : "add")} aria-haspopup="menu" aria-expanded={menu === "add"}>
+        <Tooltip label={target ? "add a node after this one · n (before · ⇧n)" : "add a node at the end · n (start · ⇧n)"}>
+          <button
+            type="button"
+            className={cn(btn, "text-ink", (menu === "add" || menu === "before") && "bg-accent text-accent-ink hover:bg-accent")}
+            onClick={() => setMenu(menu === "add" || menu === "before" ? null : "add")}
+            aria-haspopup="menu"
+            aria-expanded={menu === "add" || menu === "before"}
+          >
             <span aria-hidden className="text-[13px] leading-none">+</span> add
           </button>
         </Tooltip>
         {menu === "add" && <KindMenu title={target ? "add after this" : "add at the end"} onPick={addAfter} onClose={() => setMenu(null)} />}
+        {menu === "before" && <KindMenu title={target ? "add before this" : "add at the start"} onPick={addBefore} onClose={() => setMenu(null)} />}
       </div>
       <div className="relative border-soft-l">
         <Tooltip label="change kind · k">
@@ -409,7 +725,7 @@ function Toolbar({
             kind ▾
           </button>
         </Tooltip>
-        {menu === "kind" && target && <KindMenu title="change kind to" current={target.node.kind} onPick={changeKind} onClose={() => setMenu(null)} />}
+        {menu === "kind" && target && <KindMenu title="change kind to" current={target.node.kind} hints={kindHints} onPick={changeKind} onClose={() => setMenu(null)} />}
       </div>
       <Tooltip label="duplicate · d">
         <button type="button" disabled={!dupOk} className={cn(btn, "border-soft-l")} onClick={duplicate}>
@@ -437,9 +753,13 @@ function Toolbar({
 
 function HotkeyCheatsheet() {
   const rows: [string, string][] = [
-    ["n", "add a node after"],
+    ["n / ⇧n", "add a node after / before"],
     ["k", "change kind"],
     ["d", "duplicate"],
+    ["⌥↑ / ⌥↓", "move a step earlier / later"],
+    ["⌘x / ⌘c", "cut / copy a node and its subtree"],
+    ["⌘v", "paste after (or into a placeholder)"],
+    ["⇧⌘v / ⌥⌘v", "paste before / in place"],
     ["⌫", "delete"],
     ["⌘z / ⇧⌘z", "undo / redo"],
     ["e", "live code"],

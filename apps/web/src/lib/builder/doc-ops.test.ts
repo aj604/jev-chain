@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { graphOf, fromJSON, toJSON, route, choice, emit, chain, gate, noul } from "jevchain";
+import { convertKind } from "./convert-kind";
 import {
   allIds,
   documentIssues,
@@ -8,7 +9,6 @@ import {
   newDocument,
   parentOf,
   removeAt,
-  replaceKind,
   syncRouteBranches,
   template,
   updateAt,
@@ -92,8 +92,8 @@ describe("edits", () => {
     expect(documentIssues(withRoot(newDocument(), placeholder))).toEqual([]);
   });
 
-  it("replaces kinds and tracks refs", () => {
-    const root = replaceKind(sample(), "$/1", "step");
+  it("changes kinds and tracks refs", () => {
+    const root = convertKind(sample(), "$/1", "step").root;
     const doc = withRoot(newDocument(), root);
     expect(doc.refs).toHaveLength(1);
     expect(documentIssues(doc)).toEqual([]);
