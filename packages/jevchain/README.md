@@ -140,6 +140,8 @@ The numbers are the ones that decided it. A gate on a `min`–`max` window is me
 
 Decisions also record the rules they were checked against, whether or not those fired: a route's `lowConfidence: { below }`, a gate's `unsure: { margin?, minConfidence? }` (with `confidence`, noul gates included, when `minConfidence` is set), and a cascade's `tierBars`. The summary measures from where the road would change, not just the headline bar: a route that didn't fall back says how far its confidence cleared the low-confidence bar ("confidence 0.46, 0.06 over the 0.40 low-confidence bar"), and a gate with an unsure band measures from the band's edge ("0.89 over the 2.50 bar and clear of its 0.40 unsure margin easily (by 0.49)").
 
+Edges are decimal edges. Distances the framework works out by subtraction, a gate value's distance from its bar and a noul's confidence (its distance from 0.5), are measured as the decimals they are, not as the float noise under them (2.9 − 2.5 is 0.4, not 0.3999999999999999). So the strict `unsure` margin holds on both sides of the bar: with `pass: { min: 0.6 }` and `margin: 0.1`, 0.51–0.69 is unsure and 0.5 and 0.7 are not, and a noul of 0.16 has confidence 0.68, which meets a 0.68 `minConfidence` or cascade tier bar. A value exactly on a bar says so ("exactly on the 0.50 bar").
+
 Helpers: `explainTrace`, `diffTraces` (where did two runs diverge?), `graphOf` + `overlayTrace` (draw it).
 
 ### JSON

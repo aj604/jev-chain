@@ -147,7 +147,25 @@ export type Answers<Q extends Questions> = { readonly [K in keyof Q]: AnswerOf<Q
  * distance from a coin flip: 0.5 → 0, 0.0 or 1.0 → 1.
  */
 export function confidenceOf(answer: Answer): number {
-  return answer.type === "noul" ? Math.abs(answer.noul - 0.5) * 2 : answer.confidence;
+  return answer.type === "noul" ? distance(answer.noul, 0.5) * 2 : answer.confidence;
+}
+
+/**
+ * How far apart two numbers are, as the decimal they differ by.
+ *
+ * Subtracting doubles leaves noise: 2.9 − 2.5 is 0.3999999999999999, and
+ * 0.8 − 0.7 is 0.10000000000000009. Compared raw, a value exactly `margin`
+ * from a bar lands inside the margin on one side and outside it on the other.
+ * Rounded to 12 significant digits of the larger operand (plenty finer than
+ * any difference an answer carries, plenty coarser than the noise), a value
+ * that is exactly `margin` away measures as exactly `margin`.
+ */
+export function distance(a: number, b: number): number {
+  const d = Math.abs(a - b);
+  if (!Number.isFinite(d)) return d;
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  const places = Math.min(100, Math.max(0, 12 - Math.ceil(Math.log10(scale))));
+  return Number(d.toFixed(places));
 }
 
 /** Validate a question object at runtime (used when loading chains from JSON). */

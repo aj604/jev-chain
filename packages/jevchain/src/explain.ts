@@ -2,6 +2,7 @@
  * "Why did it go here?" Plain-language summaries, templated from the numbers.
  * No LLM involved; that would be a bit rich for a library about not using one.
  */
+import { distance } from "./questions";
 import type { Decision, Trace } from "./trace";
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -18,7 +19,7 @@ export function marginWord(margin: number): string {
 
 /** How far a value landed from a bar, in words. */
 function clearance(value: number, bar: number): string {
-  return by(Math.abs(value - bar));
+  return by(distance(value, bar));
 }
 
 /** A distance, in words: "by a hair", "by 0.06", "comfortably (by 0.20)", "easily (by 0.49)". */
@@ -93,12 +94,12 @@ function explainRoute(d: ExplainInput): string {
   const lowBar =
     below === undefined || d.confidence === undefined
       ? ""
-      : d.confidence === below
+      : distance(d.confidence, below) === 0
         ? `, exactly at the ${num(below)} low-confidence bar`
-        : `, ${num(d.confidence - below)} over the ${num(below)} low-confidence bar`;
+        : `, ${num(distance(d.confidence, below))} over the ${num(below)} low-confidence bar`;
   const conf = d.confidence !== undefined ? ` (confidence ${num(d.confidence)}${lowBar})` : "";
   if (!runnerUp) return `Went to "${d.taken}" at ${pct(winner.value!)}${conf}.`;
-  const margin = winner.value! - runnerUp.value!;
+  const margin = distance(winner.value!, runnerUp.value!);
   return `Went to "${d.taken}" with ${pct(winner.value!)}, ${marginWord(margin)} over "${runnerUp.edge}" at ${pct(runnerUp.value!)}${conf}.`;
 }
 
@@ -134,7 +135,7 @@ export function nearestEdge(value: number, t: Decision["threshold"]): { bar: num
   if (min !== undefined && max !== undefined) {
     if (value < min) return { bar: min, side: "min" };
     if (value > max) return { bar: max, side: "max" };
-    return value - min <= max - value ? { bar: min, side: "min" } : { bar: max, side: "max" };
+    return distance(value, min) <= distance(value, max) ? { bar: min, side: "min" } : { bar: max, side: "max" };
   }
   if (min !== undefined) return { bar: min, side: "min" };
   if (max !== undefined) return { bar: max, side: "max" };
@@ -150,11 +151,12 @@ function explainGate(d: ExplainInput): string {
   const passed = d.taken === "then";
   const where = passed ? (window ? "inside" : edge?.side === "max" ? "under" : "clearing") : edge?.side === "max" ? "over" : "short of";
   const margin = d.unsure?.margin;
-  // With an unsure band, the road changes at the band's edge, not the bar: measure from there.
+  const dist = edge ? distance(d.value, edge.bar) : undefined;
   let position = `${where} ${bar}${edge ? ` ${clearance(d.value, edge.bar)}` : ""}`;
-  if (edge && margin !== undefined) {
-    const dist = Math.abs(d.value - edge.bar);
-    const gap = Math.max(0, dist - margin);
+  if (edge && dist === 0) position = `exactly on ${window ? `the ${num(edge.bar)} ${edge.side === "min" ? "floor" : "ceiling"} of ${bar}` : bar}`;
+  // With an unsure band, the road changes at the band's edge, not the bar: measure from there.
+  if (edge && dist !== undefined && margin !== undefined) {
+    const gap = dist > margin ? distance(dist, margin) : 0;
     const band = gap === 0 ? `exactly on the edge of its ${num(margin)} unsure margin` : `clear of its ${num(margin)} unsure margin ${by(gap)}`;
     position = `${num(dist)} ${where === "clearing" ? "over" : where} ${bar} and ${band}`;
   }
@@ -162,7 +164,7 @@ function explainGate(d: ExplainInput): string {
   let conf = "";
   if (minConf !== undefined && d.confidence !== undefined) {
     conf =
-      d.confidence === minConf
+      distance(d.confidence, minConf) === 0
         ? `, with confidence ${num(d.confidence)} exactly at the ${num(minConf)} unsure minimum`
         : `, with confidence ${num(d.confidence)} over the ${num(minConf)} unsure minimum ${clearance(d.confidence, minConf)}`;
   }
@@ -180,7 +182,7 @@ function explainUnsure(d: ExplainInput, what: string, bar: string, edge: ReturnT
   const reasons: string[] = [];
   if (why.margin !== undefined && edge) {
     const place = window ? `the ${num(edge.bar)} ${edge.side === "min" ? "floor" : "ceiling"} of ${bar}` : bar;
-    const gap = Math.abs(d.value - edge.bar);
+    const gap = distance(d.value, edge.bar);
     const where = gap === 0 ? `exactly on ${place}` : `${num(gap)} ${d.value < edge.bar ? "under" : "over"} ${place}`;
     reasons.push(`${where}, inside the ${num(why.margin)} margin`);
   }

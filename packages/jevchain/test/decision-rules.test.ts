@@ -16,6 +16,11 @@ const readBy = (m: RegExpMatchArray, at: number) => {
   const n = m[at + 1] ?? m[at + 2] ?? m[at + 3];
   return { word: m[at] === "by a hair" ? "hair" : m[at]!.split(" ")[0]!, n: n === undefined ? undefined : Number(n) };
 };
+/**
+ * The decimal distance between two numbers, worked out here independently of
+ * the runtime: 0.5 and 0.45 are 0.05 apart, whatever 0.5 - 0.45 says in floats.
+ */
+const dec = (a: number, b: number) => Math.round(Math.abs(a - b) * 1e9) / 1e9;
 /** The word has to fit the distance, and the number (rounded to 0.01) has to be it. */
 const expectFits = (b: ReturnType<typeof readBy>, actual: number, why: string) => {
   const want = actual < 0.03 ? "hair" : actual < 0.1 ? "by" : actual < 0.25 ? "comfortably" : "easily";
@@ -98,7 +103,7 @@ describe("decisions record the rules they were checked against", () => {
       const m = d.summary.match(new RegExp(String.raw`, with confidence (\d+\.\d+) over the 0\.60 unsure minimum ${BY}\.$`));
       expect(m, d.summary).not.toBeNull();
       const b = readBy(m!, 2);
-      expectFits(b, c - 0.6, `c=${c}`);
+      expectFits(b, dec(c, 0.6), `c=${c}`);
       expect((await run(c - ((b.n ?? 0.03) + 0.006))).taken).toBe("unsure");
       if (b.n !== undefined && b.n > 0.006) expect((await run(c - (b.n - 0.006))).taken).toBe("then");
       checked++;
@@ -153,9 +158,9 @@ describe("decisions record the rules they were checked against", () => {
             const why = `${JSON.stringify(pass)} margin=${margin} otherwise=${withOtherwise} v=${v}`;
             const d = await run(v);
             // Routing, computed independently from the documented rule.
-            const near = bars.reduce((a, b) => (Math.abs(v - b) < Math.abs(v - a) ? b : a));
+            const near = bars.reduce((a, b) => (dec(v, b) < dec(v, a) ? b : a));
             const inside = (pass.min === undefined || v >= pass.min) && (pass.max === undefined || v <= pass.max);
-            const want = Math.abs(v - near) < margin ? "unsure" : inside ? "then" : withOtherwise ? "otherwise" : "halt";
+            const want = dec(v, near) < margin ? "unsure" : inside ? "then" : withOtherwise ? "otherwise" : "halt";
             expect(d.taken, why).toBe(want);
             expect(d.unsure, why).toEqual({ margin });
             if (d.taken === "unsure") continue;
@@ -163,7 +168,7 @@ describe("decisions record the rules they were checked against", () => {
               new RegExp(String.raw`, (\d+\.\d+) (over|under|short of|inside) the .*? and (?:exactly on the edge of|clear of) its (\d+\.\d+) unsure margin(?: ${BY})?`),
             );
             expect(m, `${why}: ${d.summary}`).not.toBeNull();
-            const dist = Math.abs(v - near);
+            const dist = dec(v, near);
             expect(Math.abs(Number(m![1]) - dist), why).toBeLessThanOrEqual(0.005 + 1e-9);
             const dir = m![2]!;
             if (dir === "over") expect(v, why).toBeGreaterThan(near);
@@ -171,7 +176,7 @@ describe("decisions record the rules they were checked against", () => {
             // Passing words only on a pass, blocking words only on a block.
             expect(["inside", "under"].includes(dir) || (dir === "over" && pass.max === undefined), why).toBe(inside);
             expect(Number(m![3]), why).toBe(margin);
-            const gap = dist - margin;
+            const gap = Math.round((dist - margin) * 1e9) / 1e9;
             const toward = Math.sign(near - v);
             if (m![4] === undefined) {
               expect(gap, why).toBeLessThan(1e-9); // "exactly on the edge"
@@ -206,7 +211,7 @@ describe("decisions record the rules they were checked against", () => {
       expect(m, d.summary).not.toBeNull();
       expect(Number(m![1])).toBeCloseTo(c);
       const stated = Number(m![2]);
-      expect(Math.abs(stated - (c - 0.4)), `c=${c}`).toBeLessThanOrEqual(0.005 + 1e-9);
+      expect(Math.abs(stated - dec(c, 0.4)), `c=${c}`).toBeLessThanOrEqual(0.005 + 1e-9);
       // Dropping confidence by the stated distance (and a rounding step) hands it to the fallback; by less doesn't.
       expect((await run(c - (stated + 0.006))).taken).toBe("lowConfidence");
       if (stated > 0.006) expect((await run(c - (stated - 0.006))).taken).toBe("a");
