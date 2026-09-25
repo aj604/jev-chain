@@ -76,7 +76,7 @@ chain("c", ask("first", { questions }), ask("second", { questions, state: "{{res
 // ✗ $/1 (ask "second").state: "{{results.frist.x}}" reads results of "frist", but no node has that id (did you mean "first"?)
 ```
 
-That covers unknown roots (`{{inptu}}`) and `results.<id>` of a missing id, of an ancestor or the node itself (results are set when a node finishes), of a later step, or of a `parallel` sibling (which may not have finished). A hole that comes up empty at runtime, like `{{input.mesage}}`, renders as `""` and leaves a note on its span's `logs`, so a blank state is never a mystery.
+That covers unknown roots (`{{inptu}}`) and `results.<id>` of a missing id, of an ancestor or the node itself (results are set when a node finishes), or of a later step. (A `parallel` sibling is allowed: a fast one may have finished.) A hole that comes up empty at runtime, like `{{input.mesage}}`, renders as `""` and leaves a note on its span's `logs`, so a blank state is never a mystery.
 
 ## Running
 

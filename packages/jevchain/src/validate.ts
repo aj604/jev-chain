@@ -94,14 +94,14 @@ export function chainIssues(root: AnyNode): string[] {
 type Ids = ReadonlyMap<string, string>;
 
 /**
- * What a node can see in `{{results.*}}` when it runs. Only a `chain` makes
- * results available: step N sees everything under steps 0..N-1. Ancestors are
- * still running, and `parallel` siblings race it.
+ * What a node can see in `{{results.*}}` when it runs. In a `chain`, step N
+ * sees everything under steps 0..N-1. A `parallel` branch may see its
+ * siblings (a fast one can finish first), so they count too. Ancestors are
+ * still running.
  */
 interface ResultScope {
   readonly finished: Ids;
   readonly running: Ids;
-  readonly concurrent: Ids;
 }
 
 /**
@@ -126,21 +126,17 @@ function templateIssues(root: AnyNode): string[] {
     const running = withId(scope.running, n.id, path);
     const children = childrenOf(node);
     children.forEach((c, i) => {
-      let { finished, concurrent } = scope;
-      if (n.kind === "chain") {
+      const before = n.kind === "chain" ? children.slice(0, i) : n.kind === "parallel" ? children.filter((other) => other !== c) : [];
+      let { finished } = scope;
+      if (before.length) {
         const done = new Map(finished);
-        for (const prev of children.slice(0, i)) collectIds(prev.node, childPath(path, prev.edge), done);
+        for (const prev of before) collectIds(prev.node, childPath(path, prev.edge), done);
         finished = done;
       }
-      if (n.kind === "parallel") {
-        const racing = new Map(concurrent);
-        for (const other of children) if (other !== c) collectIds(other.node, childPath(path, other.edge), racing);
-        concurrent = racing;
-      }
-      go(c.node, childPath(path, c.edge), { finished, running, concurrent });
+      go(c.node, childPath(path, c.edge), { finished, running });
     });
   };
-  go(root, ROOT_PATH, { finished: new Map(), running: new Map(), concurrent: new Map() });
+  go(root, ROOT_PATH, { finished: new Map(), running: new Map() });
   return issues;
 }
 
@@ -155,8 +151,6 @@ function holeProblem(hole: string, selfId: string, scope: ResultScope, all: Ids)
   if (id === selfId) return `${what}, this node's own output, which doesn't exist until it finishes`;
   const ancestor = scope.running.get(id);
   if (ancestor) return `${what}, which is still running at ${ancestor} (results are set when a node finishes)`;
-  const sibling = scope.concurrent.get(id);
-  if (sibling) return `${what}, which runs in parallel at ${sibling}, so it may not have finished`;
   const elsewhere = all.get(id);
   if (elsewhere) return `${what}, which is at ${elsewhere} and never finishes before this node runs`;
   return `${what}, but no node has that id${didYouMean(id, [...all.keys()])}`;

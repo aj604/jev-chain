@@ -35,7 +35,7 @@ describe("template references", () => {
     expect(chainIssues(c)).toEqual([`$/1 (emit "emit").value: "{{results.lookpu.s}}" reads results of "lookpu", but no node has that id (did you mean "lookup"?)`]);
   });
 
-  it("rejects results that can't have finished yet: ancestors, itself, later steps, parallel siblings", () => {
+  it("rejects results that can't have finished yet: ancestors, itself, later steps", () => {
     const c = chain(
       "c",
       route("triage", {
@@ -45,20 +45,13 @@ describe("template references", () => {
           other: ask("self", { questions: q, state: "{{results.self}}" }),
         },
       }),
-      parallel("fan", {
-        branches: {
-          a: ask("a", { questions: q, state: "{{results.b}}" }),
-          b: step("b", () => 1),
-        },
-      }),
       ask("early", { questions: q, state: "{{results.late}}" }),
       step("late", () => 2),
     );
     expect(chainIssues(c)).toEqual([
       `$/0/bug (gate "urgent").state: "{{results.triage.decision}}" reads results of "triage", which is still running at $/0 (results are set when a node finishes)`,
       `$/0/other (ask "self").state: "{{results.self}}" reads results of "self", this node's own output, which doesn't exist until it finishes`,
-      `$/1/a (ask "a").state: "{{results.b}}" reads results of "b", which runs in parallel at $/1/b, so it may not have finished`,
-      `$/2 (ask "early").state: "{{results.late}}" reads results of "late", which is at $/3 and never finishes before this node runs`,
+      `$/1 (ask "early").state: "{{results.late}}" reads results of "late", which is at $/2 and never finishes before this node runs`,
     ]);
   });
 
@@ -75,6 +68,19 @@ describe("template references", () => {
       cascade("cc", { tiers: [tier("t1", { ask: noul("?"), minConfidence: 0.9, state: "{{results.a.x}}" })], fallback: emit("{{results.fan.b}}") }),
     );
     expect(chainIssues(c)).toEqual([]);
+  });
+
+  it("accepts a parallel sibling's results, which a fast sibling has already set", async () => {
+    const c = parallel("fan", {
+      branches: {
+        slow: chain("slow", ask("a", { questions: q }), emit("{{results.ea}} {{results.sa}}", { id: "reader" })),
+        fastEmit: emit("EA", { id: "ea" }),
+        fastStep: step("sa", () => "SA"),
+      },
+    });
+    expect(chainIssues(c)).toEqual([]);
+    const r = await jevWith(fakeFetch()).run(c, "hi");
+    expect(r.output).toEqual({ slow: "EA SA", fastEmit: "EA", fastStep: "SA" });
   });
 
   it("checks cascade tiers and nested emit values, with a path the builder can point at", () => {
