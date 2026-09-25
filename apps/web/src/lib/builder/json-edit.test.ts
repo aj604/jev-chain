@@ -112,7 +112,7 @@ describe("readDocumentEdit", () => {
     const steps = (d: Record<string, unknown>) => (d.root as { steps: Record<string, unknown>[] }).steps;
     const cases: [string, (d: Record<string, unknown>) => void, RegExp][] = [
       ["route without branches", (d) => delete steps(d)[0]!.branches, /^\$\/0 \(route "r"\): needs "branches"/],
-      ["route without ask", (d) => delete steps(d)[0]!.ask, /^\$\/0 \(route "r"\): "ask" must be a question object/],
+      ["route without ask", (d) => delete steps(d)[0]!.ask, /^\$\/0 \(route "r"\): ask must be a question object/],
       ["gate without then", (d) => delete ((steps(d)[0]!.branches as Record<string, Record<string, unknown>>).b!.then), /^\$\/0\/b \(gate "g"\): needs "then"/],
       ["unknown kind", (d) => (steps(d)[1]!.kind = "emitt"), /^\$\/1: unknown kind "emitt"/],
       ["empty chain", (d) => (d.root = { kind: "chain", id: "c", steps: [] }), /^\$ \(chain "c"\): needs "steps"/],
@@ -125,6 +125,35 @@ describe("readDocumentEdit", () => {
       const r = edit(doc, fn);
       expect(r.ok, name).toBe(false);
       if (!r.ok) expect(r.error, name).toMatch(want);
+    }
+  });
+
+  it("refuses fields the canvas and property editor trust to have jevchain's types", () => {
+    const doc = desk();
+    type N = Record<string, unknown>;
+    const r = (d: N) => (d.root as { steps: N[] }).steps[0]!; // route "r"
+    const g = (d: N) => (r(d).branches as Record<string, N>).b!; // gate "g"
+    const tier = (d: N) => ((((r(d).branches as Record<string, N>).p!.branches as Record<string, N>).y!.tiers as N[])[0]!);
+    const cases: [string, (d: N) => void, RegExp][] = [
+      ["route criteria deleted", (d) => delete (r(d).ask as N).criteria, /\$\/0 \(route "r"\): ask\.criteria must be an object of labels/],
+      ["gate criteria null on a choice", (d) => (g(d).ask = { type: "choice", instructions: "?", criteria: null }), /ask\.criteria must be an object of labels/],
+      ["score criteria not a list", (d) => (g(d).ask = { type: "score", instructions: "?", criteria: { a: null } }), /ask\.criteria must be a list of levels/],
+      ["unknown question type", (d) => ((r(d).ask as N).type = "yesno"), /ask\.type must be "choice", "score" or "noul"/],
+      ["alsoAsk entry null", (d) => (r(d).alsoAsk = { extra: null }), /alsoAsk\.extra must be a question object/],
+      ["lowConfidence.below missing", (d) => delete (r(d).lowConfidence as N).below, /needs lowConfidence\.below, a number/],
+      ["pass.min a string", (d) => ((g(d).pass as N).min = "0.5"), /pass\.min must be a number/],
+      ["pass.max null", (d) => ((g(d).pass as N).max = null), /pass\.max must be a number/],
+      ["unsure.margin a string", (d) => ((g(d).unsure as N).margin = "x"), /unsure\.margin must be a number/],
+      ["unsure.minConfidence a list", (d) => ((g(d).unsure as N).minConfidence = []), /unsure\.minConfidence must be a number/],
+      ["tier minConfidence missing", (d) => delete tier(d).minConfidence, /needs tiers\.0\.minConfidence, a number/],
+      ["tier title an object", (d) => (tier(d).title = {}), /tiers\.0\.title must be a string/],
+      ["node title an object", (d) => (r(d).title = { a: null }), /"title" must be a string/],
+      ["step timeoutMs a string", (d) => (((r(d).branches as Record<string, N>).p!.branches as Record<string, N>).x!.timeoutMs = "1s"), /"timeoutMs" must be a number/],
+    ];
+    for (const [name, fn, want] of cases) {
+      const res = edit(doc, fn);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error, name).toMatch(want);
     }
   });
 

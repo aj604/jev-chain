@@ -7,10 +7,11 @@
  *   if (r.ok && r.changed) builder.commit(r.doc);   // one undo step
  *
  * Two levels of wrong, kept apart on purpose:
- *  - `ok: false`: not JSON, not a `jevchain/v1` document, or a shape the
- *    builder can't hold (a route without `branches`, a gate without `then`, a
- *    node without a known `kind`...). Applying it would break the canvas, so
- *    it's refused, with where the problem is.
+ *  - `ok: false`: not JSON, not a `jevchain/v1` document, or not the types
+ *    jevchain declares (a route without `branches`, a threshold that isn't a
+ *    number, a node without a known `kind`...; see `shapeIssues`). The
+ *    builder trusts those types, so applying it would break the canvas; it's
+ *    refused, with where the problem is.
  *  - `ok: true` with `issues`: a document the builder can show and fix, but
  *    that won't run yet (a branch missing for a label, a bad threshold). The
  *    same broken links the checks strip shows; applying is allowed.
@@ -47,13 +48,28 @@ export function formatDocument(doc: ChainDocument): string {
 }
 
 const KINDS = new Set<BuilderKind>(["ask", "route", "gate", "parallel", "cascade", "step", "emit", "chain"]);
+const QUESTION_TYPES = new Set(["choice", "score", "noul"]);
+
+/** Deeper than this and it's refused before anything walks it (recursion would overflow the stack). */
+export const MAX_DEPTH = 256;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** jevchain's `Entry`: text, a JSON object, a JSON array, or null. */
+const isEntry = (v: unknown) => v === null || typeof v === "string" || typeof v === "object";
+const isRef = (v: unknown) => isObject(v) && typeof v.$ref === "string";
 
 /**
- * Problems that would stop the builder from holding the tree at all (it walks
- * children and opens question editors without re-checking), each prefixed
- * with the node's path. Semantic problems are `documentIssues`' job.
+ * Where `doc` doesn't match the types jevchain declares for a chain document,
+ * each prefixed with the node's path. The canvas, the property editor and the
+ * structural edits trust those types without re-checking (they call
+ * `.toFixed` on thresholds, walk `criteria`, render titles as text), so a
+ * document that doesn't fit them can't go on the canvas.
+ *
+ * It checks types, not meaning: every field that must be there is there,
+ * and every field that is there has its declared type (a number, a string,
+ * a question, a node...). Whether a number is in range, or a branch exists
+ * for every label, is `documentIssues`' job, and the builder can hold a
+ * document that fails it.
  */
 export function shapeIssues(node: unknown, path = "$"): string[] {
   if (!isObject(node)) return [`${path}: expected a node object, got ${describe(node)}`];
@@ -61,12 +77,42 @@ export function shapeIssues(node: unknown, path = "$"): string[] {
   if (typeof node.kind !== "string" || !KINDS.has(kind)) return [`${path}: unknown kind ${JSON.stringify(node.kind)} (one of ${[...KINDS].join(", ")})`];
   const out: string[] = [];
   const at = `${path} (${kind}${typeof node.id === "string" ? ` "${node.id}"` : ""})`;
-  if (typeof node.id !== "string") out.push(`${at}: "id" must be a string`);
-  if (node.title !== undefined && typeof node.title !== "string") out.push(`${at}: "title" must be a string`);
+  const bad = (where: string, want: string) => out.push(`${at}: ${where} must be ${want}`);
+
+  // field checks on any object, by name
+  const need = (o: Record<string, unknown>, key: string, where: string, ok: (v: unknown) => boolean, want: string, optional = false) => {
+    if (o[key] === undefined) {
+      if (!optional) out.push(`${at}: needs ${where}, ${want}`);
+    } else if (!ok(o[key])) bad(where, want);
+  };
+  const str = (v: unknown) => typeof v === "string";
+  const num = (v: unknown) => typeof v === "number";
 
   const question = (q: unknown, where: string) => {
-    if (!isObject(q)) out.push(`${at}: ${where} must be a question object`);
-    else if (typeof q.type !== "string") out.push(`${at}: ${where} needs a "type"`);
+    if (!isObject(q)) return bad(where, "a question object");
+    if (typeof q.type !== "string" || !QUESTION_TYPES.has(q.type)) return bad(`${where}.type`, `"choice", "score" or "noul"`);
+    need(q, "instructions", `${where}.instructions`, isEntry, "text, an object, a list or null", true);
+    const c = q.criteria;
+    if (q.type === "choice") {
+      if (!isObject(c)) bad(`${where}.criteria`, "an object of labels");
+      else for (const [label, v] of Object.entries(c)) if (!isEntry(v)) bad(`${where}.criteria.${label}`, "text, an object, a list or null");
+    } else if (q.type === "score") {
+      if (!Array.isArray(c)) bad(`${where}.criteria`, "a list of levels");
+      else c.forEach((v: unknown, i) => isEntry(v) || bad(`${where}.criteria.${i}`, "text, an object, a list or null"));
+    } else if (c !== undefined) {
+      if (!isObject(c)) bad(`${where}.criteria`, `an object with "true" / "false"`);
+      else for (const side of ["true", "false"]) need(c, side, `${where}.criteria.${side}`, isEntry, "text, an object, a list or null", true);
+    }
+  };
+  const questions = (qs: unknown, where: string, optional: boolean) => {
+    if (qs === undefined && optional) return;
+    if (!isObject(qs)) return bad(where, "an object of questions");
+    for (const [k, q] of Object.entries(qs)) question(q, `${where}.${k}`);
+  };
+  /** JevCallConfig: `state` (a template or a handler ref) and `model`. */
+  const call = (o: Record<string, unknown>, where: string) => {
+    need(o, "state", `${where}state`, (v) => str(v) || isRef(v), `a template string or {"$ref": name}`, true);
+    need(o, "model", `${where}model`, str, "a string", true);
   };
   const child = (c: unknown, edge: string) => out.push(...(c === undefined ? [`${at}: needs "${edge}", a node`] : shapeIssues(c, `${path}/${edge}`)));
   const branches = (b: unknown) => {
@@ -76,41 +122,73 @@ export function shapeIssues(node: unknown, path = "$"): string[] {
       else child(c, key);
     }
   };
-  const wrapped = (w: unknown, field: string) => {
+  /** `lowConfidence` / `unsure`: an object with numeric settings and a `then` node. */
+  const wrapped = (w: unknown, field: string, nums: [string, boolean][]) => {
     if (w === undefined) return;
-    if (!isObject(w)) out.push(`${at}: "${field}" must be an object with "then"`);
-    else child(w.then, field);
+    if (!isObject(w)) return bad(`"${field}"`, `an object with "then"`);
+    for (const [key, optional] of nums) need(w, key, `${field}.${key}`, num, "a number", optional);
+    child(w.then, field);
   };
+
+  need(node, "id", `"id"`, str, "a string");
+  need(node, "title", `"title"`, str, "a string", true);
+  need(node, "description", `"description"`, str, "a string", true);
 
   switch (kind) {
     case "ask":
-      if (!isObject(node.questions)) out.push(`${at}: needs "questions", an object of questions`);
-      else for (const [k, q] of Object.entries(node.questions)) question(q, `questions.${k}`);
+      call(node, "");
+      questions(node.questions, "questions", false);
       break;
     case "route":
-      question(node.ask, `"ask"`);
+      call(node, "");
+      question(node.ask, "ask");
+      questions(node.alsoAsk, "alsoAsk", true);
       branches(node.branches);
-      wrapped(node.lowConfidence, "lowConfidence");
+      wrapped(node.lowConfidence, "lowConfidence", [["below", false]]);
       break;
     case "gate":
-      question(node.ask, `"ask"`);
-      if (node.pass !== undefined && !isObject(node.pass)) out.push(`${at}: "pass" must be an object`);
+      call(node, "");
+      question(node.ask, "ask");
+      questions(node.alsoAsk, "alsoAsk", true);
+      if (!isObject(node.pass)) bad(`"pass"`, `an object like {"min": 0.7}`);
+      else {
+        need(node.pass, "label", "pass.label", str, "a string", true);
+        need(node.pass, "min", "pass.min", num, "a number", true);
+        need(node.pass, "max", "pass.max", num, "a number", true);
+      }
       child(node.then, "then");
       if (node.otherwise !== undefined) child(node.otherwise, "otherwise");
-      wrapped(node.unsure, "unsure");
+      wrapped(node.unsure, "unsure", [
+        ["margin", true],
+        ["minConfidence", true],
+      ]);
       break;
     case "parallel":
       branches(node.branches);
+      need(node, "join", `"join"`, isRef, `{"$ref": name}`, true);
       break;
     case "cascade":
       if (!Array.isArray(node.tiers)) out.push(`${at}: needs "tiers", a list`);
       else
         node.tiers.forEach((t: unknown, i) => {
-          if (!isObject(t)) return void out.push(`${at}: tiers.${i} must be an object`);
-          if (typeof t.id !== "string") out.push(`${at}: tiers.${i} needs a string "id"`);
-          question(t.ask, `tiers.${i}.ask`);
+          const where = `tiers.${i}`;
+          if (!isObject(t)) return bad(where, "an object");
+          need(t, "id", `${where}.id`, str, "a string");
+          need(t, "title", `${where}.title`, str, "a string", true);
+          question(t.ask, `${where}.ask`);
+          need(t, "minConfidence", `${where}.minConfidence`, num, "a number");
+          call(t, `${where}.`);
         });
       child(node.fallback, "fallback");
+      break;
+    case "step":
+      need(node, "run", `"run"`, isRef, `{"$ref": name}`, true);
+      need(node, "ref", `"ref"`, str, "a string", true);
+      need(node, "timeoutMs", `"timeoutMs"`, num, "a number", true);
+      need(node, "retries", `"retries"`, num, "a number", true);
+      break;
+    case "emit":
+      if (!("value" in node)) out.push(`${at}: needs "value"`);
       break;
     case "chain":
       if (!Array.isArray(node.steps) || node.steps.length === 0) out.push(`${at}: needs "steps", a non-empty list`);
@@ -118,6 +196,20 @@ export function shapeIssues(node: unknown, path = "$"): string[] {
       break;
   }
   return out;
+}
+
+/** How deeply `value` nests, walked without recursion; stops counting past `limit`. */
+function depthOf(value: unknown, limit: number): number {
+  let max = 0;
+  const stack: [unknown, number][] = [[value, 1]];
+  while (stack.length) {
+    const [v, d] = stack.pop()!;
+    if (!v || typeof v !== "object") continue;
+    if (d > max) max = d;
+    if (max > limit) return max;
+    for (const x of Object.values(v)) stack.push([x, d + 1]);
+  }
+  return max;
 }
 
 /** Read the json tab's text back into a document, or say why it can't be. */
@@ -128,6 +220,7 @@ export function readDocumentEdit(text: string, current: ChainDocument): JsonEdit
   } catch (e) {
     return syntaxError(text, e);
   }
+  if (depthOf(parsed, MAX_DEPTH) > MAX_DEPTH) return { ok: false, error: `nested more than ${MAX_DEPTH} levels deep` };
   if (!isObject(parsed)) return { ok: false, error: `expected a chain document object, got ${describe(parsed)}` };
   if (parsed.format !== CHAIN_FORMAT) return { ok: false, error: `"format" must be "${CHAIN_FORMAT}"` };
   for (const field of ["name", "description"] as const)
