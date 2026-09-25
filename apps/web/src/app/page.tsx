@@ -1,5 +1,6 @@
 import { ChainDivider, ChainLinks } from "@/components/brand/chain-links";
 import { SampleTrace } from "@/components/landing/sample-trace";
+import { landingTrace, triage } from "@/components/landing/triage";
 import { ButtonLink } from "@/components/ui/button";
 import { Code, CodeBlock } from "@/components/ui/code-block";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -64,7 +65,8 @@ const FEATURES: Array<{ title: string; body: string; code: string; file?: string
   },
 ];
 
-export default function Home() {
+export default async function Home() {
+  const trace = await landingTrace();
   return (
     <>
       {/* ── hero ─────────────────────────────────────────────────────────── */}
@@ -114,7 +116,7 @@ export default function Home() {
           </div>
 
           <div className="lg:col-span-5 lg:pt-3">
-            <SampleTrace className="shadow-[6px_6px_0_0_var(--ink)]" />
+            <SampleTrace trace={trace} chain={triage} className="shadow-[6px_6px_0_0_var(--ink)]" />
           </div>
         </div>
       </section>
