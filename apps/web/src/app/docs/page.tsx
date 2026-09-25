@@ -23,7 +23,7 @@ const triage = route("triage", {
 const jev = createJev(); // reads TYPESAFE_API_KEY
 const result = await jev.run(triage, "i was charged twice, please help");
 
-if (result.status === "ok") console.log(result.output); // "→ billing"
+if (result.status === "ok") console.log(result.output); // → billing
 console.log(result.trace.spans[0]?.decision?.summary);
 // Went to "billing" with 94%, a landslide over "bug" at 5% (confidence 0.81).`;
 
@@ -114,8 +114,18 @@ export default function DocsIntroduction() {
             client at a proxy instead (see <A href="/docs/proxy">Proxy &amp; BYOK</A>).
           </P>
         </Step>
-        <Step n={3} title="write a chain, run it" last>
+        <Step n={3} title="write a chain">
           <Snippet code={FIRST_CHAIN} file="triage.ts" />
+        </Step>
+        <Step n={4} title="run it" last>
+          <Shell cmd="pnpm pkg set type=module" />
+          <Shell cmd="node triage.ts" />
+          <P className="text-[14px]">
+            The chain awaits at the top level, so it has to run as an ES module, which is what{" "}
+            <C>&quot;type&quot;: &quot;module&quot;</C> says. Node 22.18 and later run a <C>.ts</C> file as-is; on older
+            Node, <C>npx tsx triage.ts</C> does the same. Given the answer at the top of this page, it prints the two
+            lines in the comments.
+          </P>
         </Step>
       </Steps>
 
