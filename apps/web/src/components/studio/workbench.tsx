@@ -5,9 +5,9 @@
  * links: graph in the middle, inspector / story on the right, waterfall at
  * the bottom, optional rail on the left.
  */
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AnyNode, FlowGraph, Trace } from "jevchain";
-import { Inspector } from "@/components/trace/inspector";
+import { Inspector, type WhatIfControl } from "@/components/trace/inspector";
 import { RunSummary } from "@/components/trace/run-summary";
 import { Timeline } from "@/components/trace/timeline";
 import { TraceGraph, type TraceGraphProps } from "@/components/trace/trace-graph";
@@ -15,6 +15,7 @@ import { WhyPanel } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import type { ResolvedChain } from "@/lib/trace/chain-source";
 import type { RunIssue } from "@/lib/trace/run-error";
+import { forkableEdges } from "@/lib/trace/what-if";
 import { CompareSummary, diffHeadline } from "./compare-summary";
 
 export type Target = "a" | "b" | "diff";
@@ -46,6 +47,8 @@ export interface WorkbenchProps {
   graphNode?: AnyNode;
   /** Extra TraceGraph props for the builder. */
   graphProps?: Pick<TraceGraphProps, "decorations" | "onNodeContextMenu" | "children">;
+  /** Re-run with the decision at `path` forced down `edge` (offered from run a's inspector). */
+  onWhatIf?: (path: string, edge: string) => void;
 }
 
 const TIMELINE_MIN = 72;
@@ -72,6 +75,7 @@ export function Workbench({
   canvasOverlay,
   graphNode,
   graphProps,
+  onWhatIf,
 }: WorkbenchProps) {
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
@@ -83,6 +87,11 @@ export function Workbench({
   const focusIssue = showB ? compare.issue : issue;
   const focusNow = showB ? compare.now : now;
   const select = useCallback((id: string | null) => onSelect(id), [onSelect]);
+  // What-ifs fork from run a, and only once it's finished (forkableEdges checks).
+  const whatIf = useMemo<WhatIfControl | undefined>(
+    () => (onWhatIf && !showB && trace ? { edges: (path) => forkableEdges(chain.node, trace, path), run: onWhatIf } : undefined),
+    [onWhatIf, showB, trace, chain.node],
+  );
   const head = comparing && trace && compare.trace && trace.status !== "running" && compare.trace.status !== "running" ? diffHeadline(trace, compare.trace) : null;
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -238,7 +247,7 @@ export function Workbench({
         {comparing && target === "diff" && !selected ? (
           <CompareSummary a={trace} b={compare.trace} onSelect={select} />
         ) : selected ? (
-          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} />
+          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} />
         ) : (
           <WhyPanel trace={focusTrace} issue={focusIssue} onSelect={select} issueAction={showB ? issueActionB : issueAction} />
         )}

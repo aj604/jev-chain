@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 import { cn } from "@/lib/cn";
 import { fmtAgo, fmtMs, previewJson } from "@/lib/trace/format";
 import { isRehearsal } from "@/lib/trace/rehearsal";
+import { isWhatIf } from "@/lib/trace/what-if";
 import { clearRuns, deleteRun, useSavedRuns, type SavedRun } from "@/lib/trace/saved-runs";
 
 const STATUS_DOT: Record<string, string> = {
@@ -64,6 +65,7 @@ export function SavedRunsList({ activeId, onOpen }: { activeId?: string | null; 
                 <span className="block font-mono text-[10px] text-ink-3 tabular-nums">
                   {fmtMs(r.trace.durationMs)} · {r.trace.usage.requests} req
                   {isRehearsal(r.trace) && <span className="text-warn"> · rehearsal</span>}
+                  {isWhatIf(r.trace) && <span className="text-warn"> · what if</span>}
                 </span>
               </button>
               <button

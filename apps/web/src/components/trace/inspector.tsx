@@ -9,10 +9,14 @@
  *
  * `selected` is a graph vertex id (which equals the span path for real nodes)
  * or a span path with no vertex (e.g. a `chain` span from the timeline).
+ *
+ * Pass `whatIf` and every road a decision didn't take gets a "what if?"
+ * button that re-runs the chain forced down it (see `lib/trace/what-if`).
  */
 import type { ReactNode } from "react";
 import { spanAt, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "@/lib/trace/format";
 import { Distribution } from "./distribution";
@@ -21,15 +25,23 @@ import { KindTag, StateMark, type AnyState } from "./kinds";
 
 const DECISION_KEY = "decision";
 
+/** Offer "what if it went the other way?" re-runs from this trace. */
+export interface WhatIfControl {
+  /** The edges that can be forced at a decision's span path. */
+  edges: (path: string) => string[];
+  run: (path: string, edge: string) => void;
+}
+
 export interface InspectorProps {
   graph: FlowGraph;
   trace?: Trace;
   selected: string;
   onSelect?: (id: string | null) => void;
+  whatIf?: WhatIfControl;
   className?: string;
 }
 
-export function Inspector({ graph, trace, selected, onSelect, className }: InspectorProps) {
+export function Inspector({ graph, trace, selected, onSelect, whatIf, className }: InspectorProps) {
   const vertex = graph.vertices.find((v) => v.id === selected);
   const spanPath = vertex?.spanPath ?? selected;
   const span = trace ? spanAt(trace, spanPath) : undefined;
@@ -74,7 +86,7 @@ export function Inspector({ graph, trace, selected, onSelect, className }: Inspe
       </header>
 
       {!trace || !span ? (
-        <NotRun vertex={vertex} trace={trace} graph={graph} onSelect={onSelect} />
+        <NotRun vertex={vertex} trace={trace} graph={graph} onSelect={onSelect} whatIf={whatIf} />
       ) : (
         <>
           <dl className="grid grid-cols-3 border-soft-b">
@@ -92,7 +104,15 @@ export function Inspector({ graph, trace, selected, onSelect, className }: Inspe
             </Section>
           )}
 
-          {decision && <DecisionSection decision={decision} tier={vertex?.kind === "tier" ? vertex.tier : undefined} />}
+          {decision && (
+            <DecisionSection
+              decision={decision}
+              tier={vertex?.kind === "tier" ? vertex.tier : undefined}
+              title={span.title ?? span.nodeId}
+              forkable={whatIf?.edges(span.path) ?? []}
+              onWhatIf={whatIf ? (edge) => whatIf.run(span.path, edge) : undefined}
+            />
+          )}
 
           {span.error && (
             <Section title="error">
@@ -191,7 +211,19 @@ export function Section({ title, children, actions }: { title: ReactNode; childr
   );
 }
 
-function DecisionSection({ decision, tier }: { decision: Decision; tier?: string }) {
+function DecisionSection({
+  decision,
+  tier,
+  title,
+  forkable,
+  onWhatIf,
+}: {
+  decision: Decision;
+  tier?: string;
+  title: string;
+  forkable: string[];
+  onWhatIf?: (edge: string) => void;
+}) {
   const threshold = fmtThreshold(decision.threshold);
   return (
     <Section
@@ -220,6 +252,9 @@ function DecisionSection({ decision, tier }: { decision: Decision; tier?: string
               <span className="min-w-0 flex-1 truncate">{e.edge === "lowConfidence" ? "unsure (low confidence)" : e.edge}</span>
               <span className="tabular-nums">{v ?? (e.value === null ? "not tried" : "—")}</span>
               <span className="sr-only">{e.taken ? "taken" : "not taken"}</span>
+              {onWhatIf && forkable.includes(e.edge) && (
+                <WhatIfButton label={edgeName(e.edge)} title={title} onClick={() => onWhatIf(e.edge)} />
+              )}
             </li>
           );
         })}
@@ -302,10 +337,24 @@ function CallSection({ call, index, total, decision }: { call: JevCall; index: n
   );
 }
 
-function NotRun({ vertex, trace, graph, onSelect }: { vertex?: Vertex; trace?: Trace; graph: FlowGraph; onSelect?: (id: string | null) => void }) {
+function NotRun({
+  vertex,
+  trace,
+  graph,
+  onSelect,
+  whatIf,
+}: {
+  vertex?: Vertex;
+  trace?: Trace;
+  graph: FlowGraph;
+  onSelect?: (id: string | null) => void;
+  whatIf?: WhatIfControl;
+}) {
   // Which decision routed around this node?
   const incoming = vertex ? graph.edges.find((e) => e.target === vertex.id && e.decidedBy) : undefined;
   const decider = incoming?.decidedBy && trace ? spanAt(trace, incoming.decidedBy.spanPath) : undefined;
+  const road = incoming?.decidedBy;
+  const canTake = Boolean(whatIf && decider?.decision && road && whatIf.edges(road.spanPath).includes(road.key));
   return (
     <>
       <Section title={trace ? "not reached" : "not run yet"}>
@@ -318,14 +367,28 @@ function NotRun({ vertex, trace, graph, onSelect }: { vertex?: Vertex; trace?: T
                 ? `the road not taken. ${decider.title ?? decider.nodeId} went "${decider.decision.taken}" instead of "${incoming!.label}".`
                 : "this node didn't run on this trace."}
         </p>
-        {decider && onSelect && (
-          <button
-            type="button"
-            onClick={() => onSelect(decider.path)}
-            className="mt-2 font-mono text-[11px] lowercase text-accent-strong underline decoration-dotted underline-offset-4 hover:text-ink"
-          >
-            inspect {decider.nodeId} →
-          </button>
+        {(canTake || (decider && onSelect)) && (
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            {canTake && road && (
+              <Button variant="accent" size="sm" onClick={() => whatIf!.run(road.spanPath, road.key)}>
+                what if it went “{edgeName(road.key)}”?
+              </Button>
+            )}
+            {decider && onSelect && (
+              <button
+                type="button"
+                onClick={() => onSelect(decider.path)}
+                className="font-mono text-[11px] lowercase text-accent-strong underline decoration-dotted underline-offset-4 hover:text-ink"
+              >
+                inspect {decider.nodeId} →
+              </button>
+            )}
+          </div>
+        )}
+        {canTake && (
+          <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">
+            re-runs as b with {decider!.title ?? decider!.nodeId} forced this way. what jev already said is replayed; only the new road gets asked.
+          </p>
         )}
       </Section>
       {vertex?.question && <QuestionDef question={vertex.question} />}
@@ -368,5 +431,21 @@ function QuestionDef({ question }: { question: Question }) {
         )}
       </ul>
     </Section>
+  );
+}
+
+const edgeName = (edge: string) => (edge === "lowConfidence" ? "unsure" : edge);
+
+function WhatIfButton({ label, title, onClick }: { label: string; title: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`re-run as b with ${title} forced to “${label}”`}
+      aria-label={`what if ${title} went “${label}”? re-run it that way`}
+      className="-my-0.5 shrink-0 border-(length:--bw) border-dashed border-ink-3 px-1 text-[10px] leading-4 lowercase text-ink-2 transition-colors duration-(--dur-fast) hover:border-compare hover:bg-surface-2 hover:text-ink"
+    >
+      what if?
+    </button>
   );
 }

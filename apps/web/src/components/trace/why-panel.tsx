@@ -13,6 +13,7 @@ import { KbdCombo } from "@/components/ui/kbd";
 import { cn } from "@/lib/cn";
 import { answerBrief, fmtMetric, fmtMs } from "@/lib/trace/format";
 import { isRehearsal } from "@/lib/trace/rehearsal";
+import { forkOf } from "@/lib/trace/what-if";
 import type { RunIssue } from "@/lib/trace/run-error";
 import { JsonView } from "./json-view";
 import { KindTag } from "./kinds";
@@ -50,6 +51,7 @@ export function WhyPanel({ trace, issue, onSelect, issueAction, className }: Why
   const forks = decisions(trace).length;
   const running = trace.status === "running";
   const lastSpan = trace.spans.at(-1);
+  const fork = forkOf(trace);
 
   return (
     <div className={cn("px-4 py-4", className)}>
@@ -62,6 +64,14 @@ export function WhyPanel({ trace, issue, onSelect, issueAction, className }: Why
         <p className="mb-3 border-(length:--bw) border-dashed border-warn px-2.5 py-2 text-[12.5px] leading-relaxed text-ink-2">
           <span className="font-mono text-[11px] lowercase text-warn">rehearsal.</span> jev wasn&rsquo;t asked. every number below came from a hash of
           the input, so the roads are real but the judgement isn&rsquo;t. same input, same path.
+        </p>
+      )}
+
+      {fork && (
+        <p className="mb-3 border-(length:--bw) border-dashed border-compare px-2.5 py-2 text-[12.5px] leading-relaxed text-ink-2">
+          <span className="font-mono text-[11px] lowercase text-compare">what if.</span> {fork.title ?? fork.nodeId} was forced to go &ldquo;
+          {edgeName(fork.edge)}&rdquo;. every answer before it is replayed from the run it forked; the numbers at that fork were bent to go this way; everything after
+          it was asked fresh.
         </p>
       )}
 
@@ -93,6 +103,7 @@ export function WhyPanel({ trace, issue, onSelect, issueAction, className }: Why
                 <span className="flex flex-wrap items-center gap-1.5">
                   <KindTag kind={decision.kind} />
                   <span className="truncate font-mono text-xs text-ink">{span.title ?? nodeId}</span>
+                  {fork?.path === path && <Badge tone="warn">forced</Badge>}
                   <Badge tone={decision.fallback ? "warn" : "accent"} className="ml-auto">
                     → {decision.taken === "lowConfidence" ? "unsure" : decision.taken}
                     {value && decision.taken !== "fallback" ? ` · ${value}` : ""}
@@ -214,3 +225,5 @@ export function IssueBox({
     </div>
   );
 }
+
+const edgeName = (edge: string) => (edge === "lowConfidence" ? "unsure" : edge);

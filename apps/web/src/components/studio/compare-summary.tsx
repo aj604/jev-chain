@@ -3,6 +3,7 @@
 import { decisions, diffTraces, type Decision, type Trace } from "jevchain";
 import { cn } from "@/lib/cn";
 import { fmtMetric, fmtMs, fmtUsd, previewJson } from "@/lib/trace/format";
+import { forkOf } from "@/lib/trace/what-if";
 
 /** One-line verdict on two runs of the same chain. */
 export function diffHeadline(a: Trace, b: Trace): { text: string; diverged: boolean; path?: string } {
@@ -55,10 +56,17 @@ export function CompareSummary({ a, b, onSelect }: { a?: Trace; b?: Trace; onSel
   const paths = [...new Set([...da.map((d) => d.path), ...db.map((d) => d.path)])];
   const done = a.status !== "running" && b.status !== "running";
   const head = done ? diffHeadline(a, b) : null;
+  const fork = forkOf(b);
 
   return (
     <div className="px-4 py-4">
       <h2 className="mb-3 font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">a vs b</h2>
+      {fork && (
+        <p className="mb-3 text-[12.5px] leading-relaxed text-ink-2">
+          b is a what-if: same input, with <span className="font-mono text-[11px] text-ink">{fork.title ?? fork.nodeId}</span> forced to go &ldquo;
+          {fork.edge === "lowConfidence" ? "unsure" : fork.edge}&rdquo;. before it, b replays a&rsquo;s answers; after it, the new road was asked fresh.
+        </p>
+      )}
       {head && (
         <button
           type="button"
