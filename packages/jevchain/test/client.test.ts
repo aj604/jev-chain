@@ -98,6 +98,36 @@ describe("client", () => {
     expect(peak).toBe(2);
   });
 
+  it("drops a queued task whose signal aborts before it gets a slot", async () => {
+    const limit = semaphore(1);
+    const ran: string[] = [];
+    const task = (name: string) => async () => {
+      ran.push(name);
+      await new Promise((r) => setTimeout(r, 20));
+    };
+    const ac = new AbortController();
+    const first = limit(task("first"));
+    const dropped = limit(task("dropped"), ac.signal);
+    const next = limit(task("next"));
+    ac.abort();
+    await expect(dropped).rejects.toMatchObject({ code: "aborted" });
+    await Promise.all([first, next]);
+    expect(ran).toEqual(["first", "next"]);
+  });
+
+  it("never sends a call that was aborted while waiting for a concurrency slot", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 100 });
+    const jev = createJevClient({ apiKey: "k", fetch: f, maxConcurrency: 1, batch: false });
+    const ac = new AbortController();
+    const one = jev.ask("one", { q: noul("?") }, { signal: ac.signal });
+    const two = jev.ask("two", { q: noul("?") }, { signal: ac.signal });
+    setTimeout(() => ac.abort(), 10);
+    await expect(one).rejects.toMatchObject({ code: "aborted" });
+    await expect(two).rejects.toMatchObject({ code: "aborted" });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(f.calls.map((c) => c.state)).toEqual(["one"]);
+  });
+
   it("omits the auth header when apiKey is null (proxy mode)", async () => {
     let headers: Record<string, string> = {};
     const f = fakeFetch();
