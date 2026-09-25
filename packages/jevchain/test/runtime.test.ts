@@ -381,3 +381,112 @@ describe("runs", () => {
     expect(r.trace.spans[0]!.calls[0]!.attempts).toBe(3);
   });
 });
+
+describe("stopping a run", () => {
+  const q = { x: noul("?") };
+  const three = chain("three", ask("a", { questions: q, state: "a" }), ask("b", { questions: q, state: "b" }), ask("c", { questions: q, state: "c" }));
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("aborts the run when a stream's consumer breaks out early", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 20 });
+    const s = jevWith(f).stream(three, "x");
+    for await (const e of s) if (e.type === "jev:call") break;
+    // The loop only exits once the run has closed: nothing is left in flight.
+    const first = await Promise.race([s.result.then(() => "closed"), settle(0).then(() => "still running")]);
+    expect(first).toBe("closed");
+    await settle(100);
+    expect(f.calls.map((c) => c.state)).toEqual(["a"]);
+    const res = await s.result;
+    expect(res.status).toBe("aborted");
+    expect(res.error?.message).toMatch(/consumer stopped reading/);
+    expect(res.trace.error).toMatchObject({ code: "aborted", nodeId: "b", path: "$/1" });
+    expect(res.trace.spans.every((x) => x.status !== "running")).toBe(true);
+  });
+
+  it("aborts the run when a stream's consumer throws", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 20 });
+    const s = jevWith(f).stream(three, "x");
+    const consume = async () => {
+      for await (const e of s) if (e.type === "span:start" && e.span.nodeId === "a") throw new Error("render failed");
+    };
+    await expect(consume()).rejects.toThrow("render failed");
+    await settle(100);
+    expect(f.calls).toHaveLength(1);
+    expect((await s.result).status).toBe("aborted");
+  });
+
+  it("lets a stream nobody iterates run to the end, and still honours the caller's signal", async () => {
+    const f = fakeFetch();
+    expect((await jevWith(f).stream(three, "x").result).status).toBe("ok");
+    expect(f.calls).toHaveLength(3);
+
+    const ac = new AbortController();
+    const slow = fakeFetch(undefined, { latencyMs: 50 });
+    const s = jevWith(slow).stream(three, "x", { signal: ac.signal });
+    setTimeout(() => ac.abort(), 10);
+    const events: TraceEvent[] = [];
+    for await (const e of s) events.push(e);
+    expect(events.at(-1)!.type).toBe("run:end");
+    expect((await s.result).status).toBe("aborted");
+    expect(slow.calls).toHaveLength(1);
+  });
+
+  it("doesn't sleep through an abort between step retries", async () => {
+    const ac = new AbortController();
+    const flaky = step("flaky", () => { throw new Error("nope"); }, { retries: 5 }); // backoff: 100, 200, 400ms...
+    setTimeout(() => ac.abort(), 30);
+    const t0 = Date.now();
+    const r = await jevWith(fakeFetch()).run(flaky, "x", { signal: ac.signal });
+    expect(Date.now() - t0).toBeLessThan(90);
+    expect(r.status).toBe("aborted");
+    expect(r.trace.spans[0]!.retries).toHaveLength(1);
+  });
+
+  it("cancels a step's own ctx.jev calls with the step", async () => {
+    const f = fakeFetch(undefined, { latencyMs: 60 });
+    const own = new AbortController(); // a signal the step passes itself still counts, alongside the step's
+    const deaf = step(
+      "deaf",
+      async (_: unknown, ctx) => {
+        await ctx.jev.ask("first", q, { signal: own.signal }).catch(() => {});
+        await ctx.jev.ask("second", q).catch(() => {});
+        return "done";
+      },
+      { timeoutMs: 20 },
+    );
+    const r = await jevWith(f).run(deaf, "x");
+    expect(r.error?.code).toBe("timeout");
+    await settle(150);
+    expect(f.calls.map((c) => c.state)).toEqual(["first"]);
+  });
+
+  it("halts every branch a halting sibling cuts short, asks included", async () => {
+    // The gate's call answers in 5ms; everything else takes 100ms, so it's cut short.
+    const base = fakeFetch();
+    const f = (async (url: string, init?: RequestInit) => {
+      const { state } = JSON.parse(String(init?.body)) as { state: string };
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, state === "gate" ? 5 : 100);
+        init?.signal?.addEventListener("abort", () => { clearTimeout(t); reject(init.signal!.reason); });
+      });
+      return base(url, init);
+    }) as typeof fetch;
+    const p = parallel("p", {
+      branches: {
+        g: gate("g", { ask: noul("?"), pass: { min: 0.99 }, then: emit("ok"), state: "gate" }),
+        read: ask("read", { questions: q, state: "read" }),
+        later: chain("later", step("pause", () => settle(1)), ask("late", { questions: q, state: "late" })),
+      },
+    });
+    const r = await createJev({ apiKey: "test", fetch: f }).run(p, "x");
+    expect(r.status).toBe("halted");
+    expect(Object.fromEntries(r.trace.spans.map((x) => [x.path, [x.status, x.error?.code]]))).toEqual({
+      $: ["halted", undefined],
+      "$/g": ["halted", undefined],
+      "$/read": ["halted", undefined],
+      "$/later": ["halted", undefined],
+      "$/later/0": ["ok", undefined],
+      "$/later/1": ["halted", undefined],
+    });
+  });
+});

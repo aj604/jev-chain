@@ -94,6 +94,8 @@ const result = await jev.run(chain, input, { signal, timeoutMs: 5_000 });
 // result.status: "ok" | "halted" | "error" | "aborted"; run() doesn't throw for runtime failures
 ```
 
+Stopping a run (your `signal`, the deadline, or leaving a `stream` loop early) stops it right away. Nothing more goes to Jev: that covers calls still waiting for a concurrency slot, step retry backoff, and asks a step makes through `ctx.jev` (they're tied to the step's `ctx.signal`).
+
 ### Streaming
 
 ```ts
@@ -101,6 +103,8 @@ const s = jev.stream(chain, input);
 for await (const event of s) ui.apply(event); // run:start, span:start, jev:call, decision, retry, log, span:end, run:end
 const { trace } = await s.result;
 ```
+
+Leaving the loop early (`break`, `return`, a throw) aborts the run, and the loop exits only after the run has closed, so no call is still in flight. `s.result` then resolves `aborted`. A stream you never iterate just runs to the end.
 
 `reduceTrace(trace, event)` folds events into a trace. The runtime builds its own trace with this same function, so a live UI and the final trace always agree.
 
@@ -131,7 +135,8 @@ When a run fails, the trace says who broke and who was just caught up in it:
 
 - `trace.error.path` is the span where the failure started. Every errored span's `error.path` points there too, so ancestors link down to the culprit.
 - When one `parallel` branch fails, its siblings are aborted and their spans close with `code: "cancelled"` (`Cancelled because "boom" failed at $/boom`), not with a copy of the sibling's error.
-- A caller's abort or the run deadline stays `aborted` / `timeout` on the spans it interrupted; a halting branch still halts.
+- A caller's abort or the run deadline stays `aborted` / `timeout` on the spans it interrupted.
+- A halting branch halts the run, and every sibling it cuts short (ask, step or nested node) closes `halted` too, not `error`.
 
 ## License
 

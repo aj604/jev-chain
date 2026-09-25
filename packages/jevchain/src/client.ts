@@ -162,7 +162,8 @@ export function createJevClient(options: JevClientOptions = {}): JevClient {
       attempt++;
       throwIfAborted(signal);
       try {
-        const res = await limit(() => fetchWithTimeout(doFetch, endpoint, { method: "POST", headers, body }, timeoutMs, signal));
+        // Waiting for a slot is abortable too: a call cancelled in the queue never goes out.
+        const res = await limit(() => fetchWithTimeout(doFetch, endpoint, { method: "POST", headers, body }, timeoutMs, signal), signal);
         if (!res.ok) throw errorFromResponse(res.status, res.body, parseRetryAfter(res.headers));
         const wire = validateResponse(res.body, questions);
         return { wire, attempts: attempt, latencyMs: now() - started, requestId: res.headers.get("x-typesafe-request-id") ?? undefined };
@@ -322,6 +323,7 @@ async function fetchWithTimeout(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; status: number; headers: Headers; body: unknown }> {
+  throwIfAborted(signal);
   const controller = new AbortController();
   const timeoutError = new JevTimeoutError(timeoutMs);
   const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
@@ -422,13 +424,31 @@ function anySignalAll(signals: (AbortSignal | undefined)[]): AbortSignal | undef
   return controller.signal;
 }
 
-/** Limits concurrent async work to `max`. FIFO. */
+/**
+ * Limits concurrent async work to `max`. FIFO. If `signal` aborts while `fn`
+ * is still waiting for a slot, it gives up its place and rejects without
+ * running `fn`.
+ */
 export function semaphore(max: number) {
   if (!(max >= 1)) throw new RangeError("maxConcurrency must be >= 1");
   let active = 0;
   const waiting: (() => void)[] = [];
-  return async function run<T>(fn: () => Promise<T>): Promise<T> {
-    if (active >= max) await new Promise<void>((r) => waiting.push(r));
+  const acquire = (signal?: AbortSignal) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(abortError(signal));
+      const onAbort = () => {
+        waiting.splice(waiting.indexOf(grant), 1);
+        reject(abortError(signal!));
+      };
+      const grant = () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      waiting.push(grant);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  return async function run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (active >= max) await acquire(signal);
     active++;
     try {
       return await fn();
