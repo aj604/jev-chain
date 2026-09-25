@@ -67,6 +67,8 @@ route("r", {
 chain("c", step("n", () => 1), step("s", (x: string) => x)); // ✗ number isn't string
 ```
 
+Up to seven nodes, a `chain` step's parameter is inferred from the node before it. Past seven every hand-off is still checked, but annotate the parameters (`(n: number) => …`).
+
 ### Templates
 
 `state` strings and `emit` values are templates: `{{input.x}}` is the node's input, `{{run.x}}` the run's input, `{{results.<id>.x}}` the output of a node that has already finished. A hole that can never fill fails before anything runs, with a `ChainConfigError` (and in `fromJSON`):
@@ -128,6 +130,8 @@ const doc = toJSON(chain, { name: "Haunted desk" });          // functions becom
 const again = fromJSON(doc, { handlers: { lookup: myLookupFn } });
 const code = toTypeScript(doc);                                 // back to builder code
 ```
+
+The generated code type-checks, and running it gives back the same document: every node, threshold, title and description, with a `// TODO` stub where a handler's code was. (A question with no `instructions` comes back with `instructions: null`.)
 
 ## Errors
 
