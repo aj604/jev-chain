@@ -34,6 +34,7 @@ import {
   insertBeforePath,
   moveStep,
   removeAt,
+  renameNode,
   replaceKind,
   subtreeSize,
   template,
@@ -141,6 +142,7 @@ function exercise(doc: ChainDocument) {
         ids,
         handlers: {},
         update: noop,
+        rename: noop,
         taken: () => allIds(root),
         onSelect: noop,
         confirmRemove: noop,
@@ -175,6 +177,7 @@ function exercise(doc: ChainDocument) {
     if (canDuplicate(root, p)) duplicateAt(root, p);
     if (canMove(root, p, 1)) moveStep(root, p, 1);
     replaceKind(root, p, "gate");
+    renameNode(root, p, "renamed");
     pasteAt(root, p, root, "replace");
     subtreeSize(root);
   }
@@ -220,11 +223,11 @@ const kitchenSink = () =>
           x: gate("g", {
             ask: choice("?", ["ok", "no"]),
             pass: { label: "ok", min: 0.2, max: 0.9 },
-            then: parallel("p", { branches: { u: step("s", (i: unknown) => i, { timeoutMs: 100, retries: 2, ref: "sref" }), v: emit({ obj: [1, "two"] }, { id: "ev" }) }, join: (res: unknown) => res }),
-            otherwise: gate("g2", { ask: score("?", ["a", "b", "c"]), pass: { min: 1 }, then: emit("t", { id: "t2" }) }),
+            then: parallel("p", { branches: { u: step("s", (i: unknown) => i, { timeoutMs: 100, retries: 2, ref: "sref" }), v: emit({ obj: [1, "two"], was: "{{results.a.tone.choice}}" }, { id: "ev" }) }, join: (res: unknown) => res }),
+            otherwise: gate("g2", { ask: score("?", ["a", "b", "c"]), pass: { min: 1 }, then: emit("t {{results.gone}}", { id: "t2" }) }),
             unsure: { margin: 0.1, minConfidence: 0.6, then: emit("u", { id: "u" }) },
           }),
-          y: cascade("c", { tiers: [{ id: "t1", title: "first", ask: noul("?"), minConfidence: 0.8, state: "{{input}}", model: "m" }], fallback: emit(null, { id: "f" }) }),
+          y: cascade("c", { tiers: [{ id: "t1", title: "first", ask: noul("?"), minConfidence: 0.8, state: "{{input}} {{results.c}}", model: "m" }], fallback: emit(null, { id: "f" }) }),
         },
         lowConfidence: { below: 0.3, then: emit("lc", { id: "lc" }) },
       }),

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ask, cascade, chain, choice, emit, fromJSON, gate, noul, parallel, route, run, score, step, toJSON, type Entry, type JevClient, type Questions } from "jevchain";
 import { examples } from "jevchain-examples";
-import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, newDocument, template, updateAt, withRoot, type NodeJson } from "./doc-ops";
+import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, newDocument, renameNode, renameTyped, template, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
+import { keyProblem } from "./question-ops";
 import { canRead, describeShape, flowWarnings, inputAt, inputFields, missingHoles, outputOf, type FlowWarning } from "./data-flow";
+import { mapTemplates, readsIn } from "./reads";
 
 /** A Jev that answers the first label / level / yes, and remembers the state it was asked about. */
 function fakeJev() {
@@ -515,4 +517,136 @@ describe("against the real runtime", () => {
     expect(gates).toBeGreaterThan(5);
     expect(runs).toBeGreaterThan(300);
   }, 60_000);
+});
+
+/** Generated chains with `{{results.<id>}}` holes sprinkled into their templates: any id in the chain, or one that's gone. */
+function withReads(seed: number): NodeJson {
+  const r = rng(seed * 7919 + 1);
+  let root = generated(seed);
+  const ids = [...allIds(root), "gone"];
+  const hole = () => `{{results.${ids[Math.floor(r() * ids.length)]}}}`;
+  for (const p of allPaths(root)) {
+    if (r() < 0.4) continue;
+    root = updateAt(root, p, (n) => {
+      const next = mapTemplates(n, (text) => `${text} ${hole()}`);
+      return next === n && ["ask", "route", "gate"].includes(n.kind) ? { ...n, state: `{{run}} ${hole()}` } : next;
+    });
+  }
+  return root;
+}
+
+describe("typing an id, keystroke by keystroke, against a single rename", () => {
+  /** The id field: `KeyInput` commits each keystroke it accepts; build mode runs it through `renameTyped`. */
+  function typeId(root: NodeJson, path: string, final: string, step = (e: IdEdit | null, cur: NodeJson, draft: string) => renameTyped(e, cur, path, draft)) {
+    let edit: IdEdit | null = null;
+    let cur = root;
+    for (let i = 1; i <= final.length; i++) {
+      const draft = final.slice(0, i);
+      if (keyProblem(draft, [...allIds(cur)], getAt(cur, path)!.id)) continue;
+      edit = step(edit, cur, draft);
+      cur = edit.last;
+    }
+    return cur;
+  }
+
+  it("ends exactly where renameNode does, for every node and every id typed through (dead ones included)", () => {
+    let typed = 0;
+    let naiveWrong = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const root = withReads(seed);
+      const finals = [...allIds(root), "gone"].flatMap((id) => [`${id}-2`, `${id}x`]);
+      for (const path of allPaths(root)) {
+        for (const final of finals) {
+          if (keyProblem(final, [...allIds(root)], getAt(root, path)!.id)) continue;
+          typed++;
+          const single = renameNode(root, path, final);
+          expect(typeId(root, path, final), `seed ${seed}: typing “${final}” at ${path}`).toEqual(single);
+          // what the first cut did: rename from the current root at every keystroke
+          const naive = typeId(root, path, final, (_e, cur, draft) => ({ path, base: cur, last: renameNode(cur, path, draft) }));
+          if (JSON.stringify(naive) !== JSON.stringify(single)) naiveWrong++;
+        }
+      }
+    }
+    expect(typed).toBeGreaterThan(100_000);
+    // the harness can tell the difference
+    expect(naiveWrong).toBeGreaterThan(2_000);
+  }, 120_000);
+});
+
+describe("{{results.<id>}} reads, against the real runtime", () => {
+  /** A run, and for each span start, the node ids whose results were already in. */
+  async function traced(root: NodeJson, input: unknown, seed: number) {
+    const done = new Set<string>();
+    const ids = new Map<string, string>();
+    const doneAtStart = new Map<string, Set<string>[]>();
+    const r = await run(fromJSON(withRoot(newDocument(), root), { missingHandlers: "passthrough" }), input, {
+      jev: hashJev(seed),
+      onEvent: (e) => {
+        if (e.type === "span:start") {
+          ids.set(e.span.path, e.span.nodeId);
+          doneAtStart.set(e.span.path, [...(doneAtStart.get(e.span.path) ?? []), new Set(done)]);
+        }
+        if (e.type === "span:end" && e.status === "ok") done.add(ids.get(e.path)!);
+      },
+    });
+    return { r, doneAtStart };
+  }
+
+  const EMPTY = /«([^»]*)»/g;
+  const probes = (v: unknown) => [...(JSON.stringify(v) ?? "").matchAll(EMPTY)].map((m) => m[1]);
+
+  it("every read it flags renders empty in every run that reaches it; every fix reads a node that has always finished by then", async () => {
+    let flagged = 0;
+    let reached = 0;
+    let fixes = 0;
+    let fixedReached = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const root = withReads(seed);
+      for (const w of flowWarnings(root).filter((x) => x.rule === "dead-read")) {
+        flagged++;
+        const holes = new Set(w.message.match(/\{\{results\.[^}]+\}\}/g)!.map((h) => h.slice(2, -2)));
+        // the probe: each template holding a flagged hole renders just those holes, between «»
+        const probed = updateAt(root, w.path, (n) =>
+          mapTemplates(n, (text, tier) => {
+            if (tier !== w.tier) return text;
+            const mine = [...holes].filter((h) => text.includes(h));
+            return mine.length ? mine.map((h) => `«{{${h}}}»`).join("") : text;
+          }),
+        );
+        for (const input of INPUTS.slice(0, 2))
+          for (const jev of [1, 2]) {
+            const { r } = await traced(probed, input, jev);
+            for (const s of r.trace.spans.filter((x) => x.path === w.path)) {
+              const seen = s.kind === "emit" ? probes(s.output) : s.calls.filter((c) => (c.tier ?? undefined) === w.tier).flatMap((c) => probes(c.state));
+              if (!seen.length) continue;
+              reached++;
+              expect(seen, `seed ${seed}: ${w.path} ${w.message}`).toEqual(seen.map(() => ""));
+            }
+          }
+        for (const f of w.fixes) {
+          fixes++;
+          const fixed = updateAt(root, f.at ?? w.path, f.node);
+          // holes keep their order, so the rewritten ones line up with the originals
+          const was = readsIn(getAt(root, w.path)!);
+          const now = readsIn(getAt(fixed, w.path)!);
+          const read = now.find((x, i) => x.id !== was[i]!.id)!.id;
+          const gone = was.find((y, i) => y.id !== now[i]!.id)!.id;
+          const still = flowWarnings(fixed).filter((x) => x.rule === "dead-read" && x.path === w.path && x.tier === w.tier);
+          expect(still.some((x) => new RegExp(`\\{\\{results\\.${gone}[.}]`).test(x.message)), `seed ${seed}: fix "${f.label}" at ${w.path} left it dead`).toBe(false);
+          for (const input of INPUTS.slice(0, 2))
+            for (const jev of [1, 2]) {
+              const { doneAtStart } = await traced(fixed, input, jev);
+              for (const d of doneAtStart.get(w.path) ?? []) {
+                fixedReached++;
+                expect(d.has(read), `seed ${seed}: fix "${f.label}" at ${w.path}`).toBe(true);
+              }
+            }
+        }
+      }
+    }
+    expect(flagged).toBeGreaterThan(1000);
+    expect(reached).toBeGreaterThan(2500);
+    expect(fixes).toBeGreaterThan(1500);
+    expect(fixedReached).toBeGreaterThan(3500);
+  }, 120_000);
 });

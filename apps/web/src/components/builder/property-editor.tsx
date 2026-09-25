@@ -41,6 +41,8 @@ export interface PropertyEditorProps {
   ids: Map<string, number>;
   handlers: Record<string, Handler>;
   update: Update;
+  /** Give the node a new id; `{{results.<id>}}` reads elsewhere follow it (see `renameNode`). */
+  rename: (id: string) => void;
   /** Fresh-id pool for new placeholder leaves. */
   taken: () => Set<string>;
   onSelect: (path: string, tier?: string) => void;
@@ -90,7 +92,7 @@ export function PropertyEditor(props: PropertyEditorProps) {
           error={!node.id ? "every node needs an id" : null}
           warn={idCount > 1 ? `${idCount} nodes share this id; traces key on paths so it runs, but results[id] will collide` : null}
         >
-          {(id) => <TextInput id={id} value={node.id} invalid={!node.id} onChange={(v) => update((n) => ({ ...n, id: v }), k("id"))} />}
+          {(id) => <KeyInput id={id} label="id" value={node.id} keys={[...props.ids.keys()]} onCommit={props.rename} />}
         </Field>
         <Field label="title" hint="shown on the graph. defaults to the id.">
           {(id) => (

@@ -9,7 +9,7 @@
  *
  * Everything edits through `builder.commit`, so it's all undoable.
  */
-import { useCallback, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ChainDocument, FlowGraph, Json } from "jevchain";
 import { KindTag } from "@/components/trace/kinds";
 import type { VertexDecoration } from "@/components/trace/graph-node";
@@ -30,12 +30,14 @@ import {
   isPlaceholder,
   moveStep,
   removeAt,
+  renameTyped,
   replaceKind,
   subtreeSize,
   template,
   updateAt,
   withRoot,
   type BuilderKind,
+  type IdEdit,
   type NodeJson,
 } from "@/lib/builder/doc-ops";
 import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
@@ -265,6 +267,17 @@ export function useBuildMode({
     [target, root, commitRoot],
   );
 
+  // keyed like the field's other edits, so typing a new id is one undo step; each keystroke renames from where the typing began
+  const idEdit = useRef<IdEdit | null>(null);
+  const rename = useCallback(
+    (id: string) => {
+      if (!target) return;
+      idEdit.current = renameTyped(idEdit.current, root, target.path, id);
+      commitRoot(idEdit.current.last, `${target.path}:id`);
+    },
+    [target, root, commitRoot],
+  );
+
   // ── data flow ────────────────────────────────────────────────────────────
   const warnings = useMemo(() => flowWarnings(root), [root]);
   const applyFix = useCallback(
@@ -343,6 +356,7 @@ export function useBuildMode({
     const bad = new Set(issues.map((i) => issueTarget(i)).filter(Boolean).map((t) => (t!.tier ? `${t!.path}/${t!.tier}` : t!.path)));
     const checks = new Set(warnings.map((w) => (w.tier ? `${w.path}/${w.tier}` : w.path)));
     const unused = new Set(warnings.filter((w) => w.rule === "unused-output").map((w) => w.path));
+    const dead = new Set(warnings.filter((w) => w.rule === "dead-read").map((w) => (w.tier ? `${w.path}/${w.tier}` : w.path)));
     for (const v of graph.vertices) {
       if (v.kind === "halt" || v.kind === "join") continue;
       const node = getAtSafe(root, v.spanPath);
@@ -357,7 +371,7 @@ export function useBuildMode({
       }
       if (bad.has(v.id)) d.issue = true;
       else if (!d.note && checks.has(v.id)) {
-        d.note = unused.has(v.id) ? "output unused" : "check input";
+        d.note = dead.has(v.id) ? "empty read" : unused.has(v.id) ? "output unused" : "check input";
         d.noteTone = "warn";
       }
       if (Object.keys(d).length) out[v.id] = d;
@@ -410,6 +424,7 @@ export function useBuildMode({
         ids={ids}
         handlers={handlers}
         update={update}
+        rename={rename}
         taken={() => allIds(root)}
         onSelect={selectPath}
         confirmRemove={confirmRemove}

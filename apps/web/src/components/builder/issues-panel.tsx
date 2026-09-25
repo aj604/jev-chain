@@ -26,8 +26,15 @@ export function IssuesPanel({
   const ok = issues.length === 0;
   const quiet = ok && warnings.length === 0;
   const unused = warnings.filter((w) => w.rule === "unused-output").length;
-  const inputs = warnings.length - unused;
-  const checks = [inputs && `${inputs} input${inputs === 1 ? "" : "s"} to check`, unused && `${unused} output${unused === 1 ? "" : "s"} nothing reads`].filter(Boolean).join(" · ");
+  const dead = warnings.filter((w) => w.rule === "dead-read").length;
+  const inputs = warnings.length - unused - dead;
+  const checks = [
+    dead && `${dead} ${dead === 1 ? "node reads a result that's" : "nodes read results that are"} always empty`,
+    inputs && `${inputs} input${inputs === 1 ? "" : "s"} to check`,
+    unused && `${unused} output${unused === 1 ? "" : "s"} nothing reads`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div className="border-hard-t bg-paper">
       <div className="flex h-8 items-center gap-2 px-3">

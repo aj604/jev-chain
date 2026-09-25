@@ -6,6 +6,7 @@
  * stack of documents and React re-renders stay cheap.
  */
 import { CHAIN_FORMAT, ChainConfigError, fromJSON, type ChainDocument, type Json } from "jevchain";
+import { canBeRead, withReadsRenamed } from "./reads";
 
 export type NodeJson = { kind: BuilderKind; id: string; title?: string; [key: string]: unknown };
 export type BuilderKind = "ask" | "route" | "gate" | "parallel" | "cascade" | "step" | "emit" | "chain";
@@ -354,12 +355,17 @@ export function subtreeSize(node: NodeJson): number {
   return 1 + childEdges(node).reduce((n, c) => n + subtreeSize(c.node), 0);
 }
 
-/** A deep copy of `node` with fresh ids (`x` → `x-copy`, `x-copy-2`…). `$ref`s are kept, so copied steps stay bound. */
+/**
+ * A deep copy of `node` with fresh ids (`x` → `x-copy`, `x-copy-2`…). `$ref`s are kept, so copied steps stay bound.
+ * A `{{results.<id>}}` read inside the copy, of a node inside the copy, follows it to its new id.
+ */
 export function cloneWithFreshIds(node: NodeJson, taken: Set<string>): NodeJson {
+  const renames: [string, string][] = [];
   const rename = (id: string) => {
     let next = `${id}-copy`;
     for (let i = 2; taken.has(next); i++) next = `${id}-copy-${i}`;
     taken.add(next);
+    renames.push([id, next]);
     return next;
   };
   const go = (n: NodeJson): NodeJson => {
@@ -367,7 +373,70 @@ export function cloneWithFreshIds(node: NodeJson, taken: Set<string>): NodeJson 
     for (const c of childEdges(n)) out = withChild(out, c.edge, go(c.node));
     return out;
   };
-  return go(node);
+  return renameReads(go(node), followable(renames));
+}
+
+/**
+ * The renames a copy's reads can follow. An id the original subtree held
+ * more than once is ambiguous (which copy did a read mean?), so reads of it
+ * are left alone.
+ */
+export function followable(renames: [string, string][]): Map<string, string> {
+  const seen = new Map<string, number>();
+  for (const [from] of renames) seen.set(from, (seen.get(from) ?? 0) + 1);
+  return new Map(renames.filter(([from, to]) => from !== to && seen.get(from) === 1 && canBeRead(to)));
+}
+
+/** Rewrite `{{results.<id>…}}` reads everywhere under `root`, old id → new. Untouched subtrees keep their identity. */
+export function renameReads(root: NodeJson, map: ReadonlyMap<string, string>, depth = 0): NodeJson {
+  if (!map.size || depth > 300) return root;
+  let out = withReadsRenamed(root, map);
+  for (const c of childEdges(root)) {
+    const next = renameReads(c.node, map, depth + 1);
+    if (next !== c.node) out = withChild(out, c.edge, next);
+  }
+  return out;
+}
+
+/**
+ * Give the node at `path` a new id, and point every `{{results.<old>…}}` read
+ * in the chain at it. Reads only follow when they can only have meant this
+ * node (no other node had the old id), the new id is free, and a hole can
+ * name it; otherwise just the id changes, and the old reads show up as dead.
+ */
+export function renameNode(root: NodeJson, path: string, next: string): NodeJson {
+  const node = getAt(root, path);
+  if (!node || node.id === next) return root;
+  const from = node.id;
+  let owners = 0;
+  const count = (n: NodeJson) => {
+    if (n.id === from) owners++;
+    for (const c of childEdges(n)) count(c.node);
+  };
+  count(root);
+  const follow = owners === 1 && !allIds(root).has(next) && canBeRead(from) && canBeRead(next);
+  const renamed = updateAt(root, path, { ...node, id: next });
+  return follow ? renameReads(renamed, new Map([[from, next]])) : renamed;
+}
+
+/** An id being typed: the root it started from, and the root its last keystroke produced. */
+export interface IdEdit {
+  path: string;
+  base: NodeJson;
+  last: NodeJson;
+}
+
+/**
+ * One keystroke of typing an id. The id field commits every keystroke, but
+ * each is a single rename from the root as it was when the typing began, so
+ * an intermediate id never picks up reads that happen to name it (a dead
+ * `{{results.urgency}}` on the way to `urgency-check`). A new edit starts
+ * whenever the root isn't the one the last keystroke produced (another edit,
+ * an undo) or the path changed.
+ */
+export function renameTyped(edit: IdEdit | null, root: NodeJson, path: string, next: string): IdEdit {
+  const base = edit && edit.path === path && edit.last === root ? edit.base : root;
+  return { path, base, last: renameNode(base, path, next) };
 }
 
 /**
