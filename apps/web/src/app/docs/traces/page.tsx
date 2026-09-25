@@ -190,8 +190,11 @@ export default async function TracesPage() {
           { name: "edges", type: "EdgeScore[]", children: <><code>{"{ edge, value, taken }"}</code> for every candidate. Cascade tiers that never ran have <code>value: null</code>.</> },
           { name: "metric, value", type: "Metric, number", children: <>What was measured (<code>probability</code>, <code>noul</code>, <code>score</code> or <code>confidence</code>) and its value for the taken edge.</> },
           { name: "threshold", type: "{ min?, max?, label? }", children: "The bar, for gates and cascades." },
-          { name: "confidence", type: "number?", children: "Jev's confidence in the answer (absent for noul gates)." },
+          { name: "confidence", type: "number?", children: <>Jev&apos;s confidence in the answer. Noul gates only record it when their <code>unsure</code> has a <code>minConfidence</code>.</> },
           { name: "fallback", type: "boolean?", children: <>True when a route&apos;s <code>lowConfidence</code> path overrode the obvious answer.</> },
+          { name: "lowConfidence", type: "{ below }?", children: <>Routes: the <code>lowConfidence.below</code> bar, recorded whether or not it fired.</> },
+          { name: "unsure", type: "{ margin?, minConfidence? }?", children: <>Gates: the <code>unsure</code> triggers, recorded whether or not they fired. The margin is measured from the bar&apos;s nearest edge.</> },
+          { name: "tierBars", type: "Record<string, number>?", children: <>Cascades: each tier&apos;s <code>minConfidence</code>, by tier id.</> },
           { name: "summary", type: "string", children: "One plain-English sentence." },
         ]}
       />

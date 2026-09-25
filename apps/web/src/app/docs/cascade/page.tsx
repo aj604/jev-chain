@@ -1,5 +1,6 @@
 import { DocExample } from "@/components/docs/doc-example";
 import { A, ApiTable, C, Callout, DocPage, H2, Li, List, P, Snippet } from "@/components/docs/doc-ui";
+import { claims } from "@/docs/claims";
 import { docMetadata } from "@/docs/nav";
 
 export const metadata = docMetadata("cascade");
@@ -133,7 +134,11 @@ export default function CascadePage() {
           <C>taken</C> is the tier id that answered, or <C>&quot;fallback&quot;</C>.
         </Li>
         <Li>
-          <C>summary</C> spells it out, e.g. <em>Escalated past &quot;gut-check&quot; (0.41); &quot;full-context&quot; answered at 0.78 confidence (needed 0.50).</em>
+          <C>tierBars</C> records every rung&apos;s <C>minConfidence</C> by tier id, so you can see how close each one
+          came.
+        </Li>
+        <Li>
+          <C>summary</C> spells it out, e.g. <em>{claims.cascadeSummary}</em>
         </Li>
       </List>
       <Callout tone="tip" title="tuning the bars">
