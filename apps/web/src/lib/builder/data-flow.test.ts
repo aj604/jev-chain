@@ -3,6 +3,7 @@ import { ask, cascade, chain, choice, emit, fromJSON, gate, noul, parallel, rout
 import { examples } from "jevchain-examples";
 import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, newDocument, template, updateAt, withRoot, type NodeJson } from "./doc-ops";
 import { canRead, describeShape, flowWarnings, inputAt, inputFields, missingHoles, outputOf, type FlowWarning } from "./data-flow";
+import { mapTemplates, readsIn } from "./reads";
 
 /** A Jev that answers the first label / level / yes, and remembers the state it was asked about. */
 function fakeJev() {
@@ -515,4 +516,98 @@ describe("against the real runtime", () => {
     expect(gates).toBeGreaterThan(5);
     expect(runs).toBeGreaterThan(300);
   }, 60_000);
+});
+
+describe("{{results.<id>}} reads, against the real runtime", () => {
+  /** Generated chains with `{{results.<id>}}` holes sprinkled into their templates: any id in the chain, or one that's gone. */
+  function withReads(seed: number): NodeJson {
+    const r = rng(seed * 7919 + 1);
+    let root = generated(seed);
+    const ids = [...allIds(root), "gone"];
+    const hole = () => `{{results.${ids[Math.floor(r() * ids.length)]}}}`;
+    for (const p of allPaths(root)) {
+      if (r() < 0.4) continue;
+      root = updateAt(root, p, (n) => {
+        const next = mapTemplates(n, (text) => `${text} ${hole()}`);
+        return next === n && ["ask", "route", "gate"].includes(n.kind) ? { ...n, state: `{{run}} ${hole()}` } : next;
+      });
+    }
+    return root;
+  }
+
+  /** A run, and for each span start, the node ids whose results were already in. */
+  async function traced(root: NodeJson, input: unknown, seed: number) {
+    const done = new Set<string>();
+    const ids = new Map<string, string>();
+    const doneAtStart = new Map<string, Set<string>[]>();
+    const r = await run(fromJSON(withRoot(newDocument(), root), { missingHandlers: "passthrough" }), input, {
+      jev: hashJev(seed),
+      onEvent: (e) => {
+        if (e.type === "span:start") {
+          ids.set(e.span.path, e.span.nodeId);
+          doneAtStart.set(e.span.path, [...(doneAtStart.get(e.span.path) ?? []), new Set(done)]);
+        }
+        if (e.type === "span:end" && e.status === "ok") done.add(ids.get(e.path)!);
+      },
+    });
+    return { r, doneAtStart };
+  }
+
+  const EMPTY = /«([^»]*)»/g;
+  const probes = (v: unknown) => [...(JSON.stringify(v) ?? "").matchAll(EMPTY)].map((m) => m[1]);
+
+  it("every read it flags renders empty in every run that reaches it; every fix reads a node that has always finished by then", async () => {
+    let flagged = 0;
+    let reached = 0;
+    let fixes = 0;
+    let fixedReached = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const root = withReads(seed);
+      for (const w of flowWarnings(root).filter((x) => x.rule === "dead-read")) {
+        flagged++;
+        const holes = new Set(w.message.match(/\{\{results\.[^}]+\}\}/g)!.map((h) => h.slice(2, -2)));
+        // the probe: each template holding a flagged hole renders just those holes, between «»
+        const probed = updateAt(root, w.path, (n) =>
+          mapTemplates(n, (text, tier) => {
+            if (tier !== w.tier) return text;
+            const mine = [...holes].filter((h) => text.includes(h));
+            return mine.length ? mine.map((h) => `«{{${h}}}»`).join("") : text;
+          }),
+        );
+        for (const input of INPUTS.slice(0, 2))
+          for (const jev of [1, 2]) {
+            const { r } = await traced(probed, input, jev);
+            for (const s of r.trace.spans.filter((x) => x.path === w.path)) {
+              const seen = s.kind === "emit" ? probes(s.output) : s.calls.filter((c) => (c.tier ?? undefined) === w.tier).flatMap((c) => probes(c.state));
+              if (!seen.length) continue;
+              reached++;
+              expect(seen, `seed ${seed}: ${w.path} ${w.message}`).toEqual(seen.map(() => ""));
+            }
+          }
+        for (const f of w.fixes) {
+          fixes++;
+          const fixed = updateAt(root, f.at ?? w.path, f.node);
+          // holes keep their order, so the rewritten ones line up with the originals
+          const was = readsIn(getAt(root, w.path)!);
+          const now = readsIn(getAt(fixed, w.path)!);
+          const read = now.find((x, i) => x.id !== was[i]!.id)!.id;
+          const gone = was.find((y, i) => y.id !== now[i]!.id)!.id;
+          const still = flowWarnings(fixed).filter((x) => x.rule === "dead-read" && x.path === w.path && x.tier === w.tier);
+          expect(still.some((x) => new RegExp(`\\{\\{results\\.${gone}[.}]`).test(x.message)), `seed ${seed}: fix "${f.label}" at ${w.path} left it dead`).toBe(false);
+          for (const input of INPUTS.slice(0, 2))
+            for (const jev of [1, 2]) {
+              const { doneAtStart } = await traced(fixed, input, jev);
+              for (const d of doneAtStart.get(w.path) ?? []) {
+                fixedReached++;
+                expect(d.has(read), `seed ${seed}: fix "${f.label}" at ${w.path}`).toBe(true);
+              }
+            }
+        }
+      }
+    }
+    expect(flagged).toBeGreaterThan(1000);
+    expect(reached).toBeGreaterThan(2500);
+    expect(fixes).toBeGreaterThan(1500);
+    expect(fixedReached).toBeGreaterThan(3500);
+  }, 120_000);
 });

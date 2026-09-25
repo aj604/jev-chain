@@ -23,12 +23,17 @@
  *   const f = warnings[0].fixes[0];
  *   const next = updateAt(root, f.at ?? warnings[0].path, f.node);
  *
- * Only `input.*` holes are reasoned about. jevchain doesn't check `results.*`
- * holes either, so an output read that way (or by code, via `ctx.results`)
- * counts as read.
+ * A fourth: a `{{results.<id>…}}` hole that can only come up empty, because
+ * no node has that id (it was renamed or deleted) or that node can't have
+ * finished by the time this one reads it (it encloses this node, comes
+ * later, or sits on another branch of a route). jevchain doesn't check these
+ * holes, so the fix offers the nodes that are sure to have run already.
+ * Anything else (a node that may or may not have run) counts as read, and so
+ * does an output code could read through `ctx.results`.
  */
-import { allIds, childEdges, freshId, getAt, parentOf, removeAt, type BuilderKind, type NodeJson } from "./doc-ops";
+import { allIds, childEdges, freshId, getAt, parentOf, removeAt, segments, type BuilderKind, type NodeJson } from "./doc-ops";
 import { labelsOf, type QuestionJson } from "./question-ops";
+import { canBeRead, mapTemplates, readsIn, renameInTemplate, type Read } from "./reads";
 
 // ---------------------------------------------------------------------------
 // Shapes: what a node outputs, as far as the document can tell
@@ -280,7 +285,7 @@ export interface FlowWarning {
   path: string;
   /** For a cascade tier. */
   tier?: string;
-  rule: "implicit-state" | "missing-field" | "unused-output";
+  rule: "implicit-state" | "missing-field" | "unused-output" | "dead-read";
   message: string;
   fixes: FlowFix[];
 }
@@ -291,14 +296,123 @@ const JEV_KINDS = new Set(["ask", "route", "gate"]);
 export function flowWarnings(root: NodeJson): FlowWarning[] {
   const out: FlowWarning[] = [];
   const unused = new Map(unusedOutputs(root).map((w) => [w.path, w]));
+  const where = idPaths(root);
   const go = (node: NodeJson, path: string, depth: number) => {
     if (depth > 300) return;
     const u = unused.get(path);
     if (u) out.push(u);
+    out.push(...deadReads(root, node, path, where));
     out.push(...nodeWarnings(root, node, path));
     for (const c of childEdges(node)) go(c.node, `${path}/${c.edge}`, depth + 1);
   };
   go(root, "$", 0);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// {{results.<id>}} reads that can only come up empty
+// ---------------------------------------------------------------------------
+
+/** Every node's path, by id (an id can be held by more than one node). */
+export function idPaths(root: NodeJson): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const go = (n: NodeJson, path: string, depth: number) => {
+    if (depth > 300) return;
+    out.set(n.id, [...(out.get(n.id) ?? []), path]);
+    for (const c of childEdges(n)) go(c.node, `${path}/${c.edge}`, depth + 1);
+  };
+  go(root, "$", 0);
+  return out;
+}
+
+/**
+ * Whether the node at `from` has finished (so `results` holds it) by the time
+ * the node at `at` renders its templates, on the paths where `at` runs at all:
+ * "never" (with why), "yes" (an earlier step of a chain `at` is in), or
+ * "maybe" (inside an earlier step's branch, or a parallel branch racing it).
+ */
+export function finishedBefore(root: NodeJson, from: string, at: string): { when: "yes" | "maybe" } | { when: "never"; why: string } {
+  const f = segments(from);
+  const a = segments(at);
+  let k = 0;
+  while (k < f.length && k < a.length && f[k] === a[k]) k++;
+  if (k === f.length) return { when: "never", why: k === a.length ? "it's this node: its result is only there once it's done" : "it encloses this node, so it isn't done yet" };
+  if (k === a.length) return { when: "never", why: "it runs inside this node, after this is read" };
+  const lca = k ? `$/${f.slice(0, k).join("/")}` : "$";
+  const parent = getAt(root, lca);
+  if (parent?.kind === "chain") {
+    if (Number(f[k]) > Number(a[k])) return { when: "never", why: "it comes later in the chain" };
+    return { when: k + 1 === f.length ? "yes" : "maybe" };
+  }
+  if (parent?.kind === "parallel") return { when: "maybe" };
+  const name = parent ? `${parent.kind} “${parent.title || parent.id}”` : "its parent";
+  return { when: "never", why: `it's on another branch of ${name}, and only one of those runs` };
+}
+
+/**
+ * The nodes sure to have finished before `at` runs, nearest first: the
+ * earlier steps of every chain it's in. Only ids a hole can name, and that
+ * name just that one node.
+ */
+export function readableBefore(root: NodeJson, at: string, where: Map<string, string[]>): Producer[] {
+  const out: Producer[] = [];
+  let cur = at;
+  for (let p = parentOf(cur); p; p = parentOf(cur)) {
+    const parent = getAt(root, p.parent);
+    if (parent?.kind === "chain") {
+      const steps = parent.steps as NodeJson[];
+      for (let i = Number(p.edge) - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (s && canBeRead(s.id) && where.get(s.id)?.length === 1) out.push(producer(s, `${p.parent}/${i}`));
+      }
+    }
+    cur = p.parent;
+  }
+  return out;
+}
+
+/** The warnings about one node's `{{results.<id>…}}` holes: one per template owner (the node, or each cascade tier). */
+export function deadReads(root: NodeJson, node: NodeJson, path: string, where: Map<string, string[]> = idPaths(root)): FlowWarning[] {
+  const reads = readsIn(node).filter((r) => r.root === "results");
+  if (!reads.length) return [];
+  const byTier = new Map<string | undefined, { read: Read; why: string }[]>();
+  for (const read of reads) {
+    const paths = where.get(read.id);
+    let why: string | null;
+    if (!paths) why = `no node has the id “${read.id}”`;
+    else {
+      const verdicts = paths.map((p) => finishedBefore(root, p, path));
+      why = verdicts.every((v) => v.when === "never") ? `“${read.id}” can't have run yet: ${(verdicts[0] as { why: string }).why}` : null;
+    }
+    if (why === null) continue;
+    const list = byTier.get(read.tier) ?? [];
+    if (!list.some((d) => d.read.hole === read.hole)) list.push({ read, why });
+    byTier.set(read.tier, list);
+  }
+  const candidates = byTier.size ? readableBefore(root, path, where) : [];
+  const out: FlowWarning[] = [];
+  for (const [tier, dead] of byTier) {
+    const holes = dead.map((d) => `{{${d.read.hole}}}`);
+    const reasons = [...new Set(dead.map((d) => d.why))];
+    const ids = [...new Set(dead.map((d) => d.read.id))];
+    const fixes: FlowFix[] = [];
+    // one missing id: offer the nodes it could have meant; several: the nearest for each
+    for (const id of ids) {
+      const only = new Set(dead.filter((d) => d.read.id === id).map((d) => d.read.hole));
+      for (const c of candidates.filter((c) => c.id !== id).slice(0, ids.length === 1 ? 3 : 1)) {
+        const map = new Map([[id, c.id]]);
+        const fixed = mapTemplates(node, (text, t) => (t === tier ? renameInTemplate(text, map, only) : text));
+        fixes.push({ label: ids.length === 1 ? `read ${c.kind} “${producerName(c)}”` : `read “${producerName(c)}” for “${id}”`, node: fixed });
+      }
+    }
+    out.push({
+      path,
+      ...(tier !== undefined ? { tier } : {}),
+      rule: "dead-read",
+      message: `${holes.join(", ")} ${holes.length === 1 ? "is" : "are"} always empty here: ${reasons.join("; ")}`,
+      fixes: fixes.slice(0, 3),
+    });
+  }
   return out;
 }
 

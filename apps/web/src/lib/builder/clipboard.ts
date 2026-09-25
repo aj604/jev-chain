@@ -10,7 +10,7 @@
  * it outlives switching drafts or forking an example in the same tab, which is
  * the point (copy a branch out of an example, paste it into your own chain).
  */
-import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, updateAt, type NodeJson } from "./doc-ops";
+import { allIds, childEdges, followable, getAt, insertAfterPath, insertBeforePath, renameReads, updateAt, type NodeJson } from "./doc-ops";
 
 export type PasteMode = "after" | "before" | "replace";
 
@@ -24,9 +24,11 @@ export interface Clip {
  * `node` with any id that's already `taken` renamed (`x` → `x-copy`,
  * `x-copy-2`…), including ids repeated inside the node itself. Ids that are
  * free are kept, so cut → paste moves a subtree without renaming it. Adds
- * every id it hands out to `taken`.
+ * every id it hands out to `taken`. `{{results.<id>}}` reads inside the node,
+ * of a node inside it, follow that node to its new id.
  */
 export function withUniqueIds(node: NodeJson, taken: Set<string>): NodeJson {
+  const renames: [string, string][] = [];
   const go = (n: NodeJson): NodeJson => {
     let id = n.id;
     if (taken.has(id)) {
@@ -34,6 +36,7 @@ export function withUniqueIds(node: NodeJson, taken: Set<string>): NodeJson {
       for (let i = 2; taken.has(id); i++) id = `${n.id}-copy-${i}`;
     }
     taken.add(id);
+    renames.push([n.id, id]);
     let out: NodeJson = id === n.id ? n : { ...n, id };
     for (const c of childEdges(n)) {
       const next = go(c.node);
@@ -41,7 +44,7 @@ export function withUniqueIds(node: NodeJson, taken: Set<string>): NodeJson {
     }
     return out;
   };
-  return go(node);
+  return renameReads(go(node), followable(renames));
 }
 
 /**
