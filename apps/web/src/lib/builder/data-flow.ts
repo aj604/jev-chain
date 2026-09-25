@@ -1,25 +1,33 @@
 /**
  * What each node actually receives as `input`, worked out from the document
- * alone, and the two ways that quietly surprises people:
+ * alone, and the three ways that quietly surprises people:
  *
  *   - In a chain, each step's output is the next step's input. So a route
  *     added after an ask, with no `state`, asks Jev about the ask's answers
  *     object, not the message the run started with.
  *   - A template reading `{{input.message}}` after such a step comes up empty,
  *     because the answers (or the emit's text) have no `message`.
+ *   - The other way round: when the next step doesn't read its input at all
+ *     (its state is `{{run}}`, its emit has no `{{input…}}`), the step before
+ *     it is thrown away. An ask's answers go nowhere; a gate in the middle of
+ *     a chain decides nothing, because what follows runs the same either way.
  *
- * Neither is an error (the chain loads and runs), so these are warnings with
- * a fix: read the run input instead (`{{run}}`, `{{run.message}}`), or say
- * you meant the step's output (`{{input}}`).
+ * None is an error (the chain loads and runs), so these are warnings with
+ * a fix: read the run input instead (`{{run}}`, `{{run.message}}`), say
+ * you meant the step's output (`{{input}}`), or, for an output nobody reads,
+ * put what follows under the gate or drop the step (same result, one less
+ * jev call).
  *
  *   const input = inputAt(root, "$/1");   // { from: "node", node: { id: "ask-4", … }, shape: { type: "answers", … } }
  *   const warnings = flowWarnings(root);  // [{ path: "$/1", rule: "implicit-state", fixes: [...] }]
- *   const next = updateAt(root, warnings[0].path, warnings[0].fixes[0].node);
+ *   const f = warnings[0].fixes[0];
+ *   const next = updateAt(root, f.at ?? warnings[0].path, f.node);
  *
- * `results.*` holes are jevchain's business (it knows what has finished);
- * this only reasons about `input.*`, which jevchain treats as opaque data.
+ * Only `input.*` holes are reasoned about. jevchain doesn't check `results.*`
+ * holes either, so an output read that way (or by code, via `ctx.results`)
+ * counts as read.
  */
-import { childEdges, getAt, parentOf, type BuilderKind, type NodeJson } from "./doc-ops";
+import { allIds, childEdges, freshId, getAt, parentOf, removeAt, type BuilderKind, type NodeJson } from "./doc-ops";
 import { labelsOf, type QuestionJson } from "./question-ops";
 
 // ---------------------------------------------------------------------------
@@ -260,15 +268,19 @@ export function inputFields(shape: Shape, limit = 6): string[] {
 
 export interface FlowFix {
   label: string;
-  /** The node at the warning's `path` with the fix applied. */
+  /** The node at `at` (default: the warning's `path`) with the fix applied. */
   node: NodeJson;
+  /** Where `node` goes when the fix reshapes more than the flagged node: the chain around it. */
+  at?: string;
+  /** What to select afterwards, when that isn't the warning's `path`. */
+  select?: string;
 }
 
 export interface FlowWarning {
   path: string;
   /** For a cascade tier. */
   tier?: string;
-  rule: "implicit-state" | "missing-field";
+  rule: "implicit-state" | "missing-field" | "unused-output";
   message: string;
   fixes: FlowFix[];
 }
@@ -278,8 +290,11 @@ const JEV_KINDS = new Set(["ask", "route", "gate"]);
 /** Every data-flow surprise in the document, in tree order. */
 export function flowWarnings(root: NodeJson): FlowWarning[] {
   const out: FlowWarning[] = [];
+  const unused = new Map(unusedOutputs(root).map((w) => [w.path, w]));
   const go = (node: NodeJson, path: string, depth: number) => {
     if (depth > 300) return;
+    const u = unused.get(path);
+    if (u) out.push(u);
     out.push(...nodeWarnings(root, node, path));
     for (const c of childEdges(node)) go(c.node, `${path}/${c.edge}`, depth + 1);
   };
@@ -369,6 +384,189 @@ function toRun(template: string, holes: Set<string>): string {
 
 function withState(node: NodeJson, state: string): NodeJson {
   return { ...node, state };
+}
+
+// ---------------------------------------------------------------------------
+// Outputs nothing reads
+// ---------------------------------------------------------------------------
+
+/** Kinds whose whole point is their output: a jev call's answers, a decision's branch, a parallel's collection. */
+const PRODUCERS = new Set(["ask", "route", "gate", "cascade", "parallel"]);
+const ASKS_JEV = new Set(["ask", "route", "gate", "cascade"]);
+
+/**
+ * Chain steps whose output the next step throws away, because it never reads
+ * its input. Only flagged when removing the step would leave every run ending
+ * exactly as it does now: everything in it is jev calls and emits (no code,
+ * no gate that can halt), and nothing reads its result another way (a
+ * `{{results.<id>}}` hole anywhere, or code that runs after it and might read
+ * `ctx.results`). A step already inside a flagged one isn't flagged again.
+ */
+export function unusedOutputs(root: NodeJson): FlowWarning[] {
+  const out: FlowWarning[] = [];
+  const results = resultsReads(root);
+  const go = (node: NodeJson, path: string, depth: number) => {
+    if (depth > 300) return;
+    const flagged = new Set<string>();
+    if (node.kind === "chain" && Array.isArray(node.steps)) {
+      const steps = node.steps as NodeJson[];
+      steps.forEach((step, i) => {
+        const next = steps[i + 1];
+        const at = `${path}/${i}`;
+        if (!next || !isRecord(step) || !PRODUCERS.has(step.kind) || readsInput(next)) return;
+        if (!settles(step) || !someNode(step, (n) => ASKS_JEV.has(n.kind))) return;
+        if (results === "all" || [...allIds(step)].some((id) => results.has(id))) return;
+        if (codeAfter(root, at)) return;
+        flagged.add(at);
+        out.push(unusedWarning(root, path, node, i));
+      });
+    }
+    for (const c of childEdges(node)) {
+      const at = `${path}/${c.edge}`;
+      if (!flagged.has(at)) go(c.node, at, depth + 1);
+    }
+  };
+  go(root, "$", 0);
+  return out;
+}
+
+/** Whether `node` looks at the input it's handed: a `{{input…}}` hole, a jev call with no state, or code. */
+export function readsInput(node: NodeJson, depth = 0): boolean {
+  if (depth > 300 || !isRecord(node)) return true;
+  const children = () => childEdges(node).some((c) => readsInput(c.node, depth + 1));
+  switch (node.kind) {
+    case "emit": {
+      let hit = false;
+      stringsIn(node.value, (s) => {
+        if (readsInputHole(s)) hit = true;
+      });
+      return hit;
+    }
+    case "ask":
+      return stateReads(node.state);
+    // a route's or gate's branches get the same input it did
+    case "route":
+    case "gate":
+      return stateReads(node.state) || children();
+    case "cascade":
+      return !Array.isArray(node.tiers) || (node.tiers as unknown[]).some((t) => !isRecord(t) || stateReads(t.state)) || children();
+    case "parallel":
+      return node.join !== undefined || children();
+    case "chain": {
+      const first = childEdges(node)[0];
+      return first ? readsInput(first.node, depth + 1) : true;
+    }
+    default:
+      return true; // a step is code
+  }
+}
+
+function stateReads(state: unknown): boolean {
+  return typeof state !== "string" || readsInputHole(state);
+}
+
+function readsInputHole(template: string): boolean {
+  return [...template.matchAll(HOLE)].some((m) => m[1]!.split(".")[0] === "input");
+}
+
+function someNode(node: NodeJson, test: (n: NodeJson) => boolean, depth = 0): boolean {
+  if (depth > 300) return true;
+  return test(node) || childEdges(node).some((c) => someNode(c.node, test, depth + 1));
+}
+
+/** Runs to a value and nothing else: no code to have side effects, no gate that could halt the run. */
+function settles(node: NodeJson): boolean {
+  if (hasRef(node)) return false;
+  return !someNode(node, (n) => !KNOWN.has(n.kind) || n.kind === "step" || (n.kind === "gate" && n.otherwise === undefined));
+}
+
+const KNOWN = new Set(["ask", "route", "gate", "parallel", "cascade", "step", "emit", "chain"]);
+
+function hasCode(node: NodeJson): boolean {
+  return hasRef(node) || someNode(node, (n) => n.kind === "step" || !KNOWN.has(n.kind));
+}
+
+function hasRef(v: unknown, depth = 0): boolean {
+  if (depth > 300) return true;
+  if (Array.isArray(v)) return v.some((x) => hasRef(x, depth + 1));
+  if (!isRecord(v)) return false;
+  if (typeof v.$ref === "string") return true;
+  return Object.values(v).some((x) => hasRef(x, depth + 1));
+}
+
+/** Ids some template reads through `{{results.<id>…}}`, or "all" for a bare `{{results}}`. */
+function resultsReads(root: NodeJson): Set<string> | "all" {
+  const ids = new Set<string>();
+  let all = false;
+  stringsIn(root, (s) => {
+    for (const m of s.matchAll(HOLE)) {
+      const [head, id] = m[1]!.split(".");
+      if (head !== "results") continue;
+      if (id === undefined) all = true;
+      else ids.add(id);
+    }
+  });
+  return all ? "all" : ids;
+}
+
+/** Whether code could run after the node at `path` (and so read its result off `ctx.results`). */
+function codeAfter(root: NodeJson, path: string): boolean {
+  let at = path;
+  for (let p = parentOf(at); p; p = parentOf(at)) {
+    const parent = getAt(root, p.parent);
+    if (!parent) return true;
+    if (parent.kind === "chain" && (parent.steps as NodeJson[]).slice(Number(p.edge) + 1).some(hasCode)) return true;
+    if (parent.kind === "parallel" && (parent.join !== undefined || childEdges(parent).some((c) => c.edge !== p.edge && hasCode(c.node)))) return true;
+    at = p.parent;
+  }
+  return false;
+}
+
+function unusedWarning(root: NodeJson, chainPath: string, chain: NodeJson, i: number): FlowWarning {
+  const steps = chain.steps as NodeJson[];
+  const step = steps[i]!;
+  const next = steps[i + 1]!;
+  const path = `${chainPath}/${i}`;
+  const nextName = `${next.kind} “${producerName(producer(next, ""))}”`;
+  const how = typeof next.state === "string" && JEV_KINDS.has(next.kind) ? ` (its state is “${clip(next.state, 32)}”)` : "";
+  const because = `the next step, ${nextName}, never reads its input${how}`;
+  const message =
+    step.kind === "ask"
+      ? `nothing reads these answers: ${because}. every run ends the same without this ask`
+      : step.kind === "parallel"
+        ? `nothing reads what this parallel collects: ${because}. every run ends the same without it`
+        : `this ${step.kind} decides nothing: ${because}, so the rest of the chain runs the same whichever way it goes`;
+
+  // selecting afterwards: a two-step chain collapses into its remaining step
+  const collapses = steps.length === 2;
+  const removed = getAt(removeAt(root, path), chainPath)!;
+  const fixes: FlowFix[] = [];
+  if (step.kind === "gate") fixes.push(guardRest(root, chainPath, chain, i));
+  fixes.push({ label: `remove this ${step.kind}`, node: removed, at: chainPath, select: collapses ? chainPath : path });
+  return { path, rule: "unused-output", message, fixes };
+}
+
+/**
+ * A gate in the middle of a chain, reshaped to gate what follows it: the
+ * rest of the chain becomes its `then`, so it only runs when the gate
+ * passes. The old `then` stays in front unless it's an emit (whose value
+ * the rest never read anyway).
+ */
+function guardRest(root: NodeJson, chainPath: string, chain: NodeJson, i: number): FlowFix {
+  const steps = chain.steps as NodeJson[];
+  const gate = steps[i]!;
+  const then = gate.then as NodeJson | undefined;
+  const keep = !then || then.kind === "emit" ? [] : then.kind === "chain" ? (then.steps as NodeJson[]) : [then];
+  const body = [...keep, ...steps.slice(i + 1)];
+  const nextThen: NodeJson = body.length === 1 ? body[0]! : { kind: "chain", id: freshId("chain", allIds(root)), steps: body };
+  const guarded = { ...gate, then: nextThen };
+  const before = steps.slice(0, i);
+  return {
+    label: "run the rest only if it passes",
+    node: before.length ? { ...chain, steps: [...before, guarded] } : guarded,
+    at: chainPath,
+    select: before.length ? `${chainPath}/${i}` : chainPath,
+  };
 }
 
 function stringsIn(value: unknown, visit: (s: string) => void, depth = 0) {

@@ -3,7 +3,7 @@
 /**
  * Live validation under the canvas: what `documentIssues` says (broken links,
  * which block running), then what `flowWarnings` says (inputs that will
- * surprise you, which don't). Each row selects the node it's about; a
+ * surprise you and outputs nothing reads, which don't). Each row selects the node it's about; a
  * warning also carries its one-click fixes.
  */
 import { useState } from "react";
@@ -25,7 +25,9 @@ export function IssuesPanel({
   const [open, setOpen] = useState(true);
   const ok = issues.length === 0;
   const quiet = ok && warnings.length === 0;
-  const checks = `${warnings.length} input${warnings.length === 1 ? "" : "s"} to check`;
+  const unused = warnings.filter((w) => w.rule === "unused-output").length;
+  const inputs = warnings.length - unused;
+  const checks = [inputs && `${inputs} input${inputs === 1 ? "" : "s"} to check`, unused && `${unused} output${unused === 1 ? "" : "s"} nothing reads`].filter(Boolean).join(" · ");
   return (
     <div className="border-hard-t bg-paper">
       <div className="flex h-8 items-center gap-2 px-3">

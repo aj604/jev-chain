@@ -61,6 +61,9 @@ export function PropertyEditor(props: PropertyEditorProps) {
   const { node, path, update, actions } = props;
   const k = (field: string) => `${path}:${field}`;
   const idCount = props.ids.get(node.id) ?? 0;
+  // what the node receives is shown with its inputs; an output nothing reads goes up top
+  const unused = props.flow?.warnings.filter((w) => w.rule === "unused-output") ?? [];
+  const kindProps = props.flow && unused.length ? { ...props, flow: { ...props.flow, warnings: props.flow.warnings.filter((w) => w.rule !== "unused-output") } } : props;
 
   return (
     <div className="fade-up min-w-0" key={path}>
@@ -74,6 +77,12 @@ export function PropertyEditor(props: PropertyEditorProps) {
         <h2 className="truncate text-base leading-snug font-medium text-ink">{node.title || node.id || "unnamed"}</h2>
         {actions}
       </header>
+
+      {props.flow && unused.length > 0 && (
+        <Section title="output">
+          <FlowWarnings warnings={unused} onFix={props.flow.onFix} />
+        </Section>
+      )}
 
       <Section title="node">
         <Field
@@ -105,7 +114,7 @@ export function PropertyEditor(props: PropertyEditorProps) {
         </Field>
       </Section>
 
-      <KindEditor {...props} />
+      <KindEditor {...kindProps} />
     </div>
   );
 }

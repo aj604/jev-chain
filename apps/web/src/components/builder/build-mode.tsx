@@ -267,7 +267,14 @@ export function useBuildMode({
 
   // ── data flow ────────────────────────────────────────────────────────────
   const warnings = useMemo(() => flowWarnings(root), [root]);
-  const applyFix = useCallback((w: FlowWarning, fix: FlowFix) => commitRoot(updateAt(root, w.path, fix.node)), [root, commitRoot]);
+  const applyFix = useCallback(
+    (w: FlowWarning, fix: FlowFix) => {
+      const next = updateAt(root, fix.at ?? w.path, fix.node);
+      commitRoot(next);
+      if (fix.select) setSelected(vertexFor(next, fix.select));
+    },
+    [root, commitRoot, setSelected],
+  );
 
   const dupOk = Boolean(target && canDuplicate(root, target.path));
   const upOk = Boolean(target && canMove(root, target.path, -1));
@@ -335,6 +342,7 @@ export function useBuildMode({
     const out: Record<string, VertexDecoration> = {};
     const bad = new Set(issues.map((i) => issueTarget(i)).filter(Boolean).map((t) => (t!.tier ? `${t!.path}/${t!.tier}` : t!.path)));
     const checks = new Set(warnings.map((w) => (w.tier ? `${w.path}/${w.tier}` : w.path)));
+    const unused = new Set(warnings.filter((w) => w.rule === "unused-output").map((w) => w.path));
     for (const v of graph.vertices) {
       if (v.kind === "halt" || v.kind === "join") continue;
       const node = getAtSafe(root, v.spanPath);
@@ -349,7 +357,7 @@ export function useBuildMode({
       }
       if (bad.has(v.id)) d.issue = true;
       else if (!d.note && checks.has(v.id)) {
-        d.note = "check input";
+        d.note = unused.has(v.id) ? "output unused" : "check input";
         d.noteTone = "warn";
       }
       if (Object.keys(d).length) out[v.id] = d;
