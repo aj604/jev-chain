@@ -89,13 +89,24 @@ export interface TraceStream<O> extends AsyncIterable<TraceEvent> {
  * for await (const e of s) render(e);
  * const { output } = await s.result;
  * ```
+ *
+ * Leaving the loop early (`break`, `return`, a throw) aborts the run: nothing
+ * new is sent to Jev, and the loop exits once the run has closed, so no call
+ * is still in flight. `result` then resolves with `status: "aborted"`. Only
+ * iterating counts: a stream nobody iterates just runs to the end.
  */
 export function stream<I, O>(node: JevNode<I, O>, input: I, options: RunOptions): TraceStream<O> {
   const buffer: TraceEvent[] = [];
   let wake: (() => void) | undefined;
   let done = false;
+  const stop = new AbortController();
+  const outer = options.signal;
+  const onOuterAbort = () => stop.abort(outer!.reason);
+  if (outer?.aborted) onOuterAbort();
+  else outer?.addEventListener("abort", onOuterAbort, { once: true });
   const result = run(node, input, {
     ...options,
+    signal: stop.signal,
     onEvent: (e) => {
       options.onEvent?.(e);
       buffer.push(e);
@@ -103,22 +114,30 @@ export function stream<I, O>(node: JevNode<I, O>, input: I, options: RunOptions)
     },
   }).finally(() => {
     done = true;
+    outer?.removeEventListener("abort", onOuterAbort);
     wake?.();
   });
   return {
     result,
     async *[Symbol.asyncIterator]() {
-      for (;;) {
-        if (buffer.length) {
-          yield buffer.shift()!;
-          continue;
+      try {
+        for (;;) {
+          if (buffer.length) {
+            yield buffer.shift()!;
+            continue;
+          }
+          if (done) {
+            await result; // surface config errors to the iterating caller
+            return;
+          }
+          await new Promise<void>((r) => (wake = r));
+          wake = undefined;
         }
-        if (done) {
-          await result; // surface config errors to the iterating caller
-          return;
+      } finally {
+        if (!done) {
+          stop.abort(new Error("the stream's consumer stopped reading"));
+          await result.catch(() => {});
         }
-        await new Promise<void>((r) => (wake = r));
-        wake = undefined;
       }
     },
   };
@@ -208,7 +227,7 @@ class Runner {
   }
 
   private async exec(node: AnyJevNode, input: unknown, path: string, parentPath: string | null, edge: string | null, signal: AbortSignal): Promise<unknown> {
-    if (signal.aborted) throw signal.reason instanceof JevChainError ? signal.reason : new JevAbortError(signal.reason);
+    if (signal.aborted) throw signal.reason instanceof JevChainError || signal.reason instanceof Halt ? signal.reason : new JevAbortError(signal.reason);
     this.emit({
       type: "span:start",
       at: this.now(),
@@ -228,9 +247,12 @@ class Runner {
       this.emit({ type: "span:end", at: this.now(), path, status: "ok", output: this.safe(output) });
       return output;
     } catch (e) {
-      if (e instanceof Halt) {
+      // A branch cut short by a halting sibling halts too, whatever it was
+      // doing (a step sees the Halt itself; an ask sees an abort wrapping it).
+      const halt = e instanceof Halt ? e : signal.aborted && signal.reason instanceof Halt ? signal.reason : undefined;
+      if (halt) {
         this.emit({ type: "span:end", at: this.now(), path, status: "halted" });
-        throw e;
+        throw halt;
       }
       // Attribute the failure to the innermost node only; ancestors point down at it.
       const err = e instanceof NodeError ? e : new NodeError(node.id, e, path);
@@ -284,19 +306,23 @@ class Runner {
       runInput: this.runInput,
       results: this.results,
       signal,
-      jev: this.opts.jev,
+      jev: boundTo(this.opts.jev, signal),
       log: (message, data) => this.emit({ type: "log", path, log: { at: this.now(), message, ...(data !== undefined ? { data } : {}) } }),
     };
   }
 
   private async callJev(path: string, state: Entry, questions: Questions, model: string | undefined, signal: AbortSignal, tier?: string): Promise<AskResult> {
     const start = this.now();
-    const r = await this.opts.jev.ask(state, questions, {
-      ...(model ? { model } : {}),
+    // Raced against the signal: a custom client that ignores it can't hold up a stopped run.
+    const r = await untilAborted(
+      this.opts.jev.ask(state, questions, {
+        ...(model ? { model } : {}),
+        signal,
+        onRetry: ({ attempt, delayMs, error }) =>
+          this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(error), source: "jev" } }),
+      }),
       signal,
-      onRetry: ({ attempt, delayMs, error }) =>
-        this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(error), source: "jev" } }),
-    });
+    );
     const call: JevCall = {
       id: `call_${++this.callSeq}`,
       model: r.model,
@@ -422,7 +448,9 @@ class Runner {
       const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (rejected) throw rejected.reason;
       const results = Object.fromEntries(entries.map(([key], i) => [key, (settled[i] as PromiseFulfilledResult<unknown>).value]));
-      return node.join ? await node.join(results, input, this.ctx(path, signal)) : results;
+      if (!node.join) return results;
+      const join = node.join;
+      return await untilAborted(Promise.resolve().then(() => join(results, input, this.ctx(path, signal))), signal);
     } finally {
       signal.removeEventListener("abort", onAbort);
     }
@@ -456,7 +484,7 @@ class Runner {
         if (signal.aborted || attempt > retries) throw e;
         const delayMs = Math.min(2000, 100 * 2 ** (attempt - 1));
         this.emit({ type: "retry", path, retry: { at: this.now(), attempt, delayMs, error: serializeError(e), source: "step" } });
-        await new Promise((r) => setTimeout(r, delayMs));
+        await sleep(delayMs, signal);
       }
     }
   }
@@ -511,6 +539,78 @@ class Runner {
     }
     return value;
   }
+}
+
+/** `jev`, but every ask is also cancelled by `signal`, so a step's own calls stop when it does. */
+function boundTo(jev: JevClient, signal: AbortSignal): JevClient {
+  return {
+    model: jev.model,
+    usdPerMillionTokens: jev.usdPerMillionTokens,
+    ask: (state, questions, options = {}) => jev.ask(state, questions, { ...options, signal: options.signal ? either(options.signal, signal) : signal }),
+  };
+}
+
+/** A signal that aborts when either input does, with that one's reason. */
+function either(a: AbortSignal, b: AbortSignal): AbortSignal {
+  if (a.aborted) return a;
+  if (b.aborted) return b;
+  const controller = new AbortController();
+  const onA = () => {
+    b.removeEventListener("abort", onB);
+    controller.abort(a.reason);
+  };
+  const onB = () => {
+    a.removeEventListener("abort", onA);
+    controller.abort(b.reason);
+  };
+  a.addEventListener("abort", onA, { once: true });
+  b.addEventListener("abort", onB, { once: true });
+  return controller.signal;
+}
+
+/**
+ * `work`, or a rejection with the signal's reason as soon as it aborts, so
+ * user code (a join, a custom client) that ignores the signal can't keep a
+ * stopped run from settling. Until the signal fires it's just `work`.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.catch(() => {}); // it may still reject later; nobody's listening
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** Waits `ms`, or rejects with the signal's reason as soon as it aborts. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** The reason a parallel's surviving branches are aborted with when a sibling fails. */
