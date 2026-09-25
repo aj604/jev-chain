@@ -122,6 +122,7 @@ export {
   JevResponseError,
   ChainConfigError,
   NodeError,
+  CancelledError,
   serializeError,
   type SerializedError,
 } from "./errors";

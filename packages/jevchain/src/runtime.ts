@@ -8,6 +8,7 @@
  */
 import { createJevClient, type AskResult, type JevClient, type JevClientOptions } from "./client";
 import {
+  CancelledError,
   ChainConfigError,
   JevAbortError,
   JevChainError,
@@ -188,7 +189,7 @@ class Runner {
     // Close anything left open (siblings cancelled by a failure or halt).
     for (const s of this.trace!.spans) {
       if (s.status === "running") {
-        this.emit({ type: "span:end", at: this.now(), path: s.path, status: status === "halted" ? "halted" : "error", error: { name: "Cancelled", code: "cancelled", message: "Cancelled when the run ended" } });
+        this.emit({ type: "span:end", at: this.now(), path: s.path, status: status === "halted" ? "halted" : "error", error: serializeError(new CancelledError("Cancelled when the run ended")) });
       }
     }
 
@@ -231,9 +232,11 @@ class Runner {
         this.emit({ type: "span:end", at: this.now(), path, status: "halted" });
         throw e;
       }
-      // Attribute the failure to the innermost node only.
-      const err = e instanceof NodeError ? e : new NodeError(node.id, e);
-      this.emit({ type: "span:end", at: this.now(), path, status: "error", error: serializeError(err.cause ?? err) });
+      // Attribute the failure to the innermost node only; ancestors point down at it.
+      const err = e instanceof NodeError ? e : new NodeError(node.id, e, path);
+      const error = serializeError(err.cause ?? err);
+      if (err.path) error.path = err.path;
+      this.emit({ type: "span:end", at: this.now(), path, status: "error", error });
       throw err;
     }
   }
@@ -391,23 +394,27 @@ class Runner {
   }
 
   private async execParallel(node: ParallelNode, input: unknown, path: string, signal: AbortSignal) {
-    // Siblings share a controller so one failure cancels the rest.
+    // Siblings share a controller so one failure cancels the rest. They're
+    // cancelled with a CancelledError, not the failure itself, so the trace
+    // blames only the branch that actually broke. (A halt stays a halt.)
     const local = new AbortController();
     const onAbort = () => local.abort(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     const entries = Object.entries(node.branches);
+    let first: { error: unknown } | undefined;
     try {
       const settled = await Promise.allSettled(
         entries.map(([key, child]) =>
           this.exec(child as AnyJevNode, input, childPath(path, key), path, key, local.signal).catch((e) => {
-            if (!local.signal.aborted) local.abort(e);
+            first ??= { error: e };
+            if (!local.signal.aborted) local.abort(e instanceof Halt ? e : cancelledBy(e));
             throw e;
           }),
         ),
       );
-      // The controller's reason is the first failure (or the outer abort).
+      if (first) throw first.error;
       const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
-      if (rejected) throw local.signal.reason ?? rejected.reason;
+      if (rejected) throw rejected.reason;
       const results = Object.fromEntries(entries.map(([key], i) => [key, (settled[i] as PromiseFulfilledResult<unknown>).value]));
       return node.join ? await node.join(results, input, this.ctx(path, signal)) : results;
     } finally {
@@ -498,6 +505,12 @@ class Runner {
     }
     return value;
   }
+}
+
+/** The reason a parallel's surviving branches are aborted with when a sibling fails. */
+function cancelledBy(cause: unknown): CancelledError {
+  const where = cause instanceof NodeError ? ` because "${cause.nodeId}" failed${cause.path ? ` at ${cause.path}` : ""}` : "";
+  return new CancelledError(`Cancelled${where}`, { cause });
 }
 
 function gateValue(answer: Answer, label?: string): { value: number; metric: Decision["metric"] } {
