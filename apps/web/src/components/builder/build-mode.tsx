@@ -3,12 +3,12 @@
 /**
  * Build mode's moving parts, as one hook the Studio plugs into its Workbench:
  * structural actions on the selection (add after, change kind, duplicate,
- * delete), the canvas toolbar and right-click menu, the property editor, the
- * issues strip, the live-code drawer, and their hotkeys.
+ * cut / copy / paste, delete), the canvas toolbar and right-click menu, the
+ * property editor, the issues strip, the live-code drawer, and their hotkeys.
  *
  * Everything edits through `builder.commit`, so it's all undoable.
  */
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { FlowGraph, Json } from "jevchain";
 import { KindTag } from "@/components/trace/kinds";
 import type { VertexDecoration } from "@/components/trace/graph-node";
@@ -37,6 +37,7 @@ import {
   type BuilderKind,
   type NodeJson,
 } from "@/lib/builder/doc-ops";
+import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
 import { issueTarget } from "@/lib/builder/question-ops";
 import { editTarget, selectionAfterRemove, vertexFor } from "@/lib/builder/selection";
 import { CodeDrawer } from "./code-drawer";
@@ -50,12 +51,24 @@ const GROUP = "builder";
 
 type Menu = "add" | "before" | "kind";
 
+const NOT_TEXT = new Set(["checkbox", "radio", "button", "submit", "reset", "range", "color", "file"]);
+
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
   if (!t) return false;
   if (t.isContentEditable) return true;
-  return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT";
+  if (t.tagName === "INPUT") return !NOT_TEXT.has((t as HTMLInputElement).type);
+  return t.tagName === "TEXTAREA" || t.tagName === "SELECT";
 }
+
+/** ⌘c / ⌘x / ⌘v belong to the browser while typing or while page text is selected. */
+function nativeClipboard(e: KeyboardEvent): boolean {
+  if (isTyping(e)) return true;
+  const sel = typeof window === "undefined" ? null : window.getSelection();
+  return Boolean(sel && !sel.isCollapsed && sel.toString().trim());
+}
+
+const clipName = (clip: Clip) => clip.node.title || clip.node.id;
 
 function count(n: number, word: string) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -182,6 +195,56 @@ export function useBuildMode({
     setSelected(vertexFor(r.root, r.path));
   }, [target, root, commitRoot, setSelected]);
 
+  // ── clipboard ──────────────────────────────────────────────────────────────
+  const clip = useSyncExternalStore(clipboard.subscribe, clipboard.get, () => null);
+
+  const copy = useCallback(() => {
+    if (!target) return false;
+    clipboard.set(target.node, "copy");
+    return true;
+  }, [target]);
+
+  const cut = useCallback(() => {
+    if (!target) return false;
+    clipboard.set(target.node, "cut");
+    const next = removeAt(root, target.path);
+    commitRoot(next);
+    setSelected(selectionAfterRemove(next, target.path));
+    return true;
+  }, [target, root, commitRoot, setSelected]);
+
+  /** Paste the clipboard after / before the selection, or in its place. A placeholder is always filled in place. */
+  const paste = useCallback(
+    (mode: PasteMode) => {
+      const held = clipboard.get();
+      if (!held || (mode === "replace" && !target)) return false;
+      const how: PasteMode = target && isPlaceholder(target.node) ? "replace" : mode;
+      const go = () => {
+        const r = pasteAt(root, target?.path ?? null, held.node, how);
+        commitRoot(r.root);
+        setSelected(vertexFor(r.root, r.path));
+      };
+      setMenu(null);
+      setCtx(null);
+      const size = how === "replace" && target ? subtreeSize(target.node) : 0;
+      if (size > 1)
+        setConfirm({
+          title: `paste over this ${target!.node.kind}?`,
+          body: (
+            <>
+              <span className="font-mono text-ink">{target!.node.title || target!.node.id}</span> and the {count(size - 1, "node")} under it get replaced by{" "}
+              <span className="font-mono text-ink">{clipName(held)}</span>. undo brings them back.
+            </>
+          ),
+          confirmLabel: `replace ${count(size, "node")}`,
+          onConfirm: go,
+        });
+      else go();
+      return true;
+    },
+    [target, root, commitRoot, setSelected],
+  );
+
   const confirmRemove = useCallback((what: string, child: NodeJson | undefined, go: () => void) => {
     const size = child ? subtreeSize(child) : 0;
     if (size <= 1 || (child && isPlaceholder(child))) return go();
@@ -226,6 +289,16 @@ export function useBuildMode({
   useHotkey("d", duplicate, { ...on, description: "duplicate the selected node (chains, parallels)" });
   useHotkey("backspace", remove, { ...on, description: "delete the selected node" });
   useHotkey("delete", remove, { ...on });
+  const onClip = (run: () => boolean) => (e: KeyboardEvent) => {
+    if (nativeClipboard(e)) return;
+    if (run()) e.preventDefault();
+  };
+  const clipOn = { ...on, preventDefault: false };
+  useHotkey("mod+x", onClip(cut), { ...clipOn, description: "cut the selected node and everything under it" });
+  useHotkey("mod+c", onClip(copy), { ...clipOn, description: "copy the selected node and everything under it" });
+  useHotkey("mod+v", onClip(() => paste("after")), { ...clipOn, description: "paste after the selection (fills a placeholder)" });
+  useHotkey("shift+mod+v", onClip(() => paste("before")), { ...clipOn, description: "paste before the selection" });
+  useHotkey("alt+mod+v", onClip(() => paste("replace")), { ...clipOn, description: "paste in place of the selection" });
   useHotkey("e", () => setCodeOpen((o) => !o), { ...on, description: "show / hide the live code" });
   useHotkey(
     "mod+z",
@@ -321,6 +394,13 @@ export function useBuildMode({
           isPlaceholder(target.node) ? (
             <div className="space-y-2 pt-1">
               <p className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">what goes here?</p>
+              {clip && (
+                <ActionChip onClick={() => paste("replace")} keys="⌘v" label={`paste ${clipName(clip)} here`}>
+                  <span className="truncate">
+                    paste <KindTag kind={clip.node.kind} /> {clipName(clip)} here
+                  </span>
+                </ActionChip>
+              )}
               <KindGrid onPick={changeKind} />
             </div>
           ) : (
@@ -339,6 +419,12 @@ export function useBuildMode({
                   duplicate
                 </ActionChip>
               )}
+              <ActionChip onClick={cut} keys="⌘x" label="cut this node and everything under it">
+                cut
+              </ActionChip>
+              <ActionChip onClick={copy} keys="⌘c" label="copy this node and everything under it">
+                copy
+              </ActionChip>
               {(upOk || downOk) && (
                 <>
                   <ActionChip onClick={() => move(-1)} keys="⌥↑" disabled={!upOk} label="move earlier in the chain">
@@ -352,6 +438,7 @@ export function useBuildMode({
               <ActionChip onClick={remove} keys="⌫" danger>
                 delete
               </ActionChip>
+              {clip && <ClipboardStrip clip={clip} paste={paste} />}
             </div>
           )
         }
@@ -370,6 +457,11 @@ export function useBuildMode({
       }}
       onRemoveExample={(i) => commit({ ...doc, examples: (doc.examples ?? []).filter((_, j) => j !== i) })}
     >
+      {clip && (
+        <div className="flex flex-wrap gap-1 px-4 pt-3">
+          <ClipboardStrip clip={clip} paste={paste} atEnds />
+        </div>
+      )}
       <HotkeyCheatsheet />
     </DocumentEditor>
   );
@@ -400,13 +492,24 @@ export function useBuildMode({
           onChangeKind={changeKind}
           onClose={() => setCtx(null)}
           actions={[
-            ...(upOk || downOk
+            ...((upOk || downOk) && !isPlaceholder(target.node)
               ? [
                   { label: "move earlier", hint: "⌥↑", onSelect: () => move(-1), disabled: !upOk },
                   { label: "move later", hint: "⌥↓", onSelect: () => move(1), disabled: !downOk },
                 ]
               : []),
             { label: "duplicate", hint: "d", onSelect: duplicate, disabled: !dupOk },
+            { label: "cut", hint: "⌘x", onSelect: cut },
+            { label: "copy", hint: "⌘c", onSelect: copy },
+            ...(clip
+              ? isPlaceholder(target.node)
+                ? [{ label: `paste ${clipName(clip)} here`, hint: "⌘v", onSelect: () => paste("replace") }]
+                : [
+                    { label: "paste after", hint: "⌘v", onSelect: () => paste("after") },
+                    { label: "paste before", hint: "⇧⌘v", onSelect: () => paste("before") },
+                    { label: "paste in place", hint: "⌥⌘v", onSelect: () => paste("replace") },
+                  ]
+              : []),
             { label: "delete", hint: "⌫", onSelect: remove, danger: true },
           ]}
         />
@@ -454,6 +557,33 @@ function ActionChip({
       {children}
       <span className="text-[9.5px] text-ink-3">{keys}</span>
     </button>
+  );
+}
+
+/** What's on the clipboard, and where it can go relative to the selection (or the whole chain, when nothing is selected). */
+function ClipboardStrip({ clip, paste, atEnds }: { clip: Clip; paste: (mode: PasteMode) => boolean; atEnds?: boolean }) {
+  const size = subtreeSize(clip.node);
+  return (
+    <div className="flex w-full flex-wrap items-center gap-1 border-soft-t pt-1.5" aria-label="clipboard">
+      <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px] text-ink-3">
+        {clip.via === "cut" ? "cut" : "copied"} <KindTag kind={clip.node.kind} />
+        <span className="truncate text-ink-2">{clipName(clip)}</span>
+        {size > 1 && <span>· {count(size, "node")}</span>}
+      </span>
+      <span className="ml-auto flex flex-wrap gap-1">
+        <ActionChip onClick={() => paste("before")} keys="⇧⌘v" label={atEnds ? "paste at the start" : "paste before this node"}>
+          {atEnds ? "paste at start" : "paste before"}
+        </ActionChip>
+        <ActionChip onClick={() => paste("after")} keys="⌘v" label={atEnds ? "paste at the end" : "paste after this node"}>
+          {atEnds ? "paste at end" : "paste after"}
+        </ActionChip>
+        {!atEnds && (
+          <ActionChip onClick={() => paste("replace")} keys="⌥⌘v" label="paste in place of this node">
+            in place
+          </ActionChip>
+        )}
+      </span>
+    </div>
   );
 }
 
@@ -537,6 +667,9 @@ function HotkeyCheatsheet() {
     ["k", "change kind"],
     ["d", "duplicate"],
     ["⌥↑ / ⌥↓", "move a step earlier / later"],
+    ["⌘x / ⌘c", "cut / copy a node and its subtree"],
+    ["⌘v", "paste after (or into a placeholder)"],
+    ["⇧⌘v / ⌥⌘v", "paste before / in place"],
     ["⌫", "delete"],
     ["⌘z / ⇧⌘z", "undo / redo"],
     ["e", "live code"],
