@@ -5,7 +5,7 @@
  * another, and remember which run it was asking about (see `lib/trace/reask`).
  *
  *   const reask = useReask();
- *   reask.start(node, trace, input);   // trace = the run being asked about
+ *   await reask.start(node, trace, input);   // trace = the run being asked about; resolves with the final state
  *   reask.base, reask.rows, reask.phase, reask.stoppedBy
  *   reask.stop();  reask.reset();
  *
@@ -28,7 +28,8 @@ export interface ReaskState {
 }
 
 export interface UseReask extends ReaskState {
-  start: (node: AnyNode, base: Trace, input: Json) => Promise<void>;
+  /** Resolves with how it ended, or undefined when a later start or reset took over. */
+  start: (node: AnyNode, base: Trace, input: Json) => Promise<ReaskState | undefined>;
   stop: () => void;
   reset: () => void;
 }
@@ -55,7 +56,10 @@ export function useReask(): UseReask {
           if (alive()) setState((s) => ({ ...s, rows: s.rows.map((r, j) => (j === i ? row : r)) }));
         },
       });
-      if (alive()) setState({ phase: "done", base, rows: result.rows, ...(result.stoppedBy ? { stoppedBy: result.stoppedBy } : {}) });
+      if (!alive()) return undefined;
+      const done: ReaskState = { phase: "done", base, rows: result.rows, ...(result.stoppedBy ? { stoppedBy: result.stoppedBy } : {}) };
+      setState(done);
+      return done;
     } finally {
       if (controller.current === ac) controller.current = null;
     }

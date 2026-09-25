@@ -32,6 +32,11 @@
  * Ask again (`a`, or from the story) sends run a's input to Jev a few more
  * times (see `lib/trace/reask`): every decision says whether all the asks
  * took the same road, and an ask that went elsewhere opens as run b.
+ *
+ * Ask both again (compare mode, from the a-vs-b panel) does that for input a
+ * and then input b (see `lib/trace/split`): the diff then says, per decision,
+ * whether the two inputs stayed apart on every ask or one of them goes both
+ * ways by itself, so a split on one pull isn't read as the edit's doing.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -56,9 +61,11 @@ import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
 import { answeredReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
+import { sameInput, splitsOf } from "@/lib/trace/split";
 import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
 import type { Fork } from "@/lib/trace/what-if";
 import { ChainPicker } from "./chain-picker";
+import type { CompareAskControl } from "./compare-summary";
 import { ExportMenu } from "./export-menu";
 import { ImportDialog } from "./import-dialog";
 import { InputEditor, type InputValue } from "./input-editor";
@@ -210,7 +217,12 @@ export function Studio(props: StudioProps) {
   const runB = useChainRun({ onFinish: onFinishB });
   const sweep = useSweep();
   const reask = useReask();
-  const running = runA.phase === "running" || runB.phase === "running" || sweep.phase === "running" || reask.phase === "running";
+  // Compare mode's "ask both again": run b's input, re-sent (run a's re-asks are `reask`'s).
+  const reaskB = useReask();
+  // Bumped by stop: an "ask both" that was stopped during a's asks doesn't go on to spend b's.
+  const askBothSeq = useRef(0);
+  const running =
+    runA.phase === "running" || runB.phase === "running" || sweep.phase === "running" || reask.phase === "running" || reaskB.phase === "running";
   const nowA = useRunClock(runA.phase === "running", runA.startedAtPerf, runA.trace?.durationMs);
   const nowB = useRunClock(runB.phase === "running", runB.startedAtPerf, runB.trace?.durationMs);
 
@@ -255,6 +267,7 @@ export function Studio(props: StudioProps) {
     setActiveSavedId(null);
     forgetWhatIfs();
     reask.reset();
+    reaskB.reset();
     if (building) {
       // Run what's on the canvas, then watch it in run mode.
       setSource(buildSource);
@@ -265,7 +278,7 @@ export function Studio(props: StudioProps) {
     void runA.start(runnable.node, parsedA.value, { rehearse });
     if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value, { rehearse });
     else runB.reset();
-  }, [runnable, parsedA, parsedB, comparing, runA, runB, reask, building, buildSource, builder.doc, source, forgetWhatIfs]);
+  }, [runnable, parsedA, parsedB, comparing, runA, runB, reask, reaskB, building, buildSource, builder.doc, source, forgetWhatIfs]);
 
   /** Sweep every queued input through the chain on screen. */
   const startSweep = useCallback(
@@ -341,7 +354,9 @@ export function Studio(props: StudioProps) {
     runB.stop();
     sweep.stop();
     reask.stop();
-  }, [runA, runB, sweep, reask]);
+    reaskB.stop();
+    askBothSeq.current++;
+  }, [runA, runB, sweep, reask, reaskB]);
 
   const switchTo = useCallback(
     (next: ChainSource) => {
@@ -349,6 +364,7 @@ export function Studio(props: StudioProps) {
       runB.reset();
       sweep.reset();
       reask.reset();
+      reaskB.reset();
       forgetWhatIfs();
       setSource(next);
       const r = resolveChain(next);
@@ -359,7 +375,7 @@ export function Studio(props: StudioProps) {
       setActiveSavedId(null);
       setTarget("a");
     },
-    [runA, runB, sweep, reask, forgetWhatIfs],
+    [runA, runB, sweep, reask, reaskB, forgetWhatIfs],
   );
 
   const pickExample = useCallback((slug: string) => switchTo({ kind: "example", slug }), [switchTo]);
@@ -371,6 +387,7 @@ export function Studio(props: StudioProps) {
       runA.reset();
       runB.reset();
       reask.reset();
+      reaskB.reset();
       forgetWhatIfs();
       setLastRunDoc(null);
       setSelected(null);
@@ -380,7 +397,7 @@ export function Studio(props: StudioProps) {
       if (first !== undefined) setInputA(toEditor(first));
       setMode("build");
     },
-    [builder, runA, runB, reask, forgetWhatIfs],
+    [builder, runA, runB, reask, reaskB, forgetWhatIfs],
   );
 
   const loadDoc = useCallback(
@@ -533,6 +550,52 @@ export function Studio(props: StudioProps) {
     ...(reaskOn && reask.stoppedBy ? { stoppedBy: reask.stoppedBy } : {}),
     start: startReask,
     open: openReask,
+  };
+
+  // ── ask both again: compare mode, a's input and b's input re-sent ──────────
+  const reaskBOn = reaskB.phase !== "idle" && reaskB.base !== undefined && reaskB.base === runB.trace;
+  const reaskBTraces = useMemo(() => reaskB.rows.map((r) => r.trace), [reaskB.rows]);
+  const askingBoth = (reaskOn && reask.phase === "running") || (reaskBOn && reaskB.phase === "running");
+  const bothBlocker = ((): string | null => {
+    const a = runA.trace;
+    const b = runB.trace;
+    if (!a || !b || a.status === "running" || b.status === "running") return "run both first";
+    if (running && !askingBoth) return "wait for the runs to finish";
+    if (sameInput(a.input, b.input)) return "a and b are the same input, so any split between them is jev answering differently. “ask again” on run a asks it more.";
+    const ba = reaskBlocker(a);
+    if (ba) return `run a: ${ba}`;
+    const bb = reaskBlocker(b);
+    return bb ? `run b: ${bb}` : null;
+  })();
+  // Splits only mean something for two real runs of two different inputs.
+  const splits = useMemo(
+    () =>
+      comparing && !building && runA.trace && runB.trace && (reaskOn || reaskBOn) && !reaskBlocker(runA.trace) && !reaskBlocker(runB.trace) && !sameInput(runA.trace.input, runB.trace.input)
+        ? splitsOf(runA.trace, reaskOn ? reaskTraces : [], runB.trace, reaskBOn ? reaskBTraces : [])
+        : undefined,
+    [comparing, building, runA.trace, runB.trace, reaskOn, reaskBOn, reaskTraces, reaskBTraces],
+  );
+  const startAskBoth = useCallback(async () => {
+    const a = runA.trace;
+    const b = runB.trace;
+    if (!chain || !a || !b || runA.input === undefined || runB.input === undefined || running || bothBlocker) return;
+    const mine = ++askBothSeq.current;
+    // a asked already (say with `a`, before b ran)? Its asks count; don't spend them twice.
+    if (!(reaskOn && reask.phase === "done" && !reask.stoppedBy)) {
+      const first = await reask.start(chain.node, a, runA.input);
+      // Stopped by hand, or by something b's asks would hit too (no key, a 429…): don't spend b's.
+      if (askBothSeq.current !== mine || !first || first.stoppedBy || first.rows.some((r) => !r.trace || r.trace.status === "aborted")) return;
+    }
+    await reaskB.start(chain.node, b, runB.input);
+  }, [chain, runA.trace, runA.input, runB.trace, runB.input, running, bothBlocker, reaskOn, reask, reaskB]);
+  const compareAsk: CompareAskControl = {
+    blocker: bothBlocker,
+    running: askingBoth,
+    done: { a: reaskDone, b: reaskBOn ? reaskB.rows.filter((r) => r.trace || r.issue).length : 0 },
+    total: REASKS,
+    ...(splits ? { splits } : {}),
+    ...(reaskBOn && reaskB.stoppedBy ? { stoppedBy: reaskB.stoppedBy } : reaskOn && reask.stoppedBy ? { stoppedBy: reask.stoppedBy } : {}),
+    start: () => void startAskBoth(),
   };
 
   // What's on screen right now, for share / step-through.
@@ -925,7 +988,7 @@ export function Studio(props: StudioProps) {
         rail={rail}
         issueAction={<IssueActions issue={runA.issue} onRetry={run} onRehearse={rehearseNow} />}
         issueActionB={<IssueActions issue={runB.issue} onRetry={retryB} onRehearse={rehearseB} />}
-        {...(building ? {} : { onWhatIf: whatIf, reask: reaskControl, ...(forkedFrom.length > 0 && runB.phase !== "running" ? { onUndoWhatIf: undoWhatIf } : {}) })}
+        {...(building ? {} : { onWhatIf: whatIf, reask: reaskControl, ...(comparing ? { compareAsk } : {}), ...(forkedFrom.length > 0 && runB.phase !== "running" ? { onUndoWhatIf: undoWhatIf } : {}) })}
         {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
       />
       {building && build.portals}
