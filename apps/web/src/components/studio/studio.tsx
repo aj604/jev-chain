@@ -12,6 +12,10 @@
  * autosaved draft) and draws it on the same canvas. Running from the builder
  * hands that document to the run pipeline as a doc source, flips back to run
  * mode, and the trace paints over the graph you just built.
+ *
+ * Rehearse (`r`, or `?rehearse=1`) swaps Jev for a local client that makes
+ * its answers up (see `lib/trace/rehearsal`): no key, no network, every road
+ * still walkable. Those traces are badged as rehearsals wherever they show.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -53,6 +57,8 @@ export interface StudioProps {
   initialSource?: ChainSource;
   /** `?mode=build` deep link. */
   initialMode?: StudioMode;
+  /** `?rehearse=1` deep link: start with rehearsal on. */
+  initialRehearse?: boolean;
 }
 
 function initialSourceFrom(props: StudioProps): ChainSource {
@@ -136,6 +142,7 @@ export function Studio(props: StudioProps) {
   const [inputA, setInputA] = useState<InputValue>(() => (props.initialInput ? editorFromDeepLink(props.initialInput) : sampleEditor(chain, 0)));
   const [inputB, setInputB] = useState<InputValue>(() => sampleEditor(chain, 1));
   const [comparing, setComparing] = useState(false);
+  const [rehearsing, setRehearsing] = useState(Boolean(props.initialRehearse));
   const [selected, setSelected] = useState<string | null>(null);
   const [target, setTarget] = useState<Target>("a");
   const [fitSignal, setFitSignal] = useState(0);
@@ -182,11 +189,12 @@ export function Studio(props: StudioProps) {
     const slug = building ? builder.forkedFrom : source.kind === "example" ? source.slug : undefined;
     if (slug) params.set("example", slug);
     if (building) params.set("mode", "build");
+    if (rehearsing) params.set("rehearse", "1");
     const url = `/studio${params.size ? `?${params}` : ""}`;
     if (window.location.pathname + window.location.search !== url) window.history.replaceState(window.history.state, "", url);
-  }, [source, building, builder.forkedFrom]);
+  }, [source, building, builder.forkedFrom, rehearsing]);
 
-  const run = useCallback(() => {
+  const pull = useCallback((rehearse: boolean) => {
     if (!runnable || !parsedA.ok || (comparing && !parsedB.ok)) return;
     setSelected(null);
     setActiveSavedId(null);
@@ -197,10 +205,18 @@ export function Studio(props: StudioProps) {
       setMode("run");
     }
     setLastRunDoc(building ? builder.doc : source.kind === "doc" ? source.doc : null);
-    void runA.start(runnable.node, parsedA.value);
-    if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value);
+    void runA.start(runnable.node, parsedA.value, { rehearse });
+    if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value, { rehearse });
     else runB.reset();
   }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source]);
+
+  const run = useCallback(() => pull(rehearsing), [pull, rehearsing]);
+
+  /** From a missing-key dead end: turn rehearsal on and pull again. */
+  const rehearseNow = useCallback(() => {
+    setRehearsing(true);
+    pull(true);
+  }, [pull]);
 
   const stop = useCallback(() => {
     runA.stop();
@@ -350,6 +366,7 @@ export function Studio(props: StudioProps) {
     { description: "stop the run / deselect", group: "studio", preventDefault: false },
   );
   useHotkey("b", toggleMode, { description: "switch between run and build mode", group: "studio" });
+  useHotkey("r", () => setRehearsing((r) => !r), { description: "toggle rehearsal (made-up answers, no key)", group: "studio", enabled: !running });
   useHotkey("c", toggleCompare, { description: "toggle compare mode", group: "studio", enabled: !building });
   useHotkey("s", doShare, { description: "copy a share link to this run", group: "studio", enabled: !building });
   useHotkey("]", () => setSelected((s) => stepSelection(order, s, 1)), { description: "next visited node", group: "studio", enabled: !building });
@@ -408,6 +425,14 @@ export function Studio(props: StudioProps) {
     </div>
   );
 
+  const rehearseToggle = (
+    <Tooltip label={rehearsing ? "rehearsing: made-up answers, no key · r" : "rehearse: run with made-up answers, no key · r"}>
+      <Button variant={rehearsing ? "solid" : "ghost"} size="sm" onClick={() => setRehearsing(!rehearsing)} aria-pressed={rehearsing} disabled={running}>
+        rehearse
+      </Button>
+    </Tooltip>
+  );
+
   const saveNote =
     builder.saveState.state === "saved"
       ? `draft saved ✓${builder.forkedFrom ? ` · fork of ${builder.forkedFrom}` : ""}`
@@ -430,6 +455,7 @@ export function Studio(props: StudioProps) {
       </div>
       <div className="flex items-center gap-1.5">
         {modeSwitch}
+        {rehearseToggle}
         <Tooltip label="live code · e">
           <Button variant={build.codeOpen ? "solid" : "ghost"} size="sm" onClick={() => build.setCodeOpen(!build.codeOpen)} aria-pressed={build.codeOpen}>
             {"</>"} code
@@ -454,6 +480,7 @@ export function Studio(props: StudioProps) {
       </div>
       <div className="flex items-center gap-1">
         {modeSwitch}
+        {rehearseToggle}
         <Tooltip label="compare two inputs · c">
           <Button variant={comparing ? "solid" : "ghost"} size="sm" onClick={toggleCompare} aria-pressed={comparing}>
             <span aria-hidden className="flex gap-0.5">
@@ -503,7 +530,7 @@ export function Studio(props: StudioProps) {
           <svg aria-hidden viewBox="0 0 10 10" className="size-2.5">
             <path d="M1 0.5 L9.5 5 L1 9.5 z" fill="currentColor" />
           </svg>
-          {comparing ? "pull both" : "pull the chain"}
+          {rehearsing ? (comparing ? "rehearse both" : "rehearse the chain") : comparing ? "pull both" : "pull the chain"}
           <KbdCombo combo="mod+enter" className="ml-auto" />
         </Button>
       )}
@@ -630,8 +657,8 @@ export function Studio(props: StudioProps) {
         fitSignal={fitSignal}
         header={header}
         rail={rail}
-        issueAction={<IssueActions issue={runA.issue} onRetry={run} />}
-        issueActionB={<IssueActions issue={runB.issue} onRetry={run} />}
+        issueAction={<IssueActions issue={runA.issue} onRetry={run} onRehearse={rehearseNow} />}
+        issueActionB={<IssueActions issue={runB.issue} onRetry={run} onRehearse={rehearseNow} />}
         {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
       />
       {building && build.portals}

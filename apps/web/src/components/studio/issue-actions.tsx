@@ -5,15 +5,25 @@ import { useShell } from "@/components/shell/shell-provider";
 import { Button } from "@/components/ui/button";
 import type { RunIssue } from "@/lib/trace/run-error";
 
-/** The button that fixes a run issue: add a key, or retry (after a cooldown for 429s). */
-export function IssueActions({ issue, onRetry }: { issue: RunIssue | null; onRetry?: () => void }) {
+/**
+ * The button that fixes a run issue: add a key (or rehearse without one), or
+ * retry (after a cooldown for 429s).
+ */
+export function IssueActions({ issue, onRetry, onRehearse }: { issue: RunIssue | null; onRetry?: () => void; onRehearse?: () => void }) {
   const { openKeyDialog } = useShell();
   if (!issue?.action) return null;
   if (issue.action === "add-key") {
     return (
-      <Button variant="accent" size="sm" onClick={openKeyDialog}>
-        add a key
-      </Button>
+      <>
+        <Button variant="accent" size="sm" onClick={openKeyDialog}>
+          add a key
+        </Button>
+        {onRehearse && (
+          <Button variant="outline" size="sm" onClick={onRehearse}>
+            rehearse without one
+          </Button>
+        )}
+      </>
     );
   }
   if (!onRetry) return null;
