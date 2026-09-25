@@ -379,6 +379,8 @@ export function deadReads(root: NodeJson, node: NodeJson, path: string, where: M
   for (const read of reads) {
     const paths = where.get(read.id);
     let why: string | null;
+    // `{{results.constructor}}` and friends hit the object's own prototype, which renders as something, not nothing
+    if (!paths && read.id in Object.prototype) continue;
     if (!paths) why = `no node has the id “${read.id}”`;
     else {
       const verdicts = paths.map((p) => finishedBefore(root, p, path));

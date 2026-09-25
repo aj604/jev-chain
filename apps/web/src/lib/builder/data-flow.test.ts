@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ask, cascade, chain, choice, emit, fromJSON, gate, noul, parallel, route, run, score, step, toJSON, type Entry, type JevClient, type Questions } from "jevchain";
 import { examples } from "jevchain-examples";
-import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, newDocument, template, updateAt, withRoot, type NodeJson } from "./doc-ops";
+import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, newDocument, renameNode, renameTyped, template, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
+import { keyProblem } from "./question-ops";
 import { canRead, describeShape, flowWarnings, inputAt, inputFields, missingHoles, outputOf, type FlowWarning } from "./data-flow";
 import { mapTemplates, readsIn } from "./reads";
 
@@ -518,23 +519,61 @@ describe("against the real runtime", () => {
   }, 60_000);
 });
 
-describe("{{results.<id>}} reads, against the real runtime", () => {
-  /** Generated chains with `{{results.<id>}}` holes sprinkled into their templates: any id in the chain, or one that's gone. */
-  function withReads(seed: number): NodeJson {
-    const r = rng(seed * 7919 + 1);
-    let root = generated(seed);
-    const ids = [...allIds(root), "gone"];
-    const hole = () => `{{results.${ids[Math.floor(r() * ids.length)]}}}`;
-    for (const p of allPaths(root)) {
-      if (r() < 0.4) continue;
-      root = updateAt(root, p, (n) => {
-        const next = mapTemplates(n, (text) => `${text} ${hole()}`);
-        return next === n && ["ask", "route", "gate"].includes(n.kind) ? { ...n, state: `{{run}} ${hole()}` } : next;
-      });
+/** Generated chains with `{{results.<id>}}` holes sprinkled into their templates: any id in the chain, or one that's gone. */
+function withReads(seed: number): NodeJson {
+  const r = rng(seed * 7919 + 1);
+  let root = generated(seed);
+  const ids = [...allIds(root), "gone"];
+  const hole = () => `{{results.${ids[Math.floor(r() * ids.length)]}}}`;
+  for (const p of allPaths(root)) {
+    if (r() < 0.4) continue;
+    root = updateAt(root, p, (n) => {
+      const next = mapTemplates(n, (text) => `${text} ${hole()}`);
+      return next === n && ["ask", "route", "gate"].includes(n.kind) ? { ...n, state: `{{run}} ${hole()}` } : next;
+    });
+  }
+  return root;
+}
+
+describe("typing an id, keystroke by keystroke, against a single rename", () => {
+  /** The id field: `KeyInput` commits each keystroke it accepts; build mode runs it through `renameTyped`. */
+  function typeId(root: NodeJson, path: string, final: string, step = (e: IdEdit | null, cur: NodeJson, draft: string) => renameTyped(e, cur, path, draft)) {
+    let edit: IdEdit | null = null;
+    let cur = root;
+    for (let i = 1; i <= final.length; i++) {
+      const draft = final.slice(0, i);
+      if (keyProblem(draft, [...allIds(cur)], getAt(cur, path)!.id)) continue;
+      edit = step(edit, cur, draft);
+      cur = edit.last;
     }
-    return root;
+    return cur;
   }
 
+  it("ends exactly where renameNode does, for every node and every id typed through (dead ones included)", () => {
+    let typed = 0;
+    let naiveWrong = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const root = withReads(seed);
+      const finals = [...allIds(root), "gone"].flatMap((id) => [`${id}-2`, `${id}x`]);
+      for (const path of allPaths(root)) {
+        for (const final of finals) {
+          if (keyProblem(final, [...allIds(root)], getAt(root, path)!.id)) continue;
+          typed++;
+          const single = renameNode(root, path, final);
+          expect(typeId(root, path, final), `seed ${seed}: typing “${final}” at ${path}`).toEqual(single);
+          // what the first cut did: rename from the current root at every keystroke
+          const naive = typeId(root, path, final, (_e, cur, draft) => ({ path, base: cur, last: renameNode(cur, path, draft) }));
+          if (JSON.stringify(naive) !== JSON.stringify(single)) naiveWrong++;
+        }
+      }
+    }
+    expect(typed).toBeGreaterThan(100_000);
+    // the harness can tell the difference
+    expect(naiveWrong).toBeGreaterThan(2_000);
+  }, 120_000);
+});
+
+describe("{{results.<id>}} reads, against the real runtime", () => {
   /** A run, and for each span start, the node ids whose results were already in. */
   async function traced(root: NodeJson, input: unknown, seed: number) {
     const done = new Set<string>();

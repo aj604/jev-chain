@@ -2,8 +2,26 @@ import { describe, expect, it } from "vitest";
 import { ask, cascade, chain, choice, emit, fromJSON, gate, noul, parallel, route, run, toJSON, type Entry, type JevClient, type Questions } from "jevchain";
 import { pasteAt, withUniqueIds } from "./clipboard";
 import { deadReads, flowWarnings, finishedBefore, type FlowWarning } from "./data-flow";
-import { allIds, cloneWithFreshIds, duplicateAt, getAt, moveStep, newDocument, removeAt, renameNode, updateAt, withRoot, type NodeJson } from "./doc-ops";
+import { allIds, cloneWithFreshIds, duplicateAt, getAt, moveStep, newDocument, removeAt, renameNode, renameTyped, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
+import { keyProblem } from "./question-ops";
 import { readsIn, withReadsRenamed } from "./reads";
+
+/**
+ * Typing `final` into the id field over a selected id, the way the panel does
+ * it: `KeyInput` commits each keystroke it accepts, and build mode runs it
+ * through `renameTyped`.
+ */
+function typeId(root: NodeJson, path: string, final: string): NodeJson {
+  let edit: IdEdit | null = null;
+  let cur = root;
+  for (let i = 1; i <= final.length; i++) {
+    const draft = final.slice(0, i);
+    if (keyProblem(draft, [...allIds(cur)], getAt(cur, path)!.id)) continue;
+    edit = renameTyped(edit, cur, path, draft);
+    cur = edit.last;
+  }
+  return cur;
+}
 
 /** A Jev that picks the first label, so runs are predictable. */
 const jev: JevClient = {
@@ -70,10 +88,31 @@ describe("renaming a node in the property panel", () => {
   });
 
   it("typing a new id one keystroke at a time ends up in the same place", () => {
-    let root = ticket();
-    for (const id of ["u", "ur", "urg", "urgency", "urgency-", "urgency-check"]) root = renameNode(root, "$/0", id);
-    expect(root).toEqual(renameNode(ticket(), "$/0", "urgency-check"));
+    expect(typeId(ticket(), "$/0", "urgency-check")).toEqual(renameNode(ticket(), "$/0", "urgency-check"));
   });
+
+  it("typing past a dead read's id doesn't pick it up on the way (review: {{results.urgency}} got carried to urgency-check)", async () => {
+    const withDead = updateAt(ticket(), "$/1/repair", (n) => ({ ...n, value: "was {{results.urgency}}" }));
+    const typed = typeId(withDead, "$/0", "urgency-check");
+    expect(typed).toEqual(renameNode(withDead, "$/0", "urgency-check"));
+    expect(getAt(typed, "$/1/repair")!.value).toBe("was {{results.urgency}}");
+    expect(dead(typed).map((w) => w.path)).toEqual(["$/1/repair"]);
+    // renaming each keystroke from the current root is what took it over
+    let naive = withDead;
+    for (let i = 1; i <= "urgency-check".length; i++) naive = renameNode(naive, "$/0", "urgency-check".slice(0, i));
+    expect(getAt(naive, "$/1/repair")!.value).toBe("was {{results.urgency-check}}");
+  });
+
+  it("a new typing session starts after any other edit, so an earlier rename isn't replayed over it", () => {
+    let edit = renameTyped(null, ticket(), "$/0", "a");
+    const other = updateAt(edit.last, "$/1", (n) => ({ ...n, title: "Desk" }));
+    edit = renameTyped(edit, other, "$/0", "ab");
+    expect(getAt(edit.last, "$/1")!.title).toBe("Desk");
+    expect(getAt(edit.last, "$/1/billing")!.value).toBe("Billing ({{results.ab.urgency.choice}} urgency)");
+  });
+
+  it("a $ in the new id is written as is, not read as a replacement pattern", () => {
+    expect(getAt(renameNode(ticket(), "$/0", "p$$q"), "$/1/billing")!.value).toBe("Billing ({{results.p$$q.urgency.choice}} urgency)");  });
 
   it("rewrites state, cascade tier states and nested emit values, and nothing that isn't a rendered template", () => {
     const root = asRoot(
@@ -184,6 +223,8 @@ describe("reads that can only come up empty", () => {
     const withDup = updateAt(root, "$/0", (n) => ({ ...n, id: "dup" }));
     expect(dead(root).map((w) => w.message)).toEqual(["{{results.dup}} is always empty here: “dup” can't have run yet: it comes later in the chain"]);
     expect(dead(updateAt(withDup, "$/3", (n) => ({ ...n, value: "{{results.dup}}" })))).toEqual([]);
+    // an object's own prototype renders as something ("undefined", a function), so it isn't "always empty"
+    expect(dead(asRoot(chain("c", ask("a", q), emit("{{results.constructor}} {{results.toString}}", { id: "e" }))))).toEqual([]);
   });
 
   it("offers the steps sure to have run, nearest first, and each fix clears it", async () => {

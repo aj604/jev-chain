@@ -105,7 +105,8 @@ export function renameInTemplate(text: string, map: ReadonlyMap<string, string>,
   return text.replace(HOLE, (whole, hole: string) => {
     const [root, id, ...rest] = hole.split(".");
     if (!ID_ROOTS.has(root!) || id === undefined || !map.has(id) || (only && !only.has(hole))) return whole;
-    return whole.replace(hole, [root, map.get(id)!, ...rest].join("."));
+    // a function, so a `$` in the new id isn't read as a replacement pattern
+    return whole.replace(hole, () => [root, map.get(id)!, ...rest].join("."));
   });
 }
 

@@ -419,6 +419,26 @@ export function renameNode(root: NodeJson, path: string, next: string): NodeJson
   return follow ? renameReads(renamed, new Map([[from, next]])) : renamed;
 }
 
+/** An id being typed: the root it started from, and the root its last keystroke produced. */
+export interface IdEdit {
+  path: string;
+  base: NodeJson;
+  last: NodeJson;
+}
+
+/**
+ * One keystroke of typing an id. The id field commits every keystroke, but
+ * each is a single rename from the root as it was when the typing began, so
+ * an intermediate id never picks up reads that happen to name it (a dead
+ * `{{results.urgency}}` on the way to `urgency-check`). A new edit starts
+ * whenever the root isn't the one the last keystroke produced (another edit,
+ * an undo) or the path changed.
+ */
+export function renameTyped(edit: IdEdit | null, root: NodeJson, path: string, next: string): IdEdit {
+  const base = edit && edit.path === path && edit.last === root ? edit.base : root;
+  return { path, base, last: renameNode(base, path, next) };
+}
+
 /**
  * Where a copy of the node at `path` can go as a sibling: the next slot in a
  * chain, or a new branch of a parallel. Routes (branches = labels), gates and

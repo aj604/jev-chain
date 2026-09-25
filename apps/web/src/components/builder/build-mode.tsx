@@ -9,7 +9,7 @@
  *
  * Everything edits through `builder.commit`, so it's all undoable.
  */
-import { useCallback, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ChainDocument, FlowGraph, Json } from "jevchain";
 import { KindTag } from "@/components/trace/kinds";
 import type { VertexDecoration } from "@/components/trace/graph-node";
@@ -30,13 +30,14 @@ import {
   isPlaceholder,
   moveStep,
   removeAt,
-  renameNode,
+  renameTyped,
   replaceKind,
   subtreeSize,
   template,
   updateAt,
   withRoot,
   type BuilderKind,
+  type IdEdit,
   type NodeJson,
 } from "@/lib/builder/doc-ops";
 import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
@@ -266,8 +267,16 @@ export function useBuildMode({
     [target, root, commitRoot],
   );
 
-  // keyed like the field's other edits, so typing a new id is one undo step
-  const rename = useCallback((id: string) => target && commitRoot(renameNode(root, target.path, id), `${target.path}:id`), [target, root, commitRoot]);
+  // keyed like the field's other edits, so typing a new id is one undo step; each keystroke renames from where the typing began
+  const idEdit = useRef<IdEdit | null>(null);
+  const rename = useCallback(
+    (id: string) => {
+      if (!target) return;
+      idEdit.current = renameTyped(idEdit.current, root, target.path, id);
+      commitRoot(idEdit.current.last, `${target.path}:id`);
+    },
+    [target, root, commitRoot],
+  );
 
   // ── data flow ────────────────────────────────────────────────────────────
   const warnings = useMemo(() => flowWarnings(root), [root]);
