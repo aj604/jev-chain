@@ -21,15 +21,21 @@
  *     branch, so nothing is lost.
  *
  * Whatever has nowhere to go is reported in `dropped` (with how many nodes
- * it takes with it) so the UI can say so before anything happens.
+ * it takes with it), and anything that would make it pick a different path
+ * than before is reported in `changed` (a gate's pass rule a route can't
+ * express, a parallel that would now run one branch, a read between chain
+ * steps that would come up empty), so the UI can say so before anything
+ * happens. A change with neither routes every run exactly as before.
  *
  *   const c = convertKind(root, "$/0", "gate");
  *   c.kept     // ["the question", "2 paths"]
  *   c.dropped  // [{ what: 'branch "just-a-draft"', nodes: 1 }]
+ *   c.changed  // ['swaps the top pick for p(poltergeist) ≥ 0.50']
  */
 import { DECISION_KEY, type Entry } from "jevchain";
+import { flowWarnings } from "./data-flow";
 import { allIds, childEdges, freshId, getAt, isPlaceholder, PLACEHOLDER, renameNode, subtreeSize, template, updateAt, type BuilderKind, type NodeJson } from "./doc-ops";
-import { convertQuestion, freshKey, keyProblem, labelsOf, normalizePass, type QuestionJson } from "./question-ops";
+import { convertQuestion, freshKey, keyProblem, labelsOf, normalizePass, type QuestionJson, type ThresholdJson } from "./question-ops";
 
 export interface KindChange {
   root: NodeJson;
@@ -41,6 +47,8 @@ export interface KindChange {
   kept: string[];
   /** What had nowhere to go, and the nodes each takes with it. */
   dropped: { what: string; nodes: number }[];
+  /** How it would now pick a path differently, as clauses: "stops halting when it doesn't pass". */
+  changed: string[];
 }
 
 interface Asked {
@@ -139,6 +147,34 @@ function asChoice(q: QuestionJson): QuestionJson {
   return convertQuestion(q, "choice");
 }
 
+const num = (v: number) => String(Math.round(v * 100) / 100);
+
+/** A gate's pass rule in words: `p(yes) ≥ 0.7`, `0.2 ≤ score ≤ 3`. */
+function passRule(q: QuestionJson, pass: ThresholdJson): string {
+  const metric = q.type === "choice" ? `p(${pass.label ?? "?"})` : q.type === "noul" ? "p(yes)" : "score";
+  if (pass.min !== undefined && pass.max !== undefined) return `${num(pass.min)} ≤ ${metric} ≤ ${num(pass.max)}`;
+  return pass.max !== undefined ? `${metric} ≤ ${num(pass.max)}` : `${metric} ≥ ${num(pass.min ?? 0.5)}`;
+}
+
+/**
+ * Where a gate's two paths go on the route it becomes (`labels` are the
+ * route's, from `asChoice` of the gate's question): `then` on the label the
+ * gate measures (the `no` side for a max-only rule), `otherwise` on its
+ * opposite. A route takes the top pick, so that only routes the same way when
+ * the gate's bar is the halfway point of a two-way choice; otherwise `rule` says
+ * what's lost.
+ */
+function gatePlacement(gate: NodeJson, labels: string[]): { pass: string; fail: string; rule: string | null } {
+  const q = gate.ask as QuestionJson;
+  const p = (isRec(gate.pass) ? gate.pass : {}) as ThresholdJson;
+  const maxOnly = p.max !== undefined && p.min === undefined;
+  const hit = q.type === "choice" ? (p.label && labels.includes(p.label) ? p.label : labels[0]!) : q.type === "noul" ? "yes" : labels[labels.length - 1]!;
+  const miss = q.type === "score" ? labels[0]! : labels.find((l) => l !== hit)!;
+  const halfway = (p.min === 0.5 && p.max === undefined) || (p.max === 0.5 && p.min === undefined);
+  const same = q.type !== "score" && labels.length === 2 && halfway;
+  return { pass: maxOnly ? miss : hit, fail: maxOnly ? hit : miss, rule: same ? null : `swaps ${passRule(q, p)} for the top pick` };
+}
+
 /** Keys for a keyed map (route labels, parallel branches, question keys, tier ids): valid and distinct. */
 function keyFor(base: string, taken: string[], reserved: string[] = []): string {
   const clean = base.trim().replace(/\//g, "-") || "option";
@@ -181,6 +217,7 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
   const asked = questionsOf(from).filter((a) => isRec(a.q));
   const dropped: KindChange["dropped"] = [];
   const kept: string[] = [];
+  const changed: string[] = [];
   const dropKid = (k: Kid) => !isPlaceholder(k.node) && dropped.push({ what: from.kind === "chain" ? `step "${k.node.id}"` : from.kind === "gate" ? `the ${k.label} path` : `branch "${k.label}"`, nodes: subtreeSize(k.node) });
   const dropUnsure = (u: Unsure | undefined) => u && !isPlaceholder(u.node) && dropped.push({ what: u.edge === "fallback" ? "the fallback" : u.edge === "unsure" ? "the unsure path" : "the low-confidence path", nodes: subtreeSize(u.node) });
   const dropQuestions = (qs: Asked[]) => {
@@ -193,12 +230,33 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
   const done = (node: NodeJson, how: "convert" | "wrap" | "fresh" = "convert"): KindChange => {
     let next = updateAt(root, path, node);
     // an id the builder made up for the old kind (`emit-3`) would only mislead on a gate; take one for the new kind (reads follow)
+    let renamed: [string, string] | null = null;
     if (how === "convert" && new RegExp(`^${from.kind}-\\d+$`).test(from.id)) {
       const id = freshId(kind, taken);
       taken.add(id);
       next = renameNode(next, path, id);
+      renamed = [from.id, id];
     }
-    return { root: next, path, wrapped: how === "wrap", kept, dropped };
+    // a read that could find its node before and can't now (steps turned into sibling branches, say) is a change worth saying
+    if (how !== "fresh") {
+      const deadIn = (r: NodeJson, rename?: [string, string] | null) =>
+        new Set(
+          flowWarnings(r)
+            .filter((w) => w.rule === "dead-read")
+            .map((w) => {
+              const id = getAt(r, w.path)?.id ?? "";
+              return rename && id === rename[0] ? rename[1] : id;
+            }),
+        );
+      const before = deadIn(root, renamed);
+      for (const id of deadIn(next)) if (!before.has(id)) changed.push(`leaves reads in “${id}” coming up empty`);
+    }
+    return { root: next, path, wrapped: how === "wrap", kept, dropped, changed };
+  };
+  const unsureMargin = () => unsure?.margin !== undefined && changed.push(`loses the unsure margin ±${num(unsure.margin)}`);
+  const runsOne = () => {
+    if (from.kind === "parallel" && kids.length > 1) changed.push("runs one branch instead of all of them");
+    if (from.kind === "chain" && kids.length > 1) changed.push(`runs one step instead of all ${kids.length} in order`);
   };
 
   // a placeholder has nothing to keep: it's a fresh node of the new kind
@@ -237,8 +295,8 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
     case "route":
     case "gate": {
       dropJoin();
-      // a route decides on a choice, so prefer one; a gate takes whatever came first
-      const mainAt = kind === "route" ? Math.max(0, asked.findIndex((a) => a.q.type === "choice")) : 0;
+      // an ask's questions are all equal, so a route decides on its first choice; anything else decides on the question it decided on
+      const mainAt = kind === "route" && from.kind === "ask" ? Math.max(0, asked.findIndex((a) => a.q.type === "choice")) : 0;
       const main = asked[mainAt];
       const also = asked.filter((_, i) => i !== mainAt);
       const base = fresh();
@@ -250,6 +308,8 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
         node.alsoAsk = alsoAsk;
       }
       noteQuestions(asked.length);
+      runsOne();
+      if (from.kind === "cascade" && asked.length > 1) changed.push("lets only its first tier decide when to fall back");
 
       if (kind === "route") {
         let labels = labelsOf(ask);
@@ -261,10 +321,16 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
           labels = named;
           node.ask = { ...ask, criteria: Object.fromEntries(labels.map((l) => [l, null])) };
         }
-        const { placed, rest } = assign(
-          kids,
-          labels.map((l) => ({ name: l, ...roleOfLabel(l) })),
-        );
+        let placed: (Kid | undefined)[];
+        let rest: Kid[];
+        if (from.kind === "gate") {
+          // then/otherwise go where the gate's rule points, not by name
+          const g = gatePlacement(from, labels);
+          placed = labels.map((l) => kids.find((k) => (k.label === "then" && l === g.pass) || (k.label === "otherwise" && l === g.fail)));
+          rest = kids.filter((k) => !placed.includes(k));
+          if (g.rule) changed.push(g.rule);
+          if (from.otherwise === undefined) changed.push("stops halting when it doesn't pass");
+        } else ({ placed, rest } = assign(kids, labels.map((l) => ({ name: l, ...roleOfLabel(l) }))));
         const branches: Rec = {};
         labels.forEach((l, i) => (branches[l] = placed[i]?.node ?? placeholder(taken)));
         node.branches = branches;
@@ -273,6 +339,10 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
         if (unsure) {
           node.lowConfidence = { below: unsure.below ?? 0.6, then: unsure.node };
           if (!isPlaceholder(unsure.node)) kept.push(unsure.edge === "lowConfidence" ? "the low-confidence path" : `the ${unsure.edge === "fallback" ? "fallback" : "unsure path"} (as low confidence)`);
+          unsureMargin();
+          if (unsure.below === undefined) changed.push("takes it below confidence 0.6 instead");
+          // a route's low confidence is Jev's confidence in the choice, which isn't a noul's closeness to 0.5 (or a score's)
+          else if (main && main.q.type !== "choice") changed.push(`judges low confidence on the choice, not the ${main.q.type}`);
         }
         return done(node as NodeJson);
       }
@@ -282,6 +352,8 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
         { name: "otherwise", role: "fail" },
       ]);
       node.pass = normalizePass(ask, { ...(placed[0] && labelsOf(ask).includes(placed[0].label) ? { label: placed[0].label } : {}) });
+      // a gate passes on p(label) ≥ 0.5, which is the top pick only between two labels
+      if (from.kind === "route" && kids.length > 2) changed.push(`swaps the top pick for ${passRule(ask, node.pass as ThresholdJson)}`);
       node.then = placed[0]?.node ?? placeholder(taken);
       node.otherwise = placed[1]?.node ?? placeholder(taken);
       notePaths(placed.filter(Boolean).length);
@@ -298,11 +370,15 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
       const tiers = asked.length
         ? asked.reduce<Rec[]>((out, a, i) => {
             const id = keyFor(a.key, out.map((t) => t.id as string), ["fallback"]);
-            out.push({ id, ...(a.title !== undefined ? { title: a.title } : {}), ask: a.q, minConfidence: a.minConfidence ?? (i === 0 ? 0.8 : 0.5), ...call });
+            // the first tier's bar is the old low-confidence bar, so the fallback is taken when it was
+            const bar = a.minConfidence ?? (i === 0 ? (unsure?.below ?? 0.8) : 0.5);
+            out.push({ id, ...(a.title !== undefined ? { title: a.title } : {}), ask: a.q, minConfidence: bar, ...call });
             return out;
           }, [])
         : (fresh().tiers as Rec[]);
       noteQuestions(asked.length);
+      if ((from.kind === "route" || from.kind === "gate") && asked.length > 1) changed.push("lets its other questions settle it before falling back");
+      unsureMargin();
       // the fallback is the not-sure path; without one, the first child fills in
       const [first, ...rest] = kids;
       const fallback = unsure?.node ?? first?.node ?? placeholder(taken);
@@ -310,7 +386,11 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
         if (!isPlaceholder(unsure.node)) kept.push(unsure.edge === "fallback" ? "the fallback" : `the ${unsure.edge === "unsure" ? "unsure path" : "low-confidence path"} (as the fallback)`);
         kids.forEach(dropKid);
       } else {
-        if (first) kept.push(`${from.kind === "gate" ? `the ${first.label} path` : `"${first.label}"`} (as the fallback)`);
+        if (first) {
+          const name = from.kind === "gate" ? `the ${first.label} path` : `“${first.label}”`;
+          kept.push(`${name} (as the fallback)`);
+          changed.push(`runs ${name} only when no tier is sure`);
+        }
         rest.forEach(dropKid);
       }
       return done({ ...meta, tiers, fallback } as NodeJson);
@@ -322,6 +402,9 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
       for (const k of kids) branches[keyFor(k.label, Object.keys(branches))] = k.node;
       if (unsure) branches[keyFor(unsure.edge, Object.keys(branches))] = unsure.node;
       notePaths(Object.keys(branches).length);
+      if (from.kind === "chain") changed.push("runs the steps side by side, not in order");
+      else if (from.kind === "cascade") changed.push("runs the fallback every time");
+      else if (Object.keys(branches).length > 1) changed.push("runs every path instead of one");
       return done({ ...meta, branches } as NodeJson);
     }
 
@@ -329,6 +412,7 @@ export function convertKind(root: NodeJson, path: string, kind: BuilderKind, tak
       // only a parallel gets here (everything else wraps): its branches become the steps, in order
       dropJoin();
       notePaths(kids.length);
+      if (kids.length > 1) changed.push("runs the branches in order, each fed the one before");
       return done({ ...meta, steps: kids.length ? kids.map((k) => k.node) : [placeholder(taken)] } as NodeJson);
     }
 
@@ -353,10 +437,15 @@ export function describeChange(c: KindChange): string {
   const parts: string[] = [];
   if (c.kept.length) parts.push(`keeps ${c.kept.join(", ")}`);
   if (drops.length) parts.push(`drops ${drops.join(", ")}`);
+  parts.push(...c.changed);
   return parts.join(" · ");
 }
 
-/** Whether the change loses anything worth a confirm: a subtree, a question, a join. (A leaf's own value doesn't count; nor does a placeholder.) */
+/**
+ * Whether the change is worth a confirm: it loses a subtree, a question or a
+ * join, or it would route some run differently. (A leaf's own value doesn't
+ * count; nor does a placeholder.)
+ */
 export function losesWork(c: KindChange): boolean {
-  return c.dropped.length > 0;
+  return c.dropped.length > 0 || c.changed.length > 0;
 }

@@ -172,16 +172,30 @@ export function useBuildMode({
                 <span className="font-mono text-ink">{target.node.title || target.node.id}</span> keeps {change.kept.join(", ")}.
               </span>
             )}
-            <span className="block">a {kind} has nowhere to put:</span>
-            <ul className="mb-2 space-y-0.5 font-mono text-[12px] text-ink">
-              {change.dropped.map((d) => (
-                <li key={d.what}>
-                  − {d.what}
-                  {d.nodes > 0 && <span className="text-ink-3"> ({count(d.nodes, "node")})</span>}
-                </li>
-              ))}
-            </ul>
-            undo brings {change.dropped.length === 1 ? "it" : "them"} back.
+            {change.dropped.length > 0 && (
+              <>
+                <span className="block">a {kind} has nowhere to put:</span>
+                <ul className="mb-2 space-y-0.5 font-mono text-[12px] text-ink">
+                  {change.dropped.map((d) => (
+                    <li key={d.what}>
+                      − {d.what}
+                      {d.nodes > 0 && <span className="text-ink-3"> ({count(d.nodes, "node")})</span>}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {change.changed.length > 0 && (
+              <>
+                <span className="block">as a {kind}, it {change.dropped.length > 0 ? "also " : ""}picks its path differently. it:</span>
+                <ul className="mb-2 space-y-0.5 font-mono text-[12px] text-ink">
+                  {change.changed.map((c) => (
+                    <li key={c}>≠ {c}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            undo puts it back as it was.
           </>
         ),
         confirmLabel: nodes ? `drop ${count(nodes, "node")}` : `make it a ${kind}`,
