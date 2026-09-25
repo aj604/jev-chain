@@ -5,17 +5,21 @@
  * If the whole template is a single hole (`"{{input.chat}}"`) the raw value is
  * returned, so objects and arrays survive as structured state.
  *
- * A hole's root must be `input`, `run` or `results`. `chainIssues` checks that
- * (and that `results.<id>` names a node that has finished by then) before a run;
- * a hole that still comes up empty at runtime is reported through `onMissing`.
+ * A hole's root must be `input`, `run`, `results` or `answers`. `chainIssues`
+ * checks that (and that `results.<id>` names a node that has finished by then,
+ * and `answers.<id>.<key>` a question that has been answered) before a run; a
+ * hole that still comes up empty at runtime is reported through `onMissing`.
  */
 import type { Json } from "./questions";
 
 const HOLE = /\{\{\s*([\w$.-]+)\s*\}\}/g;
 const WHOLE = /^\{\{\s*([\w$.-]+)\s*\}\}$/;
 
-/** What a template can read: the node's input, the run's input, and finished nodes' outputs by id. */
-export const TEMPLATE_ROOTS = ["input", "run", "results"] as const;
+/**
+ * What a template can read: the node's input, the run's input, finished nodes'
+ * outputs by id, and Jev's answers by node id (set as soon as a call returns).
+ */
+export const TEMPLATE_ROOTS = ["input", "run", "results", "answers"] as const;
 
 /** Called with a hole's path when there's nothing there, e.g. `"input.mesage"`. An explicit `null` isn't missing. */
 export type OnMissing = (path: string) => void;

@@ -149,6 +149,8 @@ class Runner {
   private trace: Trace | undefined;
   private t0 = 0;
   private readonly results: Record<string, unknown> = {};
+  /** Jev's answers by node id, set as each call returns (see `StepContext.answers`). */
+  private readonly answers: Record<string, Record<string, Answer>> = {};
   private readonly controller = new AbortController();
   private runInput: unknown;
   private callSeq = 0;
@@ -287,7 +289,7 @@ class Runner {
   // --- helpers ---------------------------------------------------------------
 
   private scope(input: unknown) {
-    return { input, run: this.runInput, results: this.results };
+    return { input, run: this.runInput, results: this.results, answers: this.answers };
   }
 
   /** Notes an empty template hole on the span, so a blank state or emit isn't a mystery. */
@@ -305,6 +307,7 @@ class Runner {
     return {
       runInput: this.runInput,
       results: this.results,
+      answers: this.answers,
       signal,
       jev: boundTo(this.opts.jev, signal),
       log: (message, data) => this.emit({ type: "log", path, log: { at: this.now(), message, ...(data !== undefined ? { data } : {}) } }),
@@ -365,12 +368,14 @@ class Runner {
 
   private async execAsk(node: AskNode, input: unknown, path: string, signal: AbortSignal) {
     const r = await this.callJev(path, this.resolveState(node.state, input, path), node.questions, node.model, signal);
+    this.answers[node.id] = r.answers as Record<string, Answer>;
     return r.answers;
   }
 
   private async execRoute(node: RouteNode, input: unknown, path: string, signal: AbortSignal) {
     const questions = { [DECISION_KEY]: node.ask, ...node.alsoAsk };
     const r = await this.callJev(path, this.resolveState(node.state, input, path), questions, node.model, signal);
+    this.answers[node.id] = r.answers as Record<string, Answer>;
     const answer = r.answers[DECISION_KEY] as Answer & { type: "choice" };
     const low = node.lowConfidence && answer.confidence < node.lowConfidence.below;
     const taken = low ? "lowConfidence" : answer.choice;
@@ -394,6 +399,7 @@ class Runner {
   private async execGate(node: GateNode, input: unknown, path: string, signal: AbortSignal) {
     const questions = { [DECISION_KEY]: node.ask, ...node.alsoAsk };
     const r = await this.callJev(path, this.resolveState(node.state, input, path), questions, node.model, signal);
+    this.answers[node.id] = r.answers as Record<string, Answer>;
     const answer = r.answers[DECISION_KEY] as Answer;
     const { value, metric } = gateValue(answer, node.pass.label);
     const { min, max } = node.pass;
@@ -471,6 +477,8 @@ class Runner {
     for (const [i, tier] of node.tiers.entries()) {
       const r = await this.callJev(path, this.resolveState(tier.state, input, path), { [DECISION_KEY]: tier.ask }, tier.model, signal, tier.id);
       const answer = r.answers[DECISION_KEY] as Answer;
+      // Tiers accumulate; the first starts fresh, in case this cascade (by id) already ran.
+      this.answers[node.id] = { ...(i === 0 ? {} : this.answers[node.id]), [tier.id]: answer };
       const confidence = confidenceOf(answer);
       edges[i] = { edge: tier.id, value: confidence, taken: confidence >= tier.minConfidence };
       if (confidence >= tier.minConfidence) {
