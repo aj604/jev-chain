@@ -11,7 +11,7 @@ import { Inspector, type WhatIfControl } from "@/components/trace/inspector";
 import { RunSummary } from "@/components/trace/run-summary";
 import { Timeline } from "@/components/trace/timeline";
 import { TraceGraph, type TraceGraphProps } from "@/components/trace/trace-graph";
-import { WhyPanel } from "@/components/trace/why-panel";
+import { WhyPanel, type ReaskControl } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import type { ResolvedChain } from "@/lib/trace/chain-source";
 import type { RunIssue } from "@/lib/trace/run-error";
@@ -60,6 +60,8 @@ export interface WorkbenchProps {
    * trace, `aside` replaces the story / inspector and `summary` the run strip.
    */
   sweep?: { traffic: Traffic; aside: ReactNode; summary: ReactNode };
+  /** "Ask again" for run a: shown in its story and inspector (see `lib/trace/reask`). */
+  reask?: ReaskControl;
 }
 
 const TIMELINE_MIN = 72;
@@ -89,6 +91,7 @@ export function Workbench({
   onWhatIf,
   onUndoWhatIf,
   sweep,
+  reask,
 }: WorkbenchProps) {
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
@@ -270,9 +273,9 @@ export function Workbench({
         {comparing && target === "diff" && !selected ? (
           <CompareSummary a={trace} b={compare.trace} onSelect={select} canFork={Boolean(onWhatIf)} onUndo={onUndoWhatIf} />
         ) : selected ? (
-          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} root={chain.node} />
+          <Inspector graph={graph} trace={focusTrace} selected={selected} onSelect={select} whatIf={whatIf} root={chain.node} {...(reask && !showB ? { reask } : {})} />
         ) : (
-          <WhyPanel trace={focusTrace} issue={focusIssue} onSelect={select} issueAction={showB ? issueActionB : issueAction} />
+          <WhyPanel trace={focusTrace} issue={focusIssue} onSelect={select} issueAction={showB ? issueActionB : issueAction} {...(reask && !showB ? { reask } : {})} />
         )}
         </>
         )}

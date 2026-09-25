@@ -17,6 +17,10 @@
  * Pass `root` (the chain the trace ran on) and a decision also says how close
  * the call was: the nearest road it didn't take, and how far Jev's number
  * would have had to move to take it (see `lib/trace/margin`).
+ *
+ * Pass `reask` (the same input asked again) and a decision also says whether
+ * every ask took the same road, and how far Jev's number moved between them
+ * (see `lib/trace/reask`).
  */
 import type { ReactNode } from "react";
 import { spanAt, type AnyNode, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
@@ -25,10 +29,12 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "@/lib/trace/format";
 import { closestFlip, flipText } from "@/lib/trace/margin";
+import type { Steadiness } from "@/lib/trace/reask";
 import { edgeName, WHAT_IF_MODEL, type ForcedDecision } from "@/lib/trace/what-if";
 import { Distribution } from "./distribution";
 import { JsonView } from "./json-view";
 import { KindTag, StateMark, type AnyState } from "./kinds";
+import { SteadyLine } from "./why-panel";
 
 const DECISION_KEY = "decision";
 
@@ -49,10 +55,12 @@ export interface InspectorProps {
   whatIf?: WhatIfControl;
   /** The chain the trace ran on, for "how close was the call?". */
   root?: AnyNode;
+  /** The run asked again (see `lib/trace/reask`): did this decision hold, and open an ask that didn't. */
+  reask?: { steadiness?: Steadiness[]; open: (index: number) => void };
   className?: string;
 }
 
-export function Inspector({ graph, trace, selected, onSelect, whatIf, root, className }: InspectorProps) {
+export function Inspector({ graph, trace, selected, onSelect, whatIf, root, reask, className }: InspectorProps) {
   const vertex = graph.vertices.find((v) => v.id === selected);
   const spanPath = vertex?.spanPath ?? selected;
   const span = trace ? spanAt(trace, spanPath) : undefined;
@@ -124,6 +132,8 @@ export function Inspector({ graph, trace, selected, onSelect, whatIf, root, clas
               stacked={(whatIf?.forks ?? []).some((f) => f.path !== span.path)}
               forkable={whatIf?.edges(span.path) ?? []}
               closest={root && vertex?.kind !== "tier" ? closestFlipText(root, span) : undefined}
+              steady={vertex?.kind !== "tier" ? reask?.steadiness?.find((s) => s.path === span.path) : undefined}
+              onOpenReask={reask?.open}
               onWhatIf={whatIf ? (edge) => whatIf.run(span.path, edge) : undefined}
             />
           )}
@@ -233,6 +243,8 @@ function DecisionSection({
   stacked,
   forkable,
   closest,
+  steady,
+  onOpenReask,
   onWhatIf,
 }: {
   decision: Decision;
@@ -245,6 +257,9 @@ function DecisionSection({
   forkable: string[];
   /** How close the call was, as a sentence. */
   closest?: string;
+  /** This decision across the same input asked again. */
+  steady?: Steadiness;
+  onOpenReask?: (index: number) => void;
   onWhatIf?: (edge: string) => void;
 }) {
   const threshold = fmtThreshold(decision.threshold);
@@ -289,6 +304,17 @@ function DecisionSection({
         <p className="mt-2 border-(length:--bw) border-dashed border-dim px-2 py-1 text-[12px] leading-snug text-ink-2">
           <span className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">closest call</span> · {closest}
         </p>
+      )}
+      {steady && (
+        <div className={cn("mt-2 border-(length:--bw) border-dashed px-2 py-1", steady.verdict === "held" ? "border-dim" : "border-warn")}>
+          <span className="font-mono text-[10px] tracking-[0.12em] text-ink-3 uppercase">asked again</span>
+          <SteadyLine steady={steady} {...(onOpenReask ? { onOpen: onOpenReask } : {})} className="mt-0.5" />
+          {steady.moved && (
+            <p className="mt-0.5 font-mono text-[10px] text-ink-3 tabular-nums">
+              {steady.flip?.measure} {fmtNum(steady.moved.min)}–{fmtNum(steady.moved.max)} over {steady.moved.n} asks
+            </p>
+          )}
+        </div>
       )}
       {forced && (
         <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-ink-3">

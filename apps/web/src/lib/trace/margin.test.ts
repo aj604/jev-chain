@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { cascade, choice, createJev, emit, gate, noul, route, score, spanAt, tier, type AnyNode, type Answer, type JevClient, type Json, type Question, type Trace } from "jevchain";
 import { examples } from "jevchain-examples";
-import { closestFlip, flipsOf, flipText, fmtBy, type Flip } from "./margin";
+import { closestFlip, flipsOf, flipText, fmtBy, measuredAt, type Flip } from "./margin";
 import { rehearsalClient } from "./rehearsal";
 import { closeCallsAt, runSweep, type SweepRow } from "./sweep";
 import { whatIfClient } from "./what-if";
@@ -416,7 +416,7 @@ function randomRoute(r: () => number): Case {
 describe("flipsOf: a seeded random sweep against the runtime", () => {
   it("every flip happens at its boundary and never short of it, and nothing nearer flips", async () => {
     const r = prng(20260925);
-    const stats = { cases: 0, flips: 0, probes: 0 };
+    const stats = { cases: 0, flips: 0, probes: 0, measured: 0 };
     const decide = async (root: AnyNode, answers: Record<string, Answer | Answer[]>) => spanAt(await runWith(root, answers), "$")!.decision!;
     for (let n = 0; n < 2400; n++) {
       const c = n % 3 === 0 ? randomGate(r) : n % 3 === 1 ? randomCascade(r) : randomRoute(r);
@@ -435,6 +435,13 @@ describe("flipsOf: a seeded random sweep against the runtime", () => {
         stats.flips++;
         const dim = c.dimOf(flip)!;
         const w = `${where} flip ${JSON.stringify(flip)}`;
+        // measuredAt reads the very number this flip moves: here, and on a run where Jev answered only that number differently.
+        expect(measuredAt(c.root, span, flip, road), w).toBeCloseTo(flip.from, 6);
+        // (Fixed points, not r(): the cases this seed draws stay the ones round 5 checked.)
+        for (const x of [dim.lo, dim.hi, snap(dim.lo + (dim.hi - dim.lo) * 0.37, 0.01), flip.to]) {
+          stats.measured++;
+          expect(measuredAt(c.root, spanAt(await runWith(c.root, dim.set(x)), "$"), flip, road), `${w} answered ${x}`).toBeCloseTo(x, 5);
+        }
         // The target is somewhere the number can be...
         expect(flip.to, w).toBeGreaterThanOrEqual(dim.lo);
         expect(flip.to, w).toBeLessThanOrEqual(dim.hi);
@@ -471,7 +478,9 @@ describe("flipsOf: a seeded random sweep against the runtime", () => {
       }
     }
     expect(stats.flips).toBeGreaterThan(stats.cases);
-    console.info(`margin sweep: ${stats.cases} random chains, ${stats.flips} flips checked at and short of the boundary, ${stats.probes} runtime probes for a nearer flip`);
+    console.info(
+      `margin sweep: ${stats.cases} random chains, ${stats.flips} flips checked at and short of the boundary, ${stats.probes} runtime probes for a nearer flip, ${stats.measured} re-answered runs read back by measuredAt`,
+    );
   }, 120_000);
 });
 

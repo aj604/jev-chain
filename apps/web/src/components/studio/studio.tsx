@@ -28,6 +28,10 @@
  * chain one after another (see `lib/trace/sweep`): the graph shows how many
  * inputs went down each road, the panel how each decision split them and
  * which roads none of them reach. Click an input to open its run.
+ *
+ * Ask again (`a`, or from the story) sends run a's input to Jev a few more
+ * times (see `lib/trace/reask`): every decision says whether all the asks
+ * took the same road, and an ask that went elsewhere opens as run b.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -41,6 +45,7 @@ import { Button, ButtonLink } from "@/components/ui/button";
 import { KbdCombo } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useChainRun, useRunClock } from "@/components/trace/use-chain-run";
+import type { ReaskControl } from "@/components/trace/why-panel";
 import { cn } from "@/lib/cn";
 import { useHotkey } from "@/lib/hotkeys";
 import { newDocument } from "@/lib/builder/doc-ops";
@@ -49,6 +54,7 @@ import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type Resolved
 import { parseInput, toEditor } from "@/lib/trace/input";
 import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
+import { finishedReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
 import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
 import type { Fork } from "@/lib/trace/what-if";
@@ -60,6 +66,7 @@ import { IssueActions } from "./issue-actions";
 import { SavedRunsList } from "./saved-runs-list";
 import { SweepPanel, SweepSummary } from "./sweep-panel";
 import { sharePayload, useShare } from "./use-share";
+import { useReask } from "./use-reask";
 import { useSweep } from "./use-sweep";
 import { Workbench, type Target } from "./workbench";
 
@@ -202,7 +209,8 @@ export function Studio(props: StudioProps) {
   const runA = useChainRun({ onFinish: onFinishA });
   const runB = useChainRun({ onFinish: onFinishB });
   const sweep = useSweep();
-  const running = runA.phase === "running" || runB.phase === "running" || sweep.phase === "running";
+  const reask = useReask();
+  const running = runA.phase === "running" || runB.phase === "running" || sweep.phase === "running" || reask.phase === "running";
   const nowA = useRunClock(runA.phase === "running", runA.startedAtPerf, runA.trace?.durationMs);
   const nowB = useRunClock(runB.phase === "running", runB.startedAtPerf, runB.trace?.durationMs);
 
@@ -246,6 +254,7 @@ export function Studio(props: StudioProps) {
     setSelected(null);
     setActiveSavedId(null);
     forgetWhatIfs();
+    reask.reset();
     if (building) {
       // Run what's on the canvas, then watch it in run mode.
       setSource(buildSource);
@@ -256,7 +265,7 @@ export function Studio(props: StudioProps) {
     void runA.start(runnable.node, parsedA.value, { rehearse });
     if (comparing && parsedB.ok) void runB.start(runnable.node, parsedB.value, { rehearse });
     else runB.reset();
-  }, [runnable, parsedA, parsedB, comparing, runA, runB, building, buildSource, builder.doc, source, forgetWhatIfs]);
+  }, [runnable, parsedA, parsedB, comparing, runA, runB, reask, building, buildSource, builder.doc, source, forgetWhatIfs]);
 
   /** Sweep every queued input through the chain on screen. */
   const startSweep = useCallback(
@@ -331,13 +340,15 @@ export function Studio(props: StudioProps) {
     runA.stop();
     runB.stop();
     sweep.stop();
-  }, [runA, runB, sweep]);
+    reask.stop();
+  }, [runA, runB, sweep, reask]);
 
   const switchTo = useCallback(
     (next: ChainSource) => {
       runA.reset();
       runB.reset();
       sweep.reset();
+      reask.reset();
       forgetWhatIfs();
       setSource(next);
       const r = resolveChain(next);
@@ -348,7 +359,7 @@ export function Studio(props: StudioProps) {
       setActiveSavedId(null);
       setTarget("a");
     },
-    [runA, runB, sweep, forgetWhatIfs],
+    [runA, runB, sweep, reask, forgetWhatIfs],
   );
 
   const pickExample = useCallback((slug: string) => switchTo({ kind: "example", slug }), [switchTo]);
@@ -359,6 +370,7 @@ export function Studio(props: StudioProps) {
       builder.open(options);
       runA.reset();
       runB.reset();
+      reask.reset();
       forgetWhatIfs();
       setLastRunDoc(null);
       setSelected(null);
@@ -368,7 +380,7 @@ export function Studio(props: StudioProps) {
       if (first !== undefined) setInputA(toEditor(first));
       setMode("build");
     },
-    [builder, runA, runB, forgetWhatIfs],
+    [builder, runA, runB, reask, forgetWhatIfs],
   );
 
   const loadDoc = useCallback(
@@ -424,6 +436,7 @@ export function Studio(props: StudioProps) {
     (saved: SavedRun) => {
       if (!resolveChain(saved.source).ok) return;
       runB.reset();
+      reask.reset();
       forgetWhatIfs();
       setSource(saved.source);
       if (saved.source.kind === "doc") setCustomDoc(saved.source.doc);
@@ -435,7 +448,7 @@ export function Studio(props: StudioProps) {
       runA.show(saved.trace, saved.input);
       setActiveSavedId(saved.id);
     },
-    [runA, runB, forgetWhatIfs],
+    [runA, runB, reask, forgetWhatIfs],
   );
 
   const resetB = runB.reset;
@@ -467,6 +480,7 @@ export function Studio(props: StudioProps) {
     (row: SweepRow, select?: string) => {
       if (!row.trace) return;
       forgetWhatIfs();
+      reask.reset();
       setInputA(toEditor(row.value));
       setSweeping(false);
       setTarget("a");
@@ -474,10 +488,47 @@ export function Studio(props: StudioProps) {
       setActiveSavedId(null);
       runA.show(row.trace, row.value);
     },
-    [runA, forgetWhatIfs],
+    [runA, reask, forgetWhatIfs],
   );
   const sweepTraces = useMemo(() => finishedTraces(sweep.rows), [sweep.rows]);
   const traffic = useMemo(() => trafficOf(graph, sweepTraces), [graph, sweepTraces]);
+
+  // ── ask again: run a's input, re-sent to jev ───────────────────────────────
+  const reaskOn = reask.phase !== "idle" && reask.base !== undefined && reask.base === runA.trace;
+  const steadiness = useMemo(
+    () => (reaskOn && chain && reask.base && finishedReasks(reask.rows.map((r) => r.trace)).length > 0 ? steadinessOf(chain.node, reask.base, reask.rows.map((r) => r.trace)) : undefined),
+    [reaskOn, chain, reask.base, reask.rows],
+  );
+  const startReask = useCallback(() => {
+    const base = runA.trace;
+    if (!chain || !base || runA.input === undefined || running || reaskBlocker(base)) return;
+    void reask.start(chain.node, base, runA.input);
+  }, [chain, runA.trace, runA.input, running, reask]);
+  /** An ask that went elsewhere → run b, with the a-vs-b diff open on where they parted. */
+  const openReask = useCallback(
+    (index: number) => {
+      const row = reask.rows[index];
+      if (!row?.trace) return;
+      forgetWhatIfs();
+      setSweeping(false);
+      setComparing(true);
+      setInputB(toEditor(row.value));
+      setTarget("diff");
+      setSelected(null);
+      runB.show(row.trace, row.value);
+    },
+    [reask.rows, runB, forgetWhatIfs],
+  );
+  const reaskControl: ReaskControl = {
+    blocker: running && !reaskOn ? "wait for the run to finish" : reaskBlocker(runA.trace),
+    running: reaskOn && reask.phase === "running",
+    done: reaskOn ? reask.rows.filter((r) => r.trace || r.issue).length : 0,
+    total: REASKS,
+    ...(steadiness ? { steadiness } : {}),
+    ...(reaskOn && reask.stoppedBy ? { stoppedBy: reask.stoppedBy } : {}),
+    start: startReask,
+    open: openReask,
+  };
 
   // What's on screen right now, for share / step-through.
   const view = building ? buildView : chain;
@@ -516,6 +567,7 @@ export function Studio(props: StudioProps) {
   useHotkey("r", () => setRehearsing((r) => !r), { description: "toggle rehearsal (made-up answers, no key)", group: "studio", enabled: !running });
   useHotkey("c", toggleCompare, { description: "toggle compare mode", group: "studio", enabled: !building });
   useHotkey("w", toggleSweep, { description: "toggle sweep: run every sample and see where each goes", group: "studio", enabled: !building && !running });
+  useHotkey("a", startReask, { description: `ask again: send run a's input to jev ${REASKS} more times`, group: "studio", enabled: !building && !sweepMode && !running });
   useHotkey("s", doShare, { description: "copy a share link to this run", group: "studio", enabled: !building });
   useHotkey("]", () => setSelected((s) => stepSelection(order, s, 1)), { description: "next visited node", group: "studio", enabled: !building });
   useHotkey("[", () => setSelected((s) => stepSelection(order, s, -1)), { description: "previous visited node", group: "studio", enabled: !building });
@@ -868,7 +920,7 @@ export function Studio(props: StudioProps) {
         rail={rail}
         issueAction={<IssueActions issue={runA.issue} onRetry={run} onRehearse={rehearseNow} />}
         issueActionB={<IssueActions issue={runB.issue} onRetry={retryB} onRehearse={rehearseB} />}
-        {...(building ? {} : { onWhatIf: whatIf, ...(forkedFrom.length > 0 && runB.phase !== "running" ? { onUndoWhatIf: undoWhatIf } : {}) })}
+        {...(building ? {} : { onWhatIf: whatIf, reask: reaskControl, ...(forkedFrom.length > 0 && runB.phase !== "running" ? { onUndoWhatIf: undoWhatIf } : {}) })}
         {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
       />
       {building && build.portals}
