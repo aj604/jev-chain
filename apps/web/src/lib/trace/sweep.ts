@@ -144,14 +144,35 @@ export interface Traffic {
 
 const reached = (s: string | undefined) => s !== undefined && s !== "idle" && s !== "skipped";
 
-/** Count visits per vertex and edge (using the same overlay the graph draws for one trace). */
+/**
+ * The vertices one trace passed through and the edges it took, from the same
+ * overlay the graph draws for a single run, with one correction: the overlay
+ * gives a parallel's join the parallel's final status, so a parallel that
+ * halted or errored in a branch would count as joined. A join only counts when
+ * the parallel finished ok, or every branch did (so a join function that
+ * throws still counts: the branches met). An edge into a join counts only when
+ * the join does.
+ */
+function walked(graph: FlowGraph, trace: Trace): { vertices: Set<string>; edges: Set<string> } {
+  const o = overlayTrace(graph, trace);
+  const vertices = new Set(graph.vertices.filter((v) => reached(o.vertices[v.id]?.state)).map((v) => v.id));
+  for (const v of graph.vertices) {
+    if (v.kind !== "join" || !vertices.has(v.id) || o.vertices[v.id]?.state === "ok") continue;
+    const branches = trace.spans.filter((s) => s.parentPath === v.spanPath);
+    if (branches.length === 0 || branches.some((s) => s.status !== "ok")) vertices.delete(v.id);
+  }
+  const edges = new Set(graph.edges.filter((e) => o.edges[e.id]?.state === "taken" && vertices.has(e.source) && vertices.has(e.target)).map((e) => e.id));
+  return { vertices, edges };
+}
+
+/** Count visits per vertex and edge. */
 export function trafficOf(graph: FlowGraph, traces: readonly Trace[]): Traffic {
   const vertices: Record<string, number> = Object.fromEntries(graph.vertices.map((v) => [v.id, 0]));
   const edges: Record<string, number> = Object.fromEntries(graph.edges.map((e) => [e.id, 0]));
   for (const t of traces) {
-    const o = overlayTrace(graph, t);
-    for (const v of graph.vertices) if (reached(o.vertices[v.id]?.state)) vertices[v.id]!++;
-    for (const e of graph.edges) if (o.edges[e.id]?.state === "taken") edges[e.id]!++;
+    const w = walked(graph, t);
+    for (const id of w.vertices) vertices[id]!++;
+    for (const id of w.edges) edges[id]!++;
   }
   return { total: traces.length, vertices, edges };
 }
@@ -170,7 +191,7 @@ export function trafficOverlay(graph: FlowGraph, traffic: Traffic): GraphOverlay
 
 /** Did this trace pass through vertex `id`? */
 export function visits(graph: FlowGraph, trace: Trace, id: string): boolean {
-  return reached(overlayTrace(graph, trace).vertices[id]?.state);
+  return walked(graph, trace).vertices.has(id);
 }
 
 export interface DecisionTally {
@@ -179,13 +200,13 @@ export interface DecisionTally {
   nodeId: string;
   title: string;
   kind: "route" | "gate" | "cascade";
-  /** How many traces got to this decision. */
-  reached: number;
+  /** How many traces made this decision (an input whose ask errored reached the node but decided nothing). */
+  decided: number;
   /** Every road out of it, with how many traces took it (0 = none did). */
   roads: { edge: string; label: string; count: number }[];
 }
 
-/** How each decision split the traces that reached it, in graph order. Decisions nothing reached are left out. */
+/** How each decision split the traces that made it, in graph order. Decisions nothing made are left out. */
 export function tallyDecisions(graph: FlowGraph, traces: readonly Trace[]): DecisionTally[] {
   const out: DecisionTally[] = [];
   for (const v of graph.vertices) {
@@ -206,7 +227,7 @@ export function tallyDecisions(graph: FlowGraph, traces: readonly Trace[]): Deci
       nodeId: v.nodeId,
       title: v.label,
       kind: v.kind,
-      reached: made.length,
+      decided: made.length,
       roads: keys.map((edge) => ({ edge, label: edgeName(edge), count: made.filter((d) => d.decision.taken === edge).length })),
     });
   }

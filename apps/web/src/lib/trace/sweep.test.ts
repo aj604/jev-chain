@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { chain, choice, decisions, emit, gate, graphOf, JevAuthError, noul, route, type Answer, type JevClient, type Question, type Trace } from "jevchain";
+import {
+  cascade,
+  chain,
+  choice,
+  decisions,
+  emit,
+  gate,
+  graphOf,
+  JevAuthError,
+  noul,
+  parallel,
+  route,
+  step,
+  tier,
+  type AnyNode,
+  type Answer,
+  type FlowGraph,
+  type JevClient,
+  type Json,
+  type Question,
+  type Trace,
+} from "jevchain";
 import { examples } from "jevchain-examples";
 import { rehearsalClient } from "./rehearsal";
 import { MAX_SWEEP, parseSweepLines, routeOf, runSweep, sweepInputs, tallyDecisions, trafficOf, unfinished, unreachedRoads, visits } from "./sweep";
@@ -106,7 +127,7 @@ describe("runSweep + reading it", () => {
     expect(traces.map((t) => t.output)).toEqual(["page", "ticket", "billing", "page", "human"]);
 
     const tallies = tallyDecisions(graph, traces);
-    expect(tallies.map((t) => [t.title, t.reached, Object.fromEntries(t.roads.map((r) => [r.label, r.count]))])).toEqual([
+    expect(tallies.map((t) => [t.title, t.decided, Object.fromEntries(t.roads.map((r) => [r.label, r.count]))])).toEqual([
       ["triage", 5, { bug: 3, billing: 1, other: 0, unsure: 1 }],
       ["urgent", 3, { then: 2, otherwise: 1 }],
     ]);
@@ -147,8 +168,8 @@ describe("runSweep + reading it", () => {
       expect(traffic.vertices[g.entry]).toBe(ex.inputs.length);
       for (const t of tallyDecisions(g, traces)) {
         const made = traces.flatMap((tr) => decisions(tr).filter((d) => d.path === t.path));
-        expect(t.reached).toBe(made.length);
-        expect(t.roads.reduce((n, r) => n + r.count, 0)).toBe(t.reached);
+        expect(t.decided).toBe(made.length);
+        expect(t.roads.reduce((n, r) => n + r.count, 0)).toBe(t.decided);
         for (const r of t.roads) expect(r.count).toBe(made.filter((d) => d.decision.taken === r.edge).length);
       }
       for (const road of unreachedRoads(g, traffic)) {
@@ -189,5 +210,140 @@ describe("runSweep + reading it", () => {
       { signal: ac.signal, onRow: (i) => i === 0 && ac.abort() },
     );
     expect(rows.map((r) => r.trace?.status)).toEqual(["ok", undefined, undefined]);
+  });
+});
+
+/**
+ * Traffic tallied by hand from the spans, without the graph overlay: a node
+ * counts when its span exists, a tier when it made a call, a halt when its gate
+ * halted, a join when the parallel finished ok or every branch under it did.
+ * An edge counts when both its ends do (and, for a road a decision picks, when
+ * it picked that one). A decision counts when its span decided.
+ */
+function handTally(graph: FlowGraph, traces: readonly Trace[]) {
+  const vertices: Record<string, number> = {};
+  const edges: Record<string, number> = {};
+  const decided: Record<string, number> = {};
+  for (const t of traces) {
+    const hit = new Set<string>();
+    for (const v of graph.vertices) {
+      const span = t.spans.find((s) => s.path === v.spanPath);
+      const kids = t.spans.filter((s) => s.parentPath === v.spanPath);
+      const yes =
+        v.kind === "tier"
+          ? Boolean(span?.calls.some((c) => c.tier === v.tier))
+          : v.kind === "halt"
+            ? span?.decision?.taken === "halt"
+            : v.kind === "join"
+              ? Boolean(span) && (span!.status === "ok" || (kids.length > 0 && kids.every((k) => k.status === "ok")))
+              : Boolean(span);
+      if (yes) hit.add(v.id);
+      vertices[v.id] = (vertices[v.id] ?? 0) + (yes ? 1 : 0);
+      if ((v.kind === "route" || v.kind === "gate" || v.kind === "cascade") && span?.decision) decided[v.spanPath] = (decided[v.spanPath] ?? 0) + 1;
+    }
+    for (const e of graph.edges) {
+      // A road a decision picks (not an escalation) also needs that decision to have picked it:
+      // a cascade tier that escalated and the tier that accepted both reach the next node.
+      const by = e.decidedBy;
+      const picked = !by || by.key.startsWith("escalate:") || t.spans.find((s) => s.path === by.spanPath)?.decision?.taken === by.key;
+      edges[e.id] = (edges[e.id] ?? 0) + (hit.has(e.source) && hit.has(e.target) && picked ? 1 : 0);
+    }
+  }
+  return { vertices, edges, decided };
+}
+
+async function expectHandTally(root: AnyNode, inputs: readonly Json[], client: JevClient) {
+  const g = graphOf(root);
+  const { rows } = await runSweep(
+    root,
+    inputs.map((value, i) => ({ label: String(i), value })),
+    client,
+  );
+  const traces = rows.map((r) => r.trace!);
+  const hand = handTally(g, traces);
+  const traffic = trafficOf(g, traces);
+  expect(traffic.vertices).toEqual(hand.vertices);
+  expect(traffic.edges).toEqual(hand.edges);
+  for (const v of g.vertices) expect(traces.filter((t) => visits(g, t, v.id)).length).toBe(hand.vertices[v.id]);
+  const tallies = tallyDecisions(g, traces);
+  for (const t of tallies) expect(t.decided).toBe(hand.decided[t.path]);
+  expect(tallies.map((t) => t.path).sort()).toEqual(Object.keys(hand.decided).sort());
+  return { g, traces, traffic };
+}
+
+describe("traffic agrees with a hand tally of the spans", () => {
+  it("doesn't count a join the parallel never reached (a branch halted)", async () => {
+    const fan = parallel("fan", {
+      branches: {
+        guard: gate("guard", { ask: noul("Shout?"), pass: { min: 0.5 }, then: emit("loud", { id: "loud" }) }),
+        other: emit("other", { id: "other" }),
+      },
+    });
+    const root = chain("halting", fan, emit("after", { id: "after" }));
+    const { g, traces, traffic } = await expectHandTally(root, ["go!", "go"], literal());
+    expect(traces.map((t) => t.status)).toEqual(["ok", "halted"]);
+    const join = g.vertices.find((v) => v.kind === "join")!;
+    expect(traffic.vertices[join.id]).toBe(1);
+    const into = g.edges.filter((e) => e.target === join.id);
+    expect(into).toHaveLength(2);
+    for (const e of into) expect(traffic.edges[e.id]).toBe(1);
+    expect(visits(g, traces[1]!, join.id)).toBe(false);
+    expect(traffic.vertices[g.vertices.find((v) => v.nodeId === "after")!.id]).toBe(1);
+  });
+
+  it("on a chain with every shape: halt, branch error, cancelled sibling, cascade escalation, low confidence, nested chain", async () => {
+    const slow = step("slow", async (_input: unknown, ctx) => {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, 30);
+        ctx.signal.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(ctx.signal.reason ?? new Error("aborted"));
+        });
+      });
+      return "slow";
+    });
+    const root = chain(
+      "kitchen",
+      route("sort", {
+        ask: choice("Which?", ["alpha", "beta", "gamma"]),
+        lowConfidence: { below: 0.5, then: emit("unsure", { id: "shrug" }) },
+        branches: {
+          alpha: parallel("fan", {
+            branches: {
+              guard: gate("guard", { ask: noul("Shout?"), pass: { min: 0.5 }, then: emit("loud", { id: "loud" }) }),
+              boom: step("boom", (input: unknown) => {
+                if (String(input).includes("boom")) throw new Error("boom");
+                return "fine";
+              }),
+              wait: slow,
+            },
+          }),
+          beta: cascade("tiers", {
+            tiers: [tier("t1", { ask: choice("Pet?", ["cat", "dog"]), minConfidence: 0.5 }), tier("t2", { ask: choice("Other?", ["fish", "bird"]), minConfidence: 0.5 })],
+            fallback: emit("nobody", { id: "nobody" }),
+          }),
+          gamma: chain("inner", emit("first", { id: "first" }), emit("second", { id: "second" })),
+        },
+      }),
+      emit("done", { id: "done" }),
+    );
+    const { g, traces, traffic } = await expectHandTally(root, ["alpha!", "alpha", "alpha! boom", "beta fish", "beta cat", "beta", "gamma", "hm"], literal());
+    // The parallel joined once ("alpha!"): not when the guard halted (cancelling "wait"), not when "boom" threw.
+    expect(traces.slice(0, 3).map((t) => t.status)).toEqual(["ok", "halted", "error"]);
+    expect(traffic.vertices[g.vertices.find((v) => v.kind === "join")!.id]).toBe(1);
+    expect(traffic.vertices[g.vertices.find((v) => v.tier === "t2")!.id]).toBe(2);
+    expect(traffic.vertices[g.vertices.find((v) => v.nodeId === "nobody")!.id]).toBe(1);
+    expect(traffic.vertices[g.vertices.find((v) => v.nodeId === "shrug")!.id]).toBe(1);
+    expect(traffic.vertices[g.vertices.find((v) => v.nodeId === "second")!.id]).toBe(1);
+  });
+
+  it("on every example (rehearsal)", async () => {
+    for (const ex of examples) {
+      await expectHandTally(
+        ex.chain,
+        ex.inputs.map((i) => i.value),
+        rehearsalClient({ latencyMs: [0, 0] }),
+      );
+    }
   });
 });

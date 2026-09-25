@@ -117,7 +117,7 @@ export function SweepPanel({ graph, rows, running, rehearsed, stoppedBy, queued,
                   <KindTag kind={t.kind} />
                   <span className="min-w-0 truncate font-mono text-xs text-ink">{t.title}</span>
                   <span className="ml-auto shrink-0 font-mono text-[10px] text-ink-3 tabular-nums">
-                    reached by {t.reached}/{done}
+                    decided for {t.decided}/{done}
                   </span>
                 </button>
                 <ul className="mt-1.5 space-y-1">
@@ -125,7 +125,7 @@ export function SweepPanel({ graph, rows, running, rehearsed, stoppedBy, queued,
                     <li key={r.edge} className="grid grid-cols-[minmax(4.5rem,38%)_1fr_2.5rem] items-center gap-2 font-mono text-[11px]">
                       <span className={cn("truncate", r.count ? "text-ink" : "text-ink-3")}>{r.label}</span>
                       <span className="relative h-2 border-soft bg-surface-2">
-                        <span className="bar-grow absolute inset-y-0 left-0 bg-accent" style={{ width: `${(r.count / Math.max(1, t.reached)) * 100}%` }} />
+                        <span className="bar-grow absolute inset-y-0 left-0 bg-accent" style={{ width: `${(r.count / Math.max(1, t.decided)) * 100}%` }} />
                       </span>
                       <span className={cn("text-right tabular-nums", r.count ? "text-ink" : "text-ink-3")}>{r.count || "none"}</span>
                     </li>
