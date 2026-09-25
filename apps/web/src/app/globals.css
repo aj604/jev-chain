@@ -1,0 +1,377 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   jevchain design tokens
+   Raw, terminal-ish, hard borders, square corners, one hot-pink accent.
+   Every color is written once with light-dark(); `color-scheme` (driven by
+   <html data-theme="light|dark|system">) picks the side. No duplication, and
+   "system" follows the OS live with zero JS.
+   ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: light dark;
+
+  /* surfaces */
+  --paper: light-dark(#fefefe, #111111);
+  --surface: light-dark(#ffffff, #161616);
+  --surface-2: light-dark(#f6f6f4, #1c1c1c);
+
+  /* text */
+  --ink: light-dark(#1e1e1e, #ededed);
+  --ink-2: light-dark(#4a4a4a, #b4b4b4);
+  --ink-3: light-dark(#858585, #7a7a7a);
+
+  /* lines */
+  --line: var(--ink);
+  --line-soft: light-dark(#e5e5e5, #2a2a2a);
+
+  /* accent — hot pink, same in both themes */
+  --accent: #e551ba;
+  --accent-2: #f386a1;
+  --accent-3: #d45bb6;
+  --accent-ink: #1e1e1e; /* text on accent fills */
+  --accent-strong: light-dark(#b8318f, #f07cc9); /* accent as small text: AA on paper */
+  --accent-wash: light-dark(#fdf0f8, #2a1624);
+
+  /* signal */
+  --pass: light-dark(#03aa5c, #2fd285);
+  --pass-wash: light-dark(#e8f7ef, #0f2a1d);
+  --warn: light-dark(#c98a00, #f2b632);
+  --warn-wash: light-dark(#fdf5e1, #2b2210);
+  --fail: light-dark(#d93a3a, #ff6b6b);
+  --fail-wash: light-dark(#fdecec, #2e1414);
+  --dim: light-dark(#c9c9c9, #3a3a3a);
+
+  /* second run in compare mode ("B"); A is the accent */
+  --compare: light-dark(#2563eb, #6ea0ff);
+  --compare-wash: light-dark(#eaf1fe, #121d33);
+
+  /* shape + motion */
+  --bw: 1.2px;
+  --radius: 0px;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 160ms;
+  --dur-slow: 200ms;
+
+  --nav-h: 3.25rem;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-accent-3: var(--accent-3);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-wash: var(--accent-wash);
+  --color-pass: var(--pass);
+  --color-pass-wash: var(--pass-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-fail: var(--fail);
+  --color-fail-wash: var(--fail-wash);
+  --color-dim: var(--dim);
+  --color-compare: var(--compare);
+  --color-compare-wash: var(--compare-wash);
+
+  /* next/font injects --font-geist-* / --font-instrument on <html> */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-display: var(--font-instrument), "Times New Roman", serif;
+
+  --radius-xs: 1px;
+  --radius-sm: 2px;
+
+  --ease-snap: var(--ease-out);
+}
+
+/* ── hard borders: always 1.2px, always ink (or hairline for soft) ───────── */
+@utility border-hard {
+  border: var(--bw) solid var(--line);
+}
+@utility border-hard-t {
+  border-top: var(--bw) solid var(--line);
+}
+@utility border-hard-b {
+  border-bottom: var(--bw) solid var(--line);
+}
+@utility border-hard-l {
+  border-left: var(--bw) solid var(--line);
+}
+@utility border-hard-r {
+  border-right: var(--bw) solid var(--line);
+}
+@utility border-soft {
+  border: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-t {
+  border-top: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-b {
+  border-bottom: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-l {
+  border-left: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-r {
+  border-right: var(--bw) solid var(--line-soft);
+}
+
+/* dotted-grid paper, used sparingly behind heroes / canvases */
+@utility bg-grid {
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in oklab, var(--ink) 18%, transparent) 1px,
+    transparent 0
+  );
+  background-size: 20px 20px;
+}
+
+@layer base {
+  html {
+    background: var(--paper);
+    color: var(--ink);
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    scrollbar-color: var(--dim) transparent;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--paper);
+    color: var(--ink);
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* square everything unless a component explicitly opts out */
+  button,
+  input,
+  select,
+  textarea {
+    border-radius: 0;
+  }
+
+  hr {
+    border: 0;
+    border-top: var(--bw) solid var(--line-soft);
+  }
+
+  dialog::backdrop {
+    background: color-mix(in oklab, var(--paper) 55%, transparent);
+    backdrop-filter: blur(2px);
+  }
+}
+
+/* ── motion ─────────────────────────────────────────────────────────────── */
+
+@keyframes chain-link-fill {
+  0%,
+  12% {
+    fill: var(--chain-empty, transparent);
+    stroke: currentColor;
+  }
+  22%,
+  55% {
+    fill: var(--accent);
+    stroke: var(--ink);
+  }
+  70%,
+  100% {
+    fill: var(--chain-empty, transparent);
+    stroke: currentColor;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.chain-link-anim {
+  animation: chain-link-fill var(--chain-cycle, 1.4s) linear infinite;
+}
+
+.caret {
+  animation: caret 1.1s steps(1) infinite;
+}
+
+/* ── trace graph ────────────────────────────────────────────────────────── */
+
+/* the running node breathes: a hard accent ring that grows and fades */
+@keyframes node-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px color-mix(in oklab, var(--accent) 0%, transparent);
+  }
+}
+.node-running {
+  animation: node-pulse 1.1s var(--ease-out) infinite;
+}
+
+/* marching dashes on an edge whose target is still running */
+@keyframes edge-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+.edge-flow {
+  stroke-dasharray: 6 4;
+  animation: edge-flow 0.6s linear infinite;
+}
+
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+.bar-grow {
+  transform-origin: left;
+  animation: bar-grow var(--dur-slow) var(--ease-out);
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.fade-up {
+  animation: fade-up var(--dur-slow) var(--ease-out) both;
+}
+
+/* React Flow, minus its opinions */
+.trace-flow .react-flow__node {
+  cursor: default;
+}
+.trace-flow .react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+  min-width: 1px;
+  min-height: 1px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+}
+.trace-flow .react-flow__edge-path {
+  transition:
+    stroke var(--dur) var(--ease-out),
+    stroke-width var(--dur) var(--ease-out),
+    opacity var(--dur) var(--ease-out);
+}
+.trace-flow .react-flow__edgelabel-renderer {
+  z-index: 5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* the loading chain holds a calm, static half-fill instead of looping */
+  .chain-link-anim,
+  .node-running,
+  .edge-flow {
+    animation: none !important;
+  }
+  .node-running {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 45%, transparent) !important;
+  }
+  .chain-link-anim[data-rm-fill="true"] {
+    fill: var(--accent) !important;
+    stroke: var(--ink) !important;
+  }
+}
+
+/* React Flow's attribution, kept (as they ask) but dressed to match */
+.trace-flow .react-flow__attribution {
+  background: transparent;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.5;
+}
+.trace-flow .react-flow__attribution a {
+  color: var(--ink-3);
+}
+
+/* ── builder ─────────────────────────────────────────────────────────────── */
+
+/* a flat, square range: hairline track, filled to the value, hard thumb */
+.builder-range {
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+.builder-range::-webkit-slider-runnable-track {
+  height: 4px;
+  background: linear-gradient(to right, var(--accent) var(--pct, 0%), var(--line-soft) var(--pct, 0%));
+  border: var(--bw) solid var(--line-soft);
+}
+.builder-range::-moz-range-track {
+  height: 4px;
+  background: linear-gradient(to right, var(--accent) var(--pct, 0%), var(--line-soft) var(--pct, 0%));
+  border: var(--bw) solid var(--line-soft);
+}
+.builder-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 10px;
+  height: 14px;
+  margin-top: -6px;
+  background: var(--paper);
+  border: var(--bw) solid var(--ink);
+  box-shadow: 1.5px 1.5px 0 0 var(--ink);
+}
+.builder-range::-moz-range-thumb {
+  width: 10px;
+  height: 14px;
+  border-radius: 0;
+  background: var(--paper);
+  border: var(--bw) solid var(--ink);
+  box-shadow: 1.5px 1.5px 0 0 var(--ink);
+}
+.builder-range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

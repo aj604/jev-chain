@@ -1,0 +1,37 @@
+{
+  "name": "jevchain",
+  "version": "0.1.0",
+  "description": "Typed decision graphs for Jev, TypeSafe's classification model.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js",
+        "require": "./dist/index.cjs"
+      }
+    },
+    "main": "./dist/index.cjs",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "files": ["dist", "README.md"],
+  "keywords": ["jev", "typesafe", "classification", "routing", "decision-graph", "trace"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0",
+    "@types/node": "^24.0.0"
+  }
+}
