@@ -358,6 +358,9 @@ class Runner {
       ...(d.threshold ? { threshold: d.threshold } : {}),
       ...(d.confidence !== undefined ? { confidence: d.confidence } : {}),
       ...(d.fallback ? { fallback: true } : {}),
+      ...(d.lowConfidence ? { lowConfidence: { below: d.lowConfidence.below } } : {}),
+      ...(d.unsure ? { unsure: { ...d.unsure } } : {}),
+      ...(d.tierBars ? { tierBars: { ...d.tierBars } } : {}),
       summary: explainDecision(d),
     };
     this.emit({ type: "decision", path, decision });
@@ -389,6 +392,7 @@ class Runner {
       metric: "probability",
       value: answer.probabilities[answer.choice] ?? 0,
       confidence: answer.confidence,
+      ...(node.lowConfidence ? { lowConfidence: { below: node.lowConfidence.below } } : {}),
       ...(low ? { fallback: true, wouldHaveBeen: answer.choice, lowConfidenceBelow: node.lowConfidence!.below } : {}),
     });
     const next = low ? node.lowConfidence!.then : node.branches[taken];
@@ -419,6 +423,10 @@ class Runner {
       if (unsure) unsureBecause = { ...(nearBar ? { margin } : {}), ...(lowConf ? { minConfidence, confidence } : {}) };
     }
     const taken = unsure ? "unsure" : passed ? "then" : node.otherwise ? "otherwise" : "halt";
+    // The unsure triggers as configured, recorded whether or not they fired.
+    const unsureRules = node.unsure
+      ? { ...(node.unsure.margin !== undefined ? { margin: node.unsure.margin } : {}), ...(node.unsure.minConfidence !== undefined ? { minConfidence: node.unsure.minConfidence } : {}) }
+      : undefined;
     const edges = [{ edge: "then", value, taken: taken === "then" }];
     if (node.otherwise) edges.push({ edge: "otherwise", value, taken: taken === "otherwise" });
     if (node.unsure) edges.push({ edge: "unsure", value, taken: taken === "unsure" });
@@ -430,7 +438,9 @@ class Runner {
       metric,
       value,
       threshold,
-      ...(answer.type !== "noul" ? { confidence } : {}),
+      // A noul's confidence is derived; it's only worth recording when a rule compared it.
+      ...(answer.type !== "noul" || unsureRules?.minConfidence !== undefined ? { confidence } : {}),
+      ...(unsureRules ? { unsure: unsureRules } : {}),
       ...(unsureBecause ? { unsureBecause } : {}),
     });
     if (taken === "halt") throw new Halt(path, node.id, decision.summary);

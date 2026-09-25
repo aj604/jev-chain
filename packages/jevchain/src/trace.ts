@@ -66,6 +66,20 @@ export interface Decision {
   summary: string;
   /** True when a low-confidence fallback overrode the obvious answer. */
   fallback?: boolean;
+  /**
+   * Route: the node's `lowConfidence.below` bar, recorded whether or not it
+   * fired, so a reader can see how close `confidence` came to it.
+   */
+  lowConfidence?: { below: number };
+  /**
+   * Gate: the node's `unsure` triggers, recorded whether or not they fired.
+   * The road changes at `margin` from the bar's nearest edge (see
+   * `nearestEdge`), not at the bar itself. When `minConfidence` is set,
+   * `confidence` is recorded too, noul gates included.
+   */
+  unsure?: { margin?: number; minConfidence?: number };
+  /** Cascade: each tier's `minConfidence`, by tier id. */
+  tierBars?: Record<string, number>;
 }
 
 export interface SpanLog {

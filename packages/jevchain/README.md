@@ -138,6 +138,8 @@ A trace is plain JSON, with a span per node visited:
 
 The numbers are the ones that decided it. A gate on a `min`–`max` window is measured from the edge the value missed or sits closest to, both for its `unsure` margin (just under `max` is as close a call as just over `min`) and in its summary ("over the 0.30–0.70 window by 0.20"). An `unsure` summary says which trigger fired: the margin, or Jev's confidence under `minConfidence`. A cascade that falls back records the last tier's confidence against that tier's bar, and its summary lists what each tier needed.
 
+Decisions also record the rules they were checked against, whether or not those fired: a route's `lowConfidence: { below }`, a gate's `unsure: { margin?, minConfidence? }` (with `confidence`, noul gates included, when `minConfidence` is set), and a cascade's `tierBars`. The summary measures from where the road would change, not just the headline bar: a route that didn't fall back says how far its confidence cleared the low-confidence bar ("confidence 0.46, 0.06 over the 0.40 low-confidence bar"), and a gate with an unsure band measures from the band's edge ("0.89 over the 2.50 bar and clear of its 0.40 unsure margin easily (by 0.49)").
+
 Helpers: `explainTrace`, `diffTraces` (where did two runs diverge?), `graphOf` + `overlayTrace` (draw it).
 
 ### JSON
