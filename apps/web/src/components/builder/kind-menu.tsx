@@ -22,7 +22,7 @@ export const KINDS: { kind: BuilderKind; key: string; blurb: string }[] = [
 ];
 
 /** Swallow keys while a menu is open: letters pick, escape closes. */
-function useMenuKeys(onPick: ((k: BuilderKind) => void) | null, onClose: () => void, extra?: (key: string) => boolean) {
+function useMenuKeys(onPick: ((k: BuilderKind) => void) | null, onClose: () => void, extra?: (key: string, shift: boolean) => boolean) {
   const pick = useRef(onPick);
   const close = useRef(onClose);
   const more = useRef(extra);
@@ -41,7 +41,7 @@ function useMenuKeys(onPick: ((k: BuilderKind) => void) | null, onClose: () => v
         close.current();
         return;
       }
-      if (more.current?.(key)) {
+      if (more.current?.(key, e.shiftKey)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -154,6 +154,7 @@ export function ContextMenu({
   title,
   kind,
   onAdd,
+  onAddBefore,
   onChangeKind,
   actions,
   onClose,
@@ -162,12 +163,13 @@ export function ContextMenu({
   title: ReactNode;
   kind?: BuilderKind;
   onAdd: (k: BuilderKind) => void;
+  onAddBefore: (k: BuilderKind) => void;
   onChangeKind: (k: BuilderKind) => void;
   actions: ContextAction[];
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [sub, setSub] = useState<"add" | "kind" | null>(null);
+  const [sub, setSub] = useState<"add" | "before" | "kind" | null>(null);
   const [pos, setPos] = useState(at);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -181,13 +183,14 @@ export function ContextMenu({
     sub
       ? (k) => {
           if (sub === "add") onAdd(k);
+          else if (sub === "before") onAddBefore(k);
           else if (k !== kind) onChangeKind(k);
         }
       : null,
     () => (sub ? setSub(null) : onClose()),
-    (key) => {
+    (key, shift) => {
       if (sub) return false;
-      if (key === "n") setSub("add");
+      if (key === "n") setSub(shift ? "before" : "add");
       else if (key === "k") setSub("kind");
       else return false;
       return true;
@@ -203,11 +206,18 @@ export function ContextMenu({
           <button type="button" onClick={() => setSub(null)} className="flex w-full items-center gap-1.5 border-soft-b px-3 py-1.5 font-mono text-[10.5px] text-ink-3 hover:text-ink">
             ← back
           </button>
-          <KindList title={sub === "add" ? "add after" : "change kind to"} onPick={sub === "add" ? onAdd : onChangeKind} current={sub === "kind" ? kind : undefined} />
+          <KindList
+            title={sub === "add" ? "add after" : sub === "before" ? "add before" : "change kind to"}
+            onPick={sub === "add" ? onAdd : sub === "before" ? onAddBefore : onChangeKind}
+            current={sub === "kind" ? kind : undefined}
+          />
         </>
       ) : (
         <>
           <div className="truncate border-soft-b px-3 py-1.5 font-mono text-[10.5px] text-ink-3">{title}</div>
+          <button type="button" role="menuitem" className={cn(item, "text-ink hover:bg-surface-2")} onClick={() => setSub("before")}>
+            add node before <span className="flex items-center gap-1.5 text-ink-3"><Kbd>⇧n</Kbd>▸</span>
+          </button>
           <button type="button" role="menuitem" className={cn(item, "text-ink hover:bg-surface-2")} onClick={() => setSub("add")}>
             add node after <span className="flex items-center gap-1.5 text-ink-3"><Kbd>n</Kbd>▸</span>
           </button>

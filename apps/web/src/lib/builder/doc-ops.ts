@@ -297,6 +297,57 @@ export function insertAfterPath(root: NodeJson, path: string, node: NodeJson, ta
   return { root: insertAfter(root, path, node, taken), path: joinPath(path, "1") };
 }
 
+/**
+ * Insert `node` before the one at `path`, and report where it landed: into the
+ * parent chain if there is one, at the front of the target if it's a chain,
+ * else wrap both in a new chain with `node` first. Works on the root too, so
+ * a chain can always grow at the front.
+ */
+export function insertBeforePath(root: NodeJson, path: string, node: NodeJson, taken: Set<string> = allIds(root)): { root: NodeJson; path: string } {
+  const p = parentOf(path);
+  if (p && getAt(root, p.parent)?.kind === "chain") {
+    const i = Number(p.edge);
+    const next = updateAt(root, p.parent, (c) => {
+      const steps = [...(c.steps as NodeJson[])];
+      steps.splice(i, 0, node);
+      return { ...c, steps };
+    });
+    return { root: next, path };
+  }
+  const target = getAt(root, path)!;
+  if (target.kind === "chain") return { root: updateAt(root, path, (c) => ({ ...c, steps: [node, ...(c.steps as NodeJson[])] })), path: joinPath(path, "0") };
+  const id = freshId("chain", taken);
+  return { root: updateAt(root, path, { kind: "chain", id, steps: [node, target] }), path: joinPath(path, "0") };
+}
+
+/** Whether the node at `path` is a chain step that can shift `delta` places and stay in its chain. */
+export function canMove(root: NodeJson, path: string, delta: number): boolean {
+  const p = parentOf(path);
+  const parent = p ? getAt(root, p.parent) : undefined;
+  if (!p || parent?.kind !== "chain") return false;
+  const to = Number(p.edge) + delta;
+  return delta !== 0 && to >= 0 && to < (parent.steps as unknown[]).length;
+}
+
+/**
+ * Move a chain step `delta` places within its chain (-1 = earlier), keeping its
+ * whole subtree. Returns the new root and the step's new path, or null when it
+ * isn't in a chain or would fall off either end.
+ */
+export function moveStep(root: NodeJson, path: string, delta: number): { root: NodeJson; path: string } | null {
+  if (!canMove(root, path, delta)) return null;
+  const p = parentOf(path)!;
+  const from = Number(p.edge);
+  const to = from + delta;
+  const next = updateAt(root, p.parent, (c) => {
+    const steps = [...(c.steps as NodeJson[])];
+    const [step] = steps.splice(from, 1);
+    steps.splice(to, 0, step!);
+    return { ...c, steps };
+  });
+  return { root: next, path: joinPath(p.parent, String(to)) };
+}
+
 /** Number of nodes in the subtree at `node` (1 for a leaf). */
 export function subtreeSize(node: NodeJson): number {
   return 1 + childEdges(node).reduce((n, c) => n + subtreeSize(c.node), 0);
