@@ -117,6 +117,8 @@ A trace is plain JSON, with a span per node visited:
 - the decision, with every candidate edge and its deciding number (taken or not), the threshold, confidence, and a templated plain-English `summary`
 - retries, logs, errors
 
+The numbers are the ones that decided it. A gate on a `min`–`max` window is measured from the edge the value missed or sits closest to, both for its `unsure` margin (just under `max` is as close a call as just over `min`) and in its summary ("over the 0.30–0.70 window by 0.20"). An `unsure` summary says which trigger fired: the margin, or Jev's confidence under `minConfidence`. A cascade that falls back records the last tier's confidence against that tier's bar, and its summary lists what each tier needed.
+
 Helpers: `explainTrace`, `diffTraces` (where did two runs diverge?), `graphOf` + `overlayTrace` (draw it).
 
 ### JSON

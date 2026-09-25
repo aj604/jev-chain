@@ -111,6 +111,43 @@ describe("gate", () => {
     expect(r.trace.spans[0]!.decision!.summary).toMatch(/Too close to call/);
   });
 
+  it("measures the unsure margin from whichever edge of a window the value is next to", async () => {
+    const w = gate("w", {
+      ask: noul("warm?"),
+      pass: { min: 0.3, max: 0.7 },
+      then: emit("eat"),
+      otherwise: emit("wait"),
+      unsure: { margin: 0.05, then: emit("?") },
+    });
+    const at = (noul: number) => jevWith(fakeFetch(() => ({ noul }))).run(w, "x");
+    const ceiling = await at(0.69);
+    expect(ceiling.output).toBe("?");
+    expect(ceiling.trace.spans[0]!.decision!.summary).toBe(
+      'Too close to call: p(yes) = 0.69, 0.01 under the 0.70 ceiling of the 0.30–0.70 window, inside the 0.05 margin, so it took the "unsure" path.',
+    );
+    expect((await at(0.32)).output).toBe("?");
+    expect((await at(0.5)).output).toBe("eat");
+    const over = await at(0.9);
+    expect(over.output).toBe("wait");
+    expect(over.trace.spans[0]!.decision!.summary).toMatch(/over the 0.30–0.70 window comfortably \(by 0.20\)/);
+    expect((await at(0.72)).output).toBe("?"); // just over the ceiling is a close call too
+  });
+
+  it("says when it's unsure because Jev isn't confident, not because the value is close", async () => {
+    const c = gate("c", {
+      ask: choice("?", ["yes", "no"]),
+      pass: { label: "yes", min: 0.2 },
+      then: emit("T"),
+      otherwise: emit("F"),
+      unsure: { margin: 0.05, minConfidence: 0.5, then: emit("?") },
+    });
+    const r = await jevWith(fakeFetch(() => ({ confidence: 0.3 }))).run(c, "x"); // p(yes) = 0.9, far from 0.2
+    expect(r.output).toBe("?");
+    expect(r.trace.spans[0]!.decision!.summary).toBe(
+      'Too unsure to call: p(yes) = 0.90, confidence 0.30 was under the 0.50 minimum, so it took the "unsure" path.',
+    );
+  });
+
   it("measures a choice label's probability", async () => {
     const c = gate("c", { ask: choice("?", ["yes", "no"]), pass: { label: "no", min: 0.5 }, then: emit("T"), otherwise: emit("F") });
     const r = await jevWith(fakeFetch()).run(c, "x"); // "yes" gets 0.9, "no" 0.1
@@ -293,6 +330,22 @@ describe("cascade", () => {
     expect(d.taken).toBe("fallback");
     expect(d.edges.map((e) => e.edge)).toEqual(["quick", "thorough", "fallback"]);
     expect(r.trace.spans[0]!.calls.map((x) => x.tier)).toEqual(["quick", "thorough"]);
+  });
+
+  it("records the number that sent it to the fallback: the last tier's confidence against its bar", async () => {
+    let n = 0;
+    const f = fakeFetch(() => ({ confidence: ++n === 1 ? 0.5 : 0.45 }));
+    const r = await jevWith(f).run(c, { preview: "hi" });
+    const d = r.trace.spans[0]!.decision!;
+    expect(d).toMatchObject({ taken: "fallback", metric: "confidence", value: 0.45, threshold: { min: 0.6 }, confidence: 0.45 });
+    expect(d.edges).toEqual([
+      { edge: "quick", value: 0.5, taken: false },
+      { edge: "thorough", value: 0.45, taken: false },
+      { edge: "fallback", value: null, taken: true },
+    ]);
+    expect(d.summary).toBe(
+      'Escalated past "quick" (0.50, needed 0.80), "thorough" (0.45, needed 0.60); no tier was confident enough, so it handed off to the fallback.',
+    );
   });
 });
 
