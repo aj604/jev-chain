@@ -25,6 +25,10 @@
  *   so the flip says `escalates`); a tier that refused, its bar minus its
  *   confidence.
  *
+ * A flip is only listed when its number can get there: confidence stays in
+ * 0–1 and a gate's value in its question's range, so a bar of 0 (a catch-all
+ * tier, say) is never "escalated" past.
+ *
  * `by` is the distance to the boundary. The rules mix ≥, ≤ and < (a route
  * goes unsure *below* its bar, a gate passes *at* its min), so the call flips
  * at exactly `by` or a hair past it; either way nothing closer flips it.
@@ -109,7 +113,7 @@ function routeFlips(node: RouteNode, span: Span, taken: string): Flip[] {
   const below = node.lowConfidence?.below;
   if (taken === "lowConfidence") {
     // Confident enough and it goes where Jev leaned.
-    if (below === undefined || !(a.choice in node.branches)) return [];
+    if (below === undefined || below > 1 || !(a.choice in node.branches)) return [];
     return [{ edge: a.choice, by: clamp0(below - a.confidence), measure: "confidence", from: a.confidence, to: below, up: true }];
   }
   const lead = a.probabilities[taken] ?? 0;
@@ -151,15 +155,17 @@ function gateFlips(node: GateNode, span: Span, taken: string): Flip[] {
   const EPS = 1e-9;
   for (const t of cuts) {
     if (t < lo || t > hi) continue;
-    const away = Math.sign(t - v);
-    for (const x of away === 0 ? [t, t + EPS, t - EPS] : [t, t + away * EPS]) {
+    // Jev's number on the cut (give or take float error, e.g. 0.5 − 0.8 / 2 = 0.09999…): either side may flip.
+    const onLine = Math.abs(t - v) < EPS;
+    for (const x of onLine ? [t, t + EPS, t - EPS] : [t, t + Math.sign(t - v) * EPS]) {
       if (x < lo || x > hi) continue;
       const edge = edgeAt(x);
       if (edge !== taken) flips.push({ edge, by: Math.abs(t - v), measure, from: v, to: t, up: x > v });
     }
   }
   // Doubt alone sends a choice or score to unsure; confidence up can bring it back.
-  if (a.type !== "noul" && minConf !== undefined) {
+  // Only where confidence can get to: down below a minimum of 0 or up past one over 1 it can't.
+  if (a.type !== "noul" && minConf !== undefined && (a.confidence < minConf ? minConf <= 1 : minConf > 0)) {
     const c = a.confidence;
     const edge = gateEdge(node, { ...a, confidence: c < minConf ? minConf : Math.min(c, minConf - EPS) });
     if (edge !== taken) flips.push({ edge, by: Math.abs(c - minConf), measure: "confidence", from: c, to: minConf, up: c < minConf });
@@ -176,7 +182,8 @@ function cascadeFlips(node: CascadeNode, span: Span, taken: string): Flip[] {
     const measure = `confidence at ${tier.title ?? tier.id}`;
     if (tier.id === taken) {
       const next = node.tiers[i + 1]?.id ?? "fallback";
-      flips.push({ edge: next, by: clamp0(c - tier.minConfidence), measure, from: c, to: tier.minConfidence, up: false, escalates: true });
+      // A bar of 0 can't be refused: confidence never goes below it.
+      if (tier.minConfidence > 0) flips.push({ edge: next, by: clamp0(c - tier.minConfidence), measure, from: c, to: tier.minConfidence, up: false, escalates: true });
       break;
     }
     if (tier.minConfidence <= 1) flips.push({ edge: tier.id, by: clamp0(tier.minConfidence - c), measure, from: c, to: tier.minConfidence, up: true });

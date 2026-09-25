@@ -264,6 +264,217 @@ describe("flipsOf: the runtime flips there and nowhere closer", () => {
   });
 });
 
+describe("flipsOf: numbers on the line, and bars of 0 and 1", () => {
+  it("a yes/no sitting on a cut (as float error puts it) flips at once, whichever side the cut rounds to", async () => {
+    // 0.12 − 0.11 = 0.00999…: p(yes) 0.01 is on the unsure band's edge, and 0.010001 is inside it.
+    const band = gate("band", { ask: noul("Band?"), pass: { min: 0.12, max: 0.18 }, unsure: { margin: 0.11, then: emit("u", { id: "u" }) }, then: emit("t", { id: "t" }), otherwise: emit("o", { id: "o" }) });
+    const t1 = await runWith(band, { "Band?": yes(0.01) });
+    expect(spanAt(t1, "$")!.decision!.taken).toBe("otherwise");
+    expect(closestFlip(band, spanAt(t1, "$"))).toMatchObject({ edge: "unsure", by: 0, up: true });
+    expect(spanAt(await runWith(band, { "Band?": yes(0.010001) }), "$")!.decision!.taken).toBe("unsure");
+
+    // 0.5 − 0.8 / 2 = 0.09999…: p(yes) 0.1 is confidence 0.8 exactly, and 0.100001 is less sure.
+    const sure = gate("sure", { ask: noul("Sure?"), pass: { max: 0.01 }, unsure: { minConfidence: 0.8, then: emit("u", { id: "u" }) }, then: emit("t", { id: "t" }), otherwise: emit("o", { id: "o" }) });
+    const t2 = await runWith(sure, { "Sure?": yes(0.1) });
+    expect(spanAt(t2, "$")!.decision!.taken).toBe("otherwise");
+    expect(brief(flipsOf(sure, spanAt(t2, "$")))).toEqual([
+      ["unsure", 0],
+      ["then", 0.09],
+    ]);
+    expect(spanAt(await runWith(sure, { "Sure?": yes(0.100001) }), "$")!.decision!.taken).toBe("unsure");
+
+    const win = gate("win", { ask: noul("Win?"), pass: { min: 0.53, max: 0.72 }, unsure: { minConfidence: 0.9, then: emit("u", { id: "u" }) }, then: emit("t", { id: "t" }), otherwise: emit("o", { id: "o" }) });
+    const t3 = await runWith(win, { "Win?": yes(0.05) });
+    expect(closestFlip(win, spanAt(t3, "$"))).toMatchObject({ edge: "unsure", by: 0 });
+  });
+
+  it("a bar of 0 can't be dropped below; a bar of 1 can be reached", async () => {
+    const lastResort = cascade("c", {
+      tiers: [tier("quick", { ask: noul("Quick?"), minConfidence: 0.8 }), tier("careful", { ask: choice("Careful?", ["a", "b"]), minConfidence: 0 })],
+      fallback: emit("f", { id: "f" }),
+    });
+    const t = await runWith(lastResort, { "Quick?": yes(0.6), "Careful?": pick({ a: 0.9, b: 0.1 }, 0.8) });
+    expect(spanAt(t, "$")!.decision!.taken).toBe("careful");
+    expect(brief(flipsOf(lastResort, spanAt(t, "$")))).toEqual([["quick", 0.6]]);
+
+    const never = gate("g", { ask: score("How much?", ["a", "b", "c", "d"]), pass: { min: 1 }, unsure: { minConfidence: 0, then: emit("u", { id: "u" }) }, then: emit("t", { id: "t" }), otherwise: emit("o", { id: "o" }) });
+    const g = await runWith(never, { "How much?": scored(2.5, 0.7) });
+    expect(brief(flipsOf(never, spanAt(g, "$")))).toEqual([["otherwise", 1.5]]);
+
+    // A bar of 1 can still be reached from below (confidence 1 accepts).
+    const top = cascade("c", { tiers: [tier("all-in", { ask: noul("All in?"), minConfidence: 1 })], fallback: emit("f", { id: "f" }) });
+    const c = await runWith(top, { "All in?": yes(0.9) });
+    expect(brief(flipsOf(top, spanAt(c, "$")))).toEqual([["all-in", 0.2]]);
+  });
+});
+
+// ── a seeded random sweep: the runtime is the judge ──────────────────────────
+
+/** mulberry32: a small seeded PRNG, so a failure names a reproducible case. */
+function prng(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** One number a flip can move: how to set it, the range it lives in, and where the rule might change. */
+interface Dim {
+  name: string;
+  lo: number;
+  hi: number;
+  now: number;
+  set: (x: number) => Record<string, Answer | Answer[]>;
+  cuts: number[];
+}
+
+interface Case {
+  root: AnyNode;
+  answers: Record<string, Answer | Answer[]>;
+  dims: Dim[];
+  /** The number a flip moves. */
+  dimOf: (flip: Flip) => Dim | undefined;
+}
+
+/** A grid value as someone would type it (0.07, not 0.07000000000000001). */
+const snap = (v: number, step: number) => Number((Math.round(v / step) * step).toFixed(6));
+
+function randomGate(r: () => number): Case {
+  // (A choice gate always measures a label.)
+  const kind = (["noul", "score", "label"] as const)[Math.floor(r() * 3)]!;
+  const hi = kind === "score" ? 3 : 1;
+  const step = kind === "score" ? 0.1 : 0.01;
+  const edgeish = () => (r() < 0.15 ? 0 : r() < 0.15 ? hi : snap(r() * hi, step));
+  const a = edgeish();
+  const b = edgeish();
+  const shape = Math.floor(r() * 3);
+  const pass = shape === 0 ? { min: a } : shape === 1 ? { max: a } : { min: Math.min(a, b), max: Math.max(a, b) };
+  const margin = r() < 0.5 ? snap(r() * 0.3 * hi, step) : undefined;
+  const minConfidence = r() < 0.5 ? (r() < 0.2 ? 0 : r() < 0.2 ? 1 : snap(r(), 0.01)) : undefined;
+  const unsure =
+    margin !== undefined || minConfidence !== undefined
+      ? { ...(margin !== undefined ? { margin } : {}), ...(minConfidence !== undefined ? { minConfidence } : {}), then: emit("u", { id: "u" }) }
+      : undefined;
+  const ask = kind === "noul" ? noul("Q?") : kind === "score" ? score("Q?", ["a", "b", "c", "d"]) : choice("Q?", ["a", "b"]);
+  const root = gate("g", {
+    ask,
+    pass: { ...pass, ...(kind === "label" ? { label: "a" } : {}) },
+    ...(unsure ? { unsure } : {}),
+    then: emit("t", { id: "t" }),
+    ...(r() < 0.8 ? { otherwise: emit("o", { id: "o" }) } : {}),
+  });
+  // The rule's own cuts, computed the way a float would, so Jev's number sometimes lands right on one.
+  const bar = pass.min ?? pass.max;
+  const cuts = [pass.min, pass.max, bar !== undefined && margin !== undefined ? bar - margin : undefined, bar !== undefined && margin !== undefined ? bar + margin : undefined].filter(
+    (x): x is number => x !== undefined,
+  );
+  if (kind === "noul" && minConfidence !== undefined) cuts.push(0.5 - minConfidence / 2, 0.5 + minConfidence / 2);
+  // On a cut: sometimes exactly where the float lands (0.12 − 0.11), sometimes as typed (0.01), a hair off it.
+  const cut = cuts.length ? cuts[Math.floor(r() * cuts.length)]! : 0;
+  const value = Math.min(hi, Math.max(0, r() < 0.4 && cuts.length ? (r() < 0.5 ? cut : snap(cut, step)) : edgeish()));
+  const conf = r() < 0.15 ? 0 : r() < 0.15 ? 1 : minConfidence !== undefined && r() < 0.3 ? minConfidence : snap(r(), 0.01);
+  const make = (v: number, c: number): Answer =>
+    kind === "noul" ? yes(v) : kind === "score" ? scored(v, c) : pick({ a: v, b: 1 - v }, c);
+  const valueDim: Dim = { name: "value", lo: 0, hi, now: value, set: (x) => ({ "Q?": make(x, conf) }), cuts: [...cuts, value] };
+  const confDim: Dim | undefined =
+    kind !== "noul" ? { name: "confidence", lo: 0, hi: 1, now: conf, set: (x) => ({ "Q?": make(value, x) }), cuts: [minConfidence ?? 0.5, conf] } : undefined;
+  return { root, answers: { "Q?": make(value, conf) }, dims: confDim ? [valueDim, confDim] : [valueDim], dimOf: (f) => (f.measure === "confidence" && confDim ? confDim : valueDim) };
+}
+
+function randomCascade(r: () => number): Case {
+  const n = 1 + Math.floor(r() * 3);
+  const bars = Array.from({ length: n }, () => (r() < 0.2 ? 0 : r() < 0.15 ? 1 : snap(r(), 0.01)));
+  const kinds = Array.from({ length: n }, () => (r() < 0.5 ? "noul" : "choice"));
+  const root = cascade("c", {
+    tiers: bars.map((minConfidence, i) => tier(`t${i}`, { ask: kinds[i] === "noul" ? noul(`T${i}?`) : choice(`T${i}?`, ["a", "b"]), minConfidence })),
+    fallback: emit("f", { id: "f" }),
+  });
+  const confs = bars.map((b) => (r() < 0.25 ? b : r() < 0.15 ? 0 : r() < 0.15 ? 1 : snap(r(), 0.01)));
+  const make = (i: number, c: number): Answer => (kinds[i] === "noul" ? yes(0.5 + c / 2) : pick({ a: 0.7, b: 0.3 }, c));
+  const all = (i?: number, x?: number) => Object.fromEntries(confs.map((c, j) => [`T${j}?`, make(j, j === i ? x! : c)]));
+  const dims = confs.map((c, i): Dim => ({ name: `t${i}`, lo: 0, hi: 1, now: c, set: (x) => all(i, x), cuts: [bars[i]!, c] }));
+  return { root, answers: all(), dims, dimOf: (f) => dims[Number(/at t(\d+)/.exec(f.measure)?.[1])] };
+}
+
+function randomRoute(r: () => number): Case {
+  const below = r() < 0.2 ? 0 : r() < 0.2 ? 1 : snap(r(), 0.01);
+  const root = route("r", {
+    ask: choice("R?", ["a", "b", "c"]),
+    lowConfidence: { below, then: emit("h", { id: "h" }) },
+    branches: { a: emit("a", { id: "a" }), b: emit("b", { id: "b" }), c: emit("c", { id: "c" }) },
+  });
+  const c = r() < 0.3 ? below : r() < 0.15 ? 0 : r() < 0.15 ? 1 : snap(r(), 0.01);
+  const probs = { a: 0.5, b: 0.3, c: 0.2 };
+  const dim: Dim = { name: "confidence", lo: 0, hi: 1, now: c, set: (x) => ({ "R?": pick(probs, x) }), cuts: [below, c] };
+  return { root, answers: { "R?": pick(probs, c) }, dims: [dim], dimOf: (f) => (f.measure === "confidence" ? dim : undefined) };
+}
+
+describe("flipsOf: a seeded random sweep against the runtime", () => {
+  it("every flip happens at its boundary and never short of it, and nothing nearer flips", async () => {
+    const r = prng(20260925);
+    const stats = { cases: 0, flips: 0, probes: 0 };
+    const decide = async (root: AnyNode, answers: Record<string, Answer | Answer[]>) => spanAt(await runWith(root, answers), "$")!.decision!;
+    for (let n = 0; n < 2400; n++) {
+      const c = n % 3 === 0 ? randomGate(r) : n % 3 === 1 ? randomCascade(r) : randomRoute(r);
+      const where = `case ${n}: ${JSON.stringify(c.root)} ${JSON.stringify(c.answers)}`;
+      const span = spanAt(await runWith(c.root, c.answers), "$")!;
+      const road = span.decision!.taken;
+      const flips = flipsOf(c.root, span);
+      stats.cases++;
+      // A cascade escalation is judged by the tier it moves: that tier passes the question on.
+      const reaches = async (flip: Flip, dim: Dim, x: number) => {
+        const d = await decide(c.root, dim.set(x));
+        return flip.escalates ? d.edges[c.dims.indexOf(dim)]!.taken === false : d.taken === flip.edge;
+      };
+      for (const [i, flip] of flips.entries()) {
+        if (flip.measure === "lead") continue; // a label's lead isn't one number; tallied by hand above
+        stats.flips++;
+        const dim = c.dimOf(flip)!;
+        const w = `${where} flip ${JSON.stringify(flip)}`;
+        // The target is somewhere the number can be...
+        expect(flip.to, w).toBeGreaterThanOrEqual(dim.lo);
+        expect(flip.to, w).toBeLessThanOrEqual(dim.hi);
+        // ...the runtime takes the road there or a hair past it...
+        let hit = false;
+        for (const x of [flip.to, flip.to + (flip.up ? 1 : -1) * 1e-6]) if (x >= dim.lo && x <= dim.hi && (await reaches(flip, dim, x))) hit = true;
+        expect(hit, w).toBe(true);
+        // ...and not short of it.
+        for (const f of [0.25, 0.5, 0.75, 0.999]) {
+          const x = dim.now + (flip.to - dim.now) * f;
+          if (Math.abs(x - dim.now) >= flip.by - 1e-6) continue;
+          expect(await reaches(flip, dim, x), w).toBe(false);
+          if (i === 0) expect((await decide(c.root, dim.set(x))).taken, w).toBe(road);
+        }
+      }
+      // Nothing nearer: wherever moving one number changes the road, a flip at least that near is listed for it.
+      for (const [k, dim] of c.dims.entries()) {
+        const xs = new Set<number>();
+        for (let j = 0; j <= 100; j++) xs.add(dim.lo + ((dim.hi - dim.lo) * j) / 100);
+        for (const t of dim.cuts) for (const d of [0, 1e-6, -1e-6]) xs.add(t + d);
+        for (const x of xs) {
+          if (x < dim.lo || x > dim.hi) continue;
+          stats.probes++;
+          const d = await decide(c.root, dim.set(x));
+          if (d.taken === road) continue;
+          // A cascade's answering tier moving is an escalation, wherever the next tier then sends it.
+          const escalated = c.root.kind === "cascade" && road === `t${k}`;
+          // Flips keep the nearest move per road, whichever number it is, so any listed one at least this near will do.
+          const listed = flips.find((f) => (escalated ? f.escalates : f.edge === d.taken));
+          const w = `${where} moving ${dim.name} to ${x} goes ${d.taken}; flips ${JSON.stringify(flips)}`;
+          expect(listed, w).toBeDefined();
+          expect(listed!.by, w).toBeLessThanOrEqual(Math.abs(x - dim.now) + 1e-6);
+        }
+      }
+    }
+    expect(stats.flips).toBeGreaterThan(stats.cases);
+    console.info(`margin sweep: ${stats.cases} random chains, ${stats.flips} flips checked at and short of the boundary, ${stats.probes} runtime probes for a nearer flip`);
+  }, 120_000);
+});
+
 // ── sweeps ───────────────────────────────────────────────────────────────────
 
 describe("closeCallsAt", () => {
