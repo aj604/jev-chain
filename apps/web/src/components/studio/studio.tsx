@@ -16,6 +16,10 @@
  * Rehearse (`r`, or `?rehearse=1`) swaps Jev for a local client that makes
  * its answers up (see `lib/trace/rehearsal`): no key, no network, every road
  * still walkable. Those traces are badged as rehearsals wherever they show.
+ *
+ * What if (from any road not taken in the inspector) re-runs run a's input
+ * as run b with that one decision forced the other way (see
+ * `lib/trace/what-if`), and opens the a-vs-b diff.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphOf, handlersOf, type AnyNode, type ChainDocument, type FlowGraph, type Json, type Trace } from "jevchain";
@@ -35,6 +39,7 @@ import { newDocument } from "@/lib/builder/doc-ops";
 import { deleteDraft, renameDraft, type Draft } from "@/lib/builder/drafts";
 import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type ResolvedChain } from "@/lib/trace/chain-source";
 import { parseInput, toEditor } from "@/lib/trace/input";
+import { isRehearsal } from "@/lib/trace/rehearsal";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
 import { ChainPicker } from "./chain-picker";
@@ -217,6 +222,20 @@ export function Studio(props: StudioProps) {
     setRehearsing(true);
     pull(true);
   }, [pull]);
+
+  /** "What if it went the other way?": run a's input again as run b, with one decision forced. */
+  const whatIf = useCallback(
+    (path: string, edge: string) => {
+      const base = runA.trace;
+      if (!chain || !base || base.status === "running" || runA.input === undefined) return;
+      setComparing(true);
+      setInputB(toEditor(runA.input));
+      setTarget("diff");
+      setSelected(null);
+      void runB.start(chain.node, runA.input, { rehearse: rehearsing || isRehearsal(base), whatIf: { trace: base, fork: { path, edge } } });
+    },
+    [chain, runA.trace, runA.input, runB, rehearsing],
+  );
 
   const stop = useCallback(() => {
     runA.stop();
@@ -659,6 +678,7 @@ export function Studio(props: StudioProps) {
         rail={rail}
         issueAction={<IssueActions issue={runA.issue} onRetry={run} onRehearse={rehearseNow} />}
         issueActionB={<IssueActions issue={runB.issue} onRetry={run} onRehearse={rehearseNow} />}
+        {...(building ? {} : { onWhatIf: whatIf })}
         {...(building ? { aside: build.aside, footer: build.footer, canvasOverlay: build.overlay, graphNode: buildRoot, graphProps: build.graphProps } : {})}
       />
       {building && build.portals}

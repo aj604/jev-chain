@@ -11,6 +11,7 @@ import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { cn } from "@/lib/cn";
 import { fmtMs, fmtTokens, fmtUsd } from "@/lib/trace/format";
 import { isRehearsal } from "@/lib/trace/rehearsal";
+import { forkOf } from "@/lib/trace/what-if";
 
 const STATUS: Record<Trace["status"], { tone: BadgeTone; label: string }> = {
   running: { tone: "accent", label: "running" },
@@ -32,6 +33,7 @@ export function RunSummary({ trace, now, label, className }: { trace?: Trace; no
   const s = STATUS[trace.status];
   const u = trace.usage;
   const saved = u.calls - u.requests;
+  const fork = forkOf(trace);
   return (
     <div className={cn("flex h-9 min-w-0 items-center gap-x-4 overflow-x-auto px-3 font-mono text-[11px] whitespace-nowrap text-ink-3", className)} aria-live="polite">
       {label && <span className="text-ink-2">{label}</span>}
@@ -42,6 +44,13 @@ export function RunSummary({ trace, now, label, className }: { trace?: Trace; no
       {isRehearsal(trace) && (
         <span title="jev wasn't asked: every answer came from a hash of the input. the path is real, the judgement isn't.">
           <Badge tone="warn">rehearsal · made-up answers</Badge>
+        </span>
+      )}
+      {fork && (
+        <span title="one decision was forced down a road it didn't take. earlier answers are replayed; only the new road was asked.">
+          <Badge tone="warn">
+            what if · {fork.title ?? fork.nodeId} → {fork.edge === "lowConfidence" ? "unsure" : fork.edge}
+          </Badge>
         </span>
       )}
       <Metric k="time" v={fmtMs(trace.durationMs ?? now)} />
