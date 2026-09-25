@@ -4,7 +4,8 @@
  * Build mode's moving parts, as one hook the Studio plugs into its Workbench:
  * structural actions on the selection (add after, change kind, duplicate,
  * cut / copy / paste, delete), the canvas toolbar and right-click menu, the
- * property editor, the issues strip, the live-code drawer, and their hotkeys.
+ * property editor, the issues strip (with data-flow warnings and their
+ * fixes), the live-code drawer, and their hotkeys.
  *
  * Everything edits through `builder.commit`, so it's all undoable.
  */
@@ -38,6 +39,7 @@ import {
   type NodeJson,
 } from "@/lib/builder/doc-ops";
 import { clipboard, pasteAt, type Clip, type PasteMode } from "@/lib/builder/clipboard";
+import { flowWarnings, inputAt, type FlowFix, type FlowWarning } from "@/lib/builder/data-flow";
 import { issueTarget } from "@/lib/builder/question-ops";
 import { editTarget, selectionAfterRemove, vertexFor } from "@/lib/builder/selection";
 import { CodeDrawer, type JsonDraft } from "./code-drawer";
@@ -263,6 +265,10 @@ export function useBuildMode({
     [target, root, commitRoot],
   );
 
+  // ── data flow ────────────────────────────────────────────────────────────
+  const warnings = useMemo(() => flowWarnings(root), [root]);
+  const applyFix = useCallback((w: FlowWarning, fix: FlowFix) => commitRoot(updateAt(root, w.path, fix.node)), [root, commitRoot]);
+
   const dupOk = Boolean(target && canDuplicate(root, target.path));
   const upOk = Boolean(target && canMove(root, target.path, -1));
   const downOk = Boolean(target && canMove(root, target.path, 1));
@@ -328,6 +334,7 @@ export function useBuildMode({
   const decorations = useMemo(() => {
     const out: Record<string, VertexDecoration> = {};
     const bad = new Set(issues.map((i) => issueTarget(i)).filter(Boolean).map((t) => (t!.tier ? `${t!.path}/${t!.tier}` : t!.path)));
+    const checks = new Set(warnings.map((w) => (w.tier ? `${w.path}/${w.tier}` : w.path)));
     for (const v of graph.vertices) {
       if (v.kind === "halt" || v.kind === "join") continue;
       const node = getAtSafe(root, v.spanPath);
@@ -341,6 +348,10 @@ export function useBuildMode({
         d.noteTone = bound ? "pass" : "warn";
       }
       if (bad.has(v.id)) d.issue = true;
+      else if (!d.note && checks.has(v.id)) {
+        d.note = "check input";
+        d.noteTone = "warn";
+      }
       if (Object.keys(d).length) out[v.id] = d;
     }
     // chain-level issues land on their first step
@@ -350,7 +361,7 @@ export function useBuildMode({
       if (v) out[v] = { ...out[v], issue: true };
     }
     return out;
-  }, [graph, root, handlers, issues]);
+  }, [graph, root, handlers, issues, warnings]);
 
   const graphProps: Pick<TraceGraphProps, "decorations" | "onNodeContextMenu" | "children"> = {
     decorations,
@@ -394,6 +405,7 @@ export function useBuildMode({
         taken={() => allIds(root)}
         onSelect={selectPath}
         confirmRemove={confirmRemove}
+        flow={{ input: inputAt(root, target.path), warnings: warnings.filter((w) => w.path === target.path), onFix: applyFix }}
         actions={
           isPlaceholder(target.node) ? (
             <div className="space-y-2 pt-1">
@@ -476,7 +488,7 @@ export function useBuildMode({
     if (canSaveSample) commit({ ...doc, examples: [...(doc.examples ?? []), sample as Json] });
   }, [canSaveSample, doc, commit, sample]);
 
-  const footer = <IssuesPanel issues={issues} onPick={(path, tier) => selectPath(path, tier)} />;
+  const footer = <IssuesPanel issues={issues} warnings={warnings} onPick={(path, tier) => selectPath(path, tier)} onFix={applyFix} />;
   const applyJson = useCallback(
     (next: ChainDocument) => {
       commit(next);
