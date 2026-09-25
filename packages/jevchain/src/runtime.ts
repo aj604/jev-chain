@@ -271,7 +271,7 @@ class Runner {
   /** Notes an empty template hole on the span, so a blank state or emit isn't a mystery. */
   private onMissing(path: string): OnMissing {
     return (hole) =>
-      this.emit({ type: "log", path, log: { at: this.now(), message: `Template hole "{{${hole}}}" was empty: nothing at ${hole}`, data: { hole } } });
+      this.emit({ type: "log", path, log: { at: this.now(), message: `Template hole "{{${hole}}}" was empty`, data: { hole } } });
   }
 
   private resolveState(spec: StateSpec<unknown> | undefined, input: unknown, path: string): Entry {

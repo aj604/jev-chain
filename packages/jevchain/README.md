@@ -67,6 +67,17 @@ route("r", {
 chain("c", step("n", () => 1), step("s", (x: string) => x)); // ✗ number isn't string
 ```
 
+### Templates
+
+`state` strings and `emit` values are templates: `{{input.x}}` is the node's input, `{{run.x}}` the run's input, `{{results.<id>.x}}` the output of a node that has already finished. A hole that can never fill fails before anything runs, with a `ChainConfigError` (and in `fromJSON`):
+
+```ts
+chain("c", ask("first", { questions }), ask("second", { questions, state: "{{results.frist.x}}" }));
+// ✗ $/1 (ask "second").state: "{{results.frist.x}}" reads results of "frist", but no node has that id (did you mean "first"?)
+```
+
+That covers unknown roots (`{{inptu}}`) and `results.<id>` of a missing id, of an ancestor or the node itself (results are set when a node finishes), of a later step, or of a `parallel` sibling (which may not have finished). A hole that comes up empty at runtime, like `{{input.mesage}}`, renders as `""` and leaves a note on its span's `logs`, so a blank state is never a mystery.
+
 ## Running
 
 ```ts
