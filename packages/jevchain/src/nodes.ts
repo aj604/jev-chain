@@ -117,7 +117,7 @@ export interface GateNode<I = any, O = any> extends JevNode<I, O>, JevCallConfig
   readonly otherwise?: AnyNode;
   /** A third path for "too close to call". */
   readonly unsure?: {
-    /** Unsure when the value is within this distance of the bar. */
+    /** Unsure when the value is within this distance of the bar (for a min–max window, whichever edge it's nearest). */
     readonly margin?: number;
     /** Unsure when Jev's confidence is below this (choice/score) or the noul is this close to 0.5. */
     readonly minConfidence?: number;

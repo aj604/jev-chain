@@ -17,7 +17,7 @@ import {
   serializeError,
   type SerializedError,
 } from "./errors";
-import { explainDecision, type ExplainInput } from "./explain";
+import { explainDecision, nearestEdge, type ExplainInput } from "./explain";
 import {
   childPath,
   ROOT_PATH,
@@ -399,12 +399,18 @@ class Runner {
     const { min, max } = node.pass;
     const passed = (min === undefined || value >= min) && (max === undefined || value <= max);
     const confidence = confidenceOf(answer);
+    const threshold = { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}), ...(node.pass.label ? { label: node.pass.label } : {}) };
     let unsure = false;
+    let unsureBecause: ExplainInput["unsureBecause"];
     if (node.unsure) {
-      const bar = min ?? max;
-      const nearBar = node.unsure.margin !== undefined && bar !== undefined && Math.abs(value - bar) < node.unsure.margin;
-      const lowConf = node.unsure.minConfidence !== undefined && confidence < node.unsure.minConfidence;
+      // Measured against the edge the value is next to: for a min–max window,
+      // a value just under `max` is as close a call as one just over `min`.
+      const edge = nearestEdge(value, threshold);
+      const { margin, minConfidence } = node.unsure;
+      const nearBar = margin !== undefined && edge !== undefined && Math.abs(value - edge.bar) < margin;
+      const lowConf = minConfidence !== undefined && confidence < minConfidence;
       unsure = nearBar || lowConf;
+      if (unsure) unsureBecause = { ...(nearBar ? { margin } : {}), ...(lowConf ? { minConfidence, confidence } : {}) };
     }
     const taken = unsure ? "unsure" : passed ? "then" : node.otherwise ? "otherwise" : "halt";
     const edges = [{ edge: "then", value, taken: taken === "then" }];
@@ -417,8 +423,9 @@ class Runner {
       edges,
       metric,
       value,
-      threshold: { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}), ...(node.pass.label ? { label: node.pass.label } : {}) },
+      threshold,
       ...(answer.type !== "noul" ? { confidence } : {}),
+      ...(unsureBecause ? { unsureBecause } : {}),
     });
     if (taken === "halt") throw new Halt(path, node.id, decision.summary);
     const next = taken === "then" ? node.then : taken === "otherwise" ? node.otherwise! : node.unsure!.then;
@@ -459,18 +466,32 @@ class Runner {
   private async execCascade(node: CascadeNode, input: unknown, path: string, signal: AbortSignal) {
     const edges: Decision["edges"] = node.tiers.map((t) => ({ edge: t.id, value: null, taken: false }));
     edges.push({ edge: "fallback", value: null, taken: false });
+    const tierBars = Object.fromEntries(node.tiers.map((t) => [t.id, t.minConfidence]));
+    let last = { confidence: 0, bar: 0 };
     for (const [i, tier] of node.tiers.entries()) {
       const r = await this.callJev(path, this.resolveState(tier.state, input, path), { [DECISION_KEY]: tier.ask }, tier.model, signal, tier.id);
       const answer = r.answers[DECISION_KEY] as Answer;
       const confidence = confidenceOf(answer);
       edges[i] = { edge: tier.id, value: confidence, taken: confidence >= tier.minConfidence };
       if (confidence >= tier.minConfidence) {
-        this.decide(path, { kind: "cascade", question: DECISION_KEY, taken: tier.id, edges, metric: "confidence", value: confidence, threshold: { min: tier.minConfidence }, confidence });
+        this.decide(path, { kind: "cascade", question: DECISION_KEY, taken: tier.id, edges, metric: "confidence", value: confidence, threshold: { min: tier.minConfidence }, confidence, tierBars });
         return { resolvedBy: "tier", tier: tier.id, answer };
       }
+      last = { confidence, bar: tier.minConfidence };
     }
+    // The number that sent it to the fallback: the last tier's confidence, short of that tier's bar.
     edges[edges.length - 1] = { edge: "fallback", value: null, taken: true };
-    this.decide(path, { kind: "cascade", question: DECISION_KEY, taken: "fallback", edges, metric: "confidence", value: 0 });
+    this.decide(path, {
+      kind: "cascade",
+      question: DECISION_KEY,
+      taken: "fallback",
+      edges,
+      metric: "confidence",
+      value: last.confidence,
+      threshold: { min: last.bar },
+      confidence: last.confidence,
+      tierBars,
+    });
     const output = await this.exec(node.fallback as AnyJevNode, input, childPath(path, "fallback"), path, "fallback", signal);
     return { resolvedBy: "fallback", output };
   }
