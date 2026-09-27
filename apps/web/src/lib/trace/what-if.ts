@@ -224,12 +224,42 @@ export function gateEdge(node: GateNode, answer: Answer): string {
   const passed = (min === undefined || value >= min) && (max === undefined || value <= max);
   let unsure = false;
   if (node.unsure) {
-    const bar = min ?? max;
-    const nearBar = node.unsure.margin !== undefined && bar !== undefined && Math.abs(value - bar) < node.unsure.margin;
+    // Measured against the edge the value is next to (for a min–max window,
+    // whichever it's nearest), strictly, as a decimal: exactly `margin` away is outside.
+    const bar = nearestBar(value, min, max);
+    const nearBar = node.unsure.margin !== undefined && bar !== undefined && distance(value, bar) < node.unsure.margin;
     const lowConf = node.unsure.minConfidence !== undefined && confidenceOf(answer) < node.unsure.minConfidence;
     unsure = nearBar || lowConf;
   }
   return unsure ? "unsure" : passed ? "then" : node.otherwise ? "otherwise" : "halt";
+}
+
+/**
+ * The bar a gate's unsure margin is measured from: the runtime's `nearestEdge`,
+ * restated. The only bar there is, or for a min–max window the edge the value
+ * missed or, inside it, the edge it's closest to.
+ */
+function nearestBar(value: number, min: number | undefined, max: number | undefined): number | undefined {
+  if (min !== undefined && max !== undefined) {
+    if (value < min) return min;
+    if (value > max) return max;
+    return distance(value, min) <= distance(value, max) ? min : max;
+  }
+  return min ?? max;
+}
+
+/**
+ * How far apart two numbers are, as the decimal they differ by: the runtime's
+ * `distance`, restated. Rounded to 12 significant digits so float noise
+ * (0.6 − 0.55 = 0.04999…) doesn't put a value exactly `margin` from a bar
+ * inside the margin.
+ */
+function distance(a: number, b: number): number {
+  const d = Math.abs(a - b);
+  if (!Number.isFinite(d)) return d;
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  const places = Math.min(100, Math.max(0, 12 - Math.ceil(Math.log10(scale))));
+  return Number(d.toFixed(places));
 }
 
 /** Move the gate's value (closest to where Jev put it first) until the gate takes `edge`. */

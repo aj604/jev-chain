@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ask, cascade, chain, choice, emit, fromJSON, gate, noul, parallel, route, run, toJSON, type Entry, type JevClient, type Questions } from "jevchain";
+import { ask, cascade, chain, ChainConfigError, choice, emit, fromJSON, gate, noul, parallel, route, run, toJSON, type Entry, type JevClient, type Questions } from "jevchain";
 import { pasteAt, withUniqueIds } from "./clipboard";
 import { deadReads, flowWarnings, finishedBefore, type FlowWarning } from "./data-flow";
-import { allIds, cloneWithFreshIds, duplicateAt, getAt, moveStep, newDocument, removeAt, renameNode, renameTyped, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
+import { allIds, cloneWithFreshIds, documentIssues, duplicateAt, getAt, moveStep, newDocument, removeAt, renameNode, renameTyped, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
 import { keyProblem } from "./question-ops";
 import { readsIn, withReadsRenamed } from "./reads";
 
@@ -45,6 +45,8 @@ const output = async (root: NodeJson, input: unknown = "my toaster whispers") =>
   return r.status === "ok" ? r.output : r.status;
 };
 
+/** Why jevchain won't load (or run) it: among other things, reads that can only come up empty. */
+const refused = (root: NodeJson) => documentIssues(withRoot(newDocument(), root));
 const asRoot = (node: Parameters<typeof toJSON>[0]) => toJSON(node).root as unknown as NodeJson;
 const dead = (root: NodeJson) => flowWarnings(root).filter((w) => w.rule === "dead-read");
 const fix = (root: NodeJson, w: FlowWarning, i = 0) => updateAt(root, w.fixes[i]!.at ?? w.path, w.fixes[i]!.node);
@@ -64,18 +66,26 @@ const ticket = () =>
   );
 
 describe("renaming a node in the property panel", () => {
-  it("before: changing just the id leaves the reads pointing at a node that's gone; the reply loses its urgency, and the only warning says to delete the ask", async () => {
+  it("before: changing just the id leaves the reads pointing at a node that's gone; jevchain refuses to run it, and the only warning says to delete the ask", async () => {
     const root = ticket();
     expect(await output(root)).toBe("Billing (low urgency)");
     const idOnly = updateAt(root, "$/0", (n) => ({ ...n, id: "urgency-check" }));
-    expect(await output(idOnly)).toBe("Billing ( urgency)");
+    // the reply would lose its urgency ("Billing ( urgency)"), so jevchain won't run it at all
+    await expect(output(idOnly)).rejects.toThrow(ChainConfigError);
+    expect(refused(idOnly)).toEqual([
+      '$/1/billing (emit "to-billing").value: "{{results.triage.urgency.choice}}" reads results of "triage", but no node has that id',
+      '$/1/repair (emit "to-repair").value: "{{results.triage.urgency.choice}}" reads results of "triage", but no node has that id',
+    ]);
     expect(flowWarnings(idOnly).find((w) => w.rule === "unused-output")?.fixes.map((f) => f.label)).toContain("remove this ask");
     // and now it's flagged where the value goes missing, with the node it meant as the fix
     const [a, b] = dead(idOnly);
     expect([a!.path, b!.path]).toEqual(["$/1/billing", "$/1/repair"]);
     expect(a!.message).toBe("{{results.triage.urgency.choice}} is always empty here: no node has the id “triage”");
     expect(a!.fixes.map((f) => f.label)).toEqual(["read ask “urgency-check”"]);
-    expect(await output(fix(idOnly, a!))).toBe("Billing (low urgency)");
+    expect(b!.fixes.map((f) => f.label)).toEqual(["read ask “urgency-check”"]);
+    // the repair branch's read is dead too, and jevchain won't run the chain until both are fixed
+    expect(refused(fix(idOnly, a!))).toEqual([expect.stringMatching(/^\$\/1\/repair /)]);
+    expect(await output(fix(fix(idOnly, a!), b!))).toBe("Billing (low urgency)");
   });
 
   it("renameNode points every read at the new id, so every run ends the same", async () => {
@@ -168,7 +178,7 @@ describe("copies", () => {
     expect(getAt(withUniqueIds(twice, new Set(["a"])), "$/1")!.value).toBe("{{results.a}}");
   });
 
-  it("at runtime, the copy quotes its own ask (before: it quoted the original's, from another branch, and came up empty)", async () => {
+  it("at runtime, the copy quotes its own ask (before: it quoted the original's, from another branch, which can only come up empty, so jevchain refuses it)", async () => {
     const root = asRoot(
       route("r", {
         ask: choice("?", ["second", "first"]),
@@ -178,7 +188,8 @@ describe("copies", () => {
     const pasted = pasteAt(root, "$/second", getAt(root, "$/first")!, "replace").root;
     expect(await output(pasted)).toBe("got yes");
     const stale = updateAt(pasted, "$/second/1", (n) => ({ ...n, value: "got {{results.a.q.choice}}" }));
-    expect(await output(stale)).toBe("got ");
+    await expect(output(stale)).rejects.toThrow(ChainConfigError);
+    expect(refused(stale)).toEqual(['$/second/1 (emit "e-copy").value: "{{results.a.q.choice}}" reads results of "a", which is at $/first/0 and never finishes before this node runs']);
     expect(dead(stale).map((w) => w.message)).toEqual(["{{results.a.q.choice}} is always empty here: “a” can't have run yet: it's on another branch of route “r”, and only one of those runs"]);
   });
 });

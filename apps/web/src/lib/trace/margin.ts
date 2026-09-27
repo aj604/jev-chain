@@ -166,15 +166,19 @@ function gateFlips(node: GateNode, span: Span, taken: string): Flip[] {
   const [lo, hi] = domain(node.ask);
   const v = gateValue(a, label);
   const { min, max } = node.pass;
-  const bar = min ?? max;
   const margin = node.unsure?.margin;
   const minConf = node.unsure?.minConfidence;
-  // Every place the gate's edge can change as the value slides.
+  // Every place the gate's edge can change as the value slides. The unsure
+  // margin is measured from whichever edge the value is nearest, so a min–max
+  // window has a band around each edge.
   const cuts = new Set<number>();
-  for (const b of [min, max]) if (b !== undefined) cuts.add(b);
-  if (bar !== undefined && margin !== undefined) {
-    cuts.add(bar - margin);
-    cuts.add(bar + margin);
+  for (const b of [min, max]) {
+    if (b === undefined) continue;
+    cuts.add(b);
+    if (margin !== undefined) {
+      cuts.add(b - margin);
+      cuts.add(b + margin);
+    }
   }
   // A yes/no's confidence is its distance from 0.5, so the unsure minimum is two more cuts.
   if (a.type === "noul" && minConf !== undefined) {
