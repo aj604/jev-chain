@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ask, cascade, chain, choice, emit, fromJSON, gate, noul, parallel, route, run, score, step, toJSON, type Entry, type JevClient, type Questions } from "jevchain";
 import { examples } from "jevchain-examples";
-import { allIds, childEdges, getAt, insertAfterPath, insertBeforePath, newDocument, renameNode, renameTyped, template, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
+import { allIds, childEdges, documentIssues, getAt, insertAfterPath, insertBeforePath, newDocument, renameNode, renameTyped, template, updateAt, withRoot, type IdEdit, type NodeJson } from "./doc-ops";
 import { keyProblem } from "./question-ops";
 import { canRead, describeShape, flowWarnings, inputAt, inputFields, missingHoles, outputOf, type FlowWarning } from "./data-flow";
 import { mapTemplates, readsIn } from "./reads";
@@ -280,6 +280,14 @@ const unusedIn = (root: NodeJson) => flowWarnings(root).filter((w) => w.rule ===
 const removeFix = (w: FlowWarning) => w.fixes.findIndex((f) => f.label.startsWith("remove"));
 const asRoot = (node: Parameters<typeof toJSON>[0]) => toJSON(node).root as unknown as NodeJson;
 
+/** Why jevchain won't load (or run) it: among other things, a `{{results.<id>}}` hole that can only come up empty. */
+const refused = (root: NodeJson) => documentIssues(withRoot(newDocument(), root));
+const deadIn = (root: NodeJson) => flowWarnings(root).filter((x) => x.rule === "dead-read");
+const holesOf = (w: FlowWarning) => new Set(w.message.match(/\{\{results\.[^}]+\}\}/g)!.map((h) => h.slice(2, -2)));
+/** The chain with every hole it flags as dead taken out (the rest of each template left as is), so jevchain will run it. */
+const withoutDead = (root: NodeJson) =>
+  deadIn(root).reduce((cur, w) => updateAt(cur, w.path, (n) => mapTemplates(n, (text, tier) => (tier === w.tier ? [...holesOf(w)].reduce((t, h) => t.split(`{{${h}}}`).join(""), text) : text))), root);
+
 describe("a step whose output the next step never reads", () => {
   it("is what taking “ask about the run input” leaves behind: the ask's answers go nowhere, and removing it changes nothing", async () => {
     const root = askThenRoute();
@@ -495,7 +503,9 @@ describe("against the real runtime", () => {
     let gates = 0;
     let runs = 0;
     for (let seed = 1; seed <= 300; seed++) {
-      const root = generated(seed);
+      // a rewired read that can only come up empty makes jevchain refuse the whole chain, so those come out first
+      const root = withoutDead(generated(seed));
+      expect(refused(root), `seed ${seed}`).toEqual([]);
       for (const w of unusedIn(root)) {
         flagged++;
         const removed = fix(root, w, removeFix(w));
@@ -592,37 +602,29 @@ describe("{{results.<id>}} reads, against the real runtime", () => {
     return { r, doneAtStart };
   }
 
-  const EMPTY = /«([^»]*)»/g;
-  const probes = (v: unknown) => [...(JSON.stringify(v) ?? "").matchAll(EMPTY)].map((m) => m[1]);
-
-  it("every read it flags renders empty in every run that reaches it; every fix reads a node that has always finished by then", async () => {
+  // jevchain now refuses a chain with a hole that can only come up empty (so these never run to render empty):
+  // what it refuses and what the builder flags have to be the same holes, at the same places
+  it("jevchain refuses every read it flags, and nothing else once those are gone; every fix reads a node that has always finished by then", async () => {
     let flagged = 0;
-    let reached = 0;
+    let refusedToo = 0;
     let fixes = 0;
     let fixedReached = 0;
     for (let seed = 1; seed <= 300; seed++) {
       const root = withReads(seed);
-      for (const w of flowWarnings(root).filter((x) => x.rule === "dead-read")) {
+      const issues = refused(root);
+      for (const w of deadIn(root)) {
         flagged++;
-        const holes = new Set(w.message.match(/\{\{results\.[^}]+\}\}/g)!.map((h) => h.slice(2, -2)));
-        // the probe: each template holding a flagged hole renders just those holes, between «»
-        const probed = updateAt(root, w.path, (n) =>
-          mapTemplates(n, (text, tier) => {
-            if (tier !== w.tier) return text;
-            const mine = [...holes].filter((h) => text.includes(h));
-            return mine.length ? mine.map((h) => `«{{${h}}}»`).join("") : text;
-          }),
-        );
-        for (const input of INPUTS.slice(0, 2))
-          for (const jev of [1, 2]) {
-            const { r } = await traced(probed, input, jev);
-            for (const s of r.trace.spans.filter((x) => x.path === w.path)) {
-              const seen = s.kind === "emit" ? probes(s.output) : s.calls.filter((c) => (c.tier ?? undefined) === w.tier).flatMap((c) => probes(c.state));
-              if (!seen.length) continue;
-              reached++;
-              expect(seen, `seed ${seed}: ${w.path} ${w.message}`).toEqual(seen.map(() => ""));
-            }
-          }
+        const at = `${w.path} (${getAt(root, w.path)!.kind} "${getAt(root, w.path)!.id}")${w.tier !== undefined ? `.tiers.${w.tier}.state` : ""}`;
+        for (const h of holesOf(w)) {
+          expect(
+            issues.some((i) => i.startsWith(at) && i.includes(`: "{{${h}}}" reads results of`)),
+            `seed ${seed}: ${w.path} ${w.message}\n${issues.join("\n")}`,
+          ).toBe(true);
+          refusedToo++;
+        }
+      }
+      expect(refused(withoutDead(root)), `seed ${seed}`).toEqual([]);
+      for (const w of deadIn(root)) {
         for (const f of w.fixes) {
           fixes++;
           const fixed = updateAt(root, f.at ?? w.path, f.node);
@@ -633,9 +635,10 @@ describe("{{results.<id>}} reads, against the real runtime", () => {
           const gone = was.find((y, i) => y.id !== now[i]!.id)!.id;
           const still = flowWarnings(fixed).filter((x) => x.rule === "dead-read" && x.path === w.path && x.tier === w.tier);
           expect(still.some((x) => new RegExp(`\\{\\{results\\.${gone}[.}]`).test(x.message)), `seed ${seed}: fix "${f.label}" at ${w.path} left it dead`).toBe(false);
+          // the holes still flagged (elsewhere, or other ids here) come out so jevchain will run it
           for (const input of INPUTS.slice(0, 2))
             for (const jev of [1, 2]) {
-              const { doneAtStart } = await traced(fixed, input, jev);
+              const { doneAtStart } = await traced(withoutDead(fixed), input, jev);
               for (const d of doneAtStart.get(w.path) ?? []) {
                 fixedReached++;
                 expect(d.has(read), `seed ${seed}: fix "${f.label}" at ${w.path}`).toBe(true);
@@ -645,7 +648,7 @@ describe("{{results.<id>}} reads, against the real runtime", () => {
       }
     }
     expect(flagged).toBeGreaterThan(1000);
-    expect(reached).toBeGreaterThan(2500);
+    expect(refusedToo).toBeGreaterThan(1300);
     expect(fixes).toBeGreaterThan(1500);
     expect(fixedReached).toBeGreaterThan(3500);
   }, 120_000);

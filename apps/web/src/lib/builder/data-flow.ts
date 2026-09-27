@@ -26,8 +26,9 @@
  * A fourth: a `{{results.<id>…}}` hole that can only come up empty, because
  * no node has that id (it was renamed or deleted) or that node can't have
  * finished by the time this one reads it (it encloses this node, comes
- * later, or sits on another branch of a route). jevchain doesn't check these
- * holes, so the fix offers the nodes that are sure to have run already.
+ * later, or sits on another branch of a route). jevchain refuses to load or run
+ * a chain with such a hole (a ChainConfigError), so this one says where it is,
+ * and the fix offers the nodes that are sure to have run already.
  * Anything else (a node that may or may not have run) counts as read, and so
  * does an output code could read through `ctx.results`.
  */
