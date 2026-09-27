@@ -337,7 +337,7 @@ describe("the json tab's gate, against every example mutated every way", () => {
     expect([...kinds].sort()).toEqual(["ask", "cascade", "chain", "emit", "gate", "parallel", "route", "step"]);
     expect(total).toBeGreaterThan(2000);
     expect(failures).toEqual([]);
-  }, 120_000);
+  }, 300_000); // CI runners are ~3x slower than local; this sweep measured ~141s there.
 
   it("refuses nesting too deep to walk, without overflowing the stack", () => {
     const doc = docs[0]!.doc;
