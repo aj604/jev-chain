@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Will It Jev tokens
+   Paper, ink in three strengths, one rule color, and a yes/no pair for
+   verdicts. The dark block follows the system theme; there is no toggle.
+   ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: light;
+
+  --paper: #fbfaf7;
+  --ink: #1b1b1b;
+  --ink-2: #4d4d4d;
+  --ink-3: #8a8a8a;
+  --rule: #dedbd3;
+  --yes: #1f7a4a;
+  --no: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --paper: #121212;
+    --ink: #ececec;
+    --ink-2: #b0b0b0;
+    --ink-3: #767676;
+    --rule: #2c2c2c;
+    --yes: #4cc285;
+    --no: #ff7a70;
+  }
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-rule: var(--rule);
+  --color-yes: var(--yes);
+  --color-no: var(--no);
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+}
