@@ -60,4 +60,10 @@ describe("fakeJev", () => {
     await expect(client.ask("s", { a: noul("A?") })).rejects.toMatchObject({ status: 503 });
     expect(requests).toHaveLength(1);
   });
+
+  it("fails with a given body instead of the default one", async () => {
+    const body = { error: { type: "paused", message: "Paused." } };
+    const { client } = fakeJev(undefined, { status: 503, body });
+    await expect(client.ask("s", { a: noul("A?") })).rejects.toMatchObject({ status: 503, body });
+  });
 });

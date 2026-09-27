@@ -49,17 +49,21 @@ export interface FakeRequest {
   questions: Questions;
 }
 
-/** `status` makes every request fail with that HTTP status. */
+/**
+ * `status` makes every request fail with that HTTP status. `body` replaces
+ * the failure's default body, e.g. to send the proxy's own error shape.
+ */
 export function fakeJev(
   oracle: Oracle = () => undefined,
-  opts: { status?: number } = {},
+  opts: { status?: number; body?: unknown } = {},
 ): { client: JevClient; requests: FakeRequest[] } {
   const requests: FakeRequest[] = [];
   const fetch = (async (_url: string, init?: RequestInit) => {
     const { state, questions } = JSON.parse(String(init?.body)) as FakeRequest;
     requests.push({ state, questions });
     if (opts.status !== undefined && opts.status !== 200) {
-      return json(opts.status, { detail: { error_type: "fake", message: `status ${opts.status}` } });
+      const body = "body" in opts ? opts.body : { detail: { error_type: "fake", message: `status ${opts.status}` } };
+      return json(opts.status, body);
     }
     const answers = Object.fromEntries(
       Object.entries(questions).map(([key, q]) => [key, answerFor(q, oracle(q))]),
