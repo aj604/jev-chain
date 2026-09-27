@@ -103,8 +103,8 @@ export async function encodeBlob(value: unknown): Promise<string> {
  * when the blob is empty, over `MAX_HASH_BYTES`, not base64url, not
  * deflate-raw, inflates past `maxBytes`, or is not UTF-8 JSON.
  *
- * Decompression reads chunk by chunk and stops as soon as the total passes
- * `maxBytes`, so a small blob can't make it inflate megabytes.
+ * Decompression is fed the blob a small slice at a time and stops as soon as
+ * the total passes `maxBytes`, so a small blob can't make it inflate megabytes.
  */
 export async function decodeBlob(encoded: string, maxBytes: number = MAX_PAYLOAD_BYTES): Promise<unknown> {
   if (!encoded || encoded.length > MAX_HASH_BYTES) throw new ShareError();
@@ -122,9 +122,17 @@ export async function decodeBlob(encoded: string, maxBytes: number = MAX_PAYLOAD
   }
 }
 
+/**
+ * How much compressed input the decompressor gets at a time. Some browsers
+ * (Chromium) inflate each input chunk in full whether or not the output is
+ * read, so the input goes in small slices, and only when the decompressor
+ * asks. At deflate's best ratio (about 1032:1) one slice is about 0.5 MB.
+ */
+const INFLATE_SLICE = 512;
+
 /** Inflates deflate-raw `bytes`, throwing once the output passes `maxBytes`. */
 async function inflate(bytes: Uint8Array, maxBytes: number): Promise<Uint8Array> {
-  const reader = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+  const reader = slices(bytes, INFLATE_SLICE).pipeThrough(new DecompressionStream("deflate-raw")).getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
@@ -147,6 +155,20 @@ async function inflate(bytes: Uint8Array, maxBytes: number): Promise<Uint8Array>
     at += chunk.byteLength;
   }
   return out;
+}
+
+/** `bytes` as a stream of `size`-byte slices, each made only when it is pulled. */
+function slices(bytes: Uint8Array, size: number): ReadableStream<BufferSource> {
+  let at = 0;
+  return new ReadableStream<BufferSource>(
+    {
+      pull(controller) {
+        if (at >= bytes.byteLength) controller.close();
+        else controller.enqueue(bytes.subarray(at, (at += size)) as Uint8Array<ArrayBuffer>);
+      },
+    },
+    { highWaterMark: 0 },
+  );
 }
 
 function toBase64Url(bytes: Uint8Array): string {

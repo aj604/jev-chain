@@ -1,3 +1,4 @@
+import { constants as zlibConstants, createInflateRaw } from "node:zlib";
 import { run, type ChainDocument, type Trace } from "jevchain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { tonight } from "@/recipes";
@@ -94,6 +95,8 @@ describe("truncateInput and isTrimmed", () => {
     const atCap = "x".repeat(MAX_SHARED_INPUT);
     expect(truncateInput(atCap)).toBe(atCap);
     expect(isTrimmed("short")).toBe(false);
+    // An ellipsis alone doesn't make an input trimmed: it has to be at the cap.
+    expect(isTrimmed("wait…")).toBe(false);
   });
 
   it("keeps the first 499 characters and adds an ellipsis", () => {
@@ -156,6 +159,8 @@ describe("encodeBlob and decodeBlob", () => {
     /** 8 MB of JSON that deflates to about 8 KB, so it fits under the hash cap. */
     const BOMB_BYTES = 8 * 1024 * 1024;
     const bomb = () => encodeBlob({ v: 1, input: "a".repeat(BOMB_BYTES) });
+    /** The deflate-raw bytes an unpadded base64url blob holds. */
+    const compressedBytes = (blob: string) => Math.floor((blob.length * 3) / 4);
 
     /** Counts the bytes that come out of every DecompressionStream made from now on. */
     function countInflated() {
@@ -206,6 +211,69 @@ describe("encodeBlob and decodeBlob", () => {
       // A chunk or two past the cap, not megabytes.
       expect(inflated.bytes).toBeLessThan(2 * MAX_PAYLOAD_BYTES);
       await expectBadLink(readVerdictPayload(blob));
+    });
+
+    /**
+     * Swaps in a DecompressionStream that inflates each input chunk in full as
+     * soon as it is written, read or not, the way Chromium's does. Node's
+     * respects backpressure, so it can't show this. Counts the bytes fed in
+     * and inflated.
+     */
+    function inflateEagerly() {
+      const counter = { fed: 0, bytes: 0 };
+      class Eager extends TransformStream<BufferSource, Uint8Array> {
+        constructor() {
+          const zlib = createInflateRaw();
+          super(
+            {
+              transform(chunk, controller) {
+                const bytes = ArrayBuffer.isView(chunk)
+                  ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+                  : new Uint8Array(chunk);
+                counter.fed += bytes.byteLength;
+                return new Promise<void>((resolve, reject) => {
+                  const out: Buffer[] = [];
+                  const onData = (data: Buffer) => out.push(data);
+                  zlib.on("data", onData).once("error", reject);
+                  zlib.write(bytes);
+                  zlib.flush(zlibConstants.Z_SYNC_FLUSH, () => {
+                    zlib.off("data", onData).off("error", reject);
+                    for (const data of out) {
+                      counter.bytes += data.byteLength;
+                      controller.enqueue(new Uint8Array(data));
+                    }
+                    resolve();
+                  });
+                });
+              },
+              flush: () => void zlib.close(),
+            },
+            { highWaterMark: 1 },
+            { highWaterMark: 0 },
+          );
+        }
+      }
+      vi.stubGlobal("DecompressionStream", Eager);
+      return counter;
+    }
+
+    it("feeds a decompressor that inflates whatever it gets only a slice of the bomb", async () => {
+      const blob = await bomb();
+      const eager = inflateEagerly();
+      await expectBadLink(decodeBlob(blob));
+      // The 64 KB cap is about 64 compressed bytes of this bomb, and the
+      // decompressor inflates every byte it is fed. It must not be fed it all.
+      expect(eager.fed).toBeGreaterThan(0);
+      expect(eager.fed).toBeLessThan(compressedBytes(blob) / 4);
+      expect(eager.bytes).toBeLessThan(BOMB_BYTES / 4);
+    });
+
+    it("decodes an honest blob through a decompressor that inflates whatever it gets", async () => {
+      const value = { v: 1, text: "x".repeat(40_000), n: Array.from({ length: 2_000 }, (_, i) => i) };
+      const blob = await encodeBlob(value);
+      const eager = inflateEagerly();
+      expect(await decodeBlob(blob)).toEqual(value);
+      expect(eager.fed).toBe(compressedBytes(blob));
     });
   });
 });
@@ -283,14 +351,25 @@ describe("verdictHref and readVerdictPayload", () => {
     expect(recomputed(payload)).toMatchObject({ tier: "jevs", gates: 10, depth: 10 });
   });
 
-  it("slims the hash: no span inputs and no call states", async () => {
-    const { hash } = await share(tonight.recipe, TONIGHT_INPUT, "tonight");
+  it("slims the hash: the trimmed input, no span inputs and no call states", async () => {
+    const long = "Drinks at eight, then the late show at eleven. ".repeat(40);
+    expect(long.length).toBeGreaterThan(MAX_SHARED_INPUT);
+    const { hash } = await share(tonight.recipe, long, "tonight");
     const wire = (await decodeBlob(hash.slice(1))) as { trace: { input: unknown; spans: Record<string, unknown>[] } };
-    expect(wire.trace.input).toBe(TONIGHT_INPUT);
+    expect(wire.trace.input).toBe(truncateInput(long));
+    // The part of the input past the cut is nowhere in the hash.
+    expect(JSON.stringify(wire)).not.toContain(long.slice(499));
     for (const span of wire.trace.spans) {
       expect(span).not.toHaveProperty("input");
       for (const call of span.calls as Record<string, unknown>[]) expect(call).not.toHaveProperty("state");
     }
+  });
+
+  it("restores the trace input from the payload's input, not the trace's own", async () => {
+    const { hash } = await share(tonight.recipe, TONIGHT_INPUT, "tonight");
+    const wire = (await decodeBlob(hash.slice(1))) as Record<string, unknown> & { trace: Record<string, unknown> };
+    const forged = await encodeBlob({ ...wire, trace: { ...wire.trace, input: "forged" } });
+    expect((await readVerdictPayload(forged)).trace.input).toBe(TONIGHT_INPUT);
   });
 
   it("accepts the hash without its #", async () => {
@@ -436,6 +515,18 @@ describe("curatedSlugFor", () => {
     expect(curatedSlugFor(tonight.recipe)).toBe("tonight");
     const { hash } = await share(tonight.recipe, TONIGHT_INPUT);
     expect(curatedSlugFor((await readVerdictPayload(hash)).recipe)).toBe("tonight");
+  });
+
+  it("doesn't care about key order", () => {
+    const reversed = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(reversed)
+        : typeof value === "object" && value !== null
+          ? Object.fromEntries(Object.entries(value).reverse().map(([k, v]) => [k, reversed(v)]))
+          : value;
+    const reordered = reversed(tonight.recipe) as Recipe;
+    expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(tonight.recipe));
+    expect(curatedSlugFor(reordered)).toBe("tonight");
   });
 
   it("is null for anything else", () => {
