@@ -71,6 +71,13 @@ describe("runRecipe", () => {
     expect(run.failure).toBe("paused");
   });
 
+  it("reads the paused error type alone as paused", async () => {
+    const { client } = fakeJev(undefined, { status: 503, body: { error: { type: "paused" } } });
+    const run = await runRecipe(createJev(client), ladder(2), "x");
+    expect(run.result.status).toBe("error");
+    expect(run.failure).toBe("paused");
+  });
+
   it("reads an ordinary 503 as no answer", async () => {
     const { client } = fakeJev(undefined, { status: 503, body: { error: { type: "overloaded", message: "Busy." } } });
     const run = await runRecipe(createJev(client), ladder(2), "x");
