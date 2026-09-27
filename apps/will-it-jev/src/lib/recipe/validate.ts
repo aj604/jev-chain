@@ -31,7 +31,8 @@ export function validateRecipe(raw: unknown): RecipeCheck {
     return { ok: true, recipe: checkRecipe(raw) };
   } catch (error) {
     if (error instanceof RecipeError) return { ok: false, message: error.message };
-    throw error;
+    // A getter or proxy that throws while being read. Bad input, so no throw.
+    return { ok: false, message: "recipe: could not be read" };
   }
 }
 
@@ -140,7 +141,8 @@ class Walk {
       fail(`${path}.questions`, `needs ${range(CAPS.rateQuestions)} questions`);
     }
     this.ask(rawQuestions.length);
-    const questions = rawQuestions.map((q, i) => this.rated(q, `${path}.questions[${i}]`));
+    // Array.from visits holes, which map would skip.
+    const questions = Array.from(rawQuestions, (q, i) => this.rated(q, `${path}.questions[${i}]`));
     const rawVerdicts = raw.verdicts;
     if (!isObject(rawVerdicts)) fail(`${path}.verdicts`, "must be an object");
     const verdicts = {} as Record<Tier, string>;
@@ -183,7 +185,7 @@ class Walk {
       if (rawLevels.length < min || rawLevels.length > max) {
         fail(`${path}.levels`, `needs ${range(CAPS.levels)} levels`);
       }
-      const levels = rawLevels.map((level, i) => text(level, `${path}.levels[${i}]`, CAPS.level));
+      const levels = Array.from(rawLevels, (level, i) => text(level, `${path}.levels[${i}]`, CAPS.level));
       const good = raw.good;
       if (good !== "high" && good !== "low") fail(`${path}.good`, 'must be "high" or "low"');
       return { ...base, kind, levels, good };
@@ -212,6 +214,8 @@ class Walk {
     const labels: Record<string, string> = {};
     for (const [label, description] of entries) {
       if (!LABEL_PATTERN.test(label)) fail(`${path}.${label}`, LABEL_RULE);
+      const issue = toneIssue(label);
+      if (issue) fail(`${path}.${label}`, issue);
       labels[label] = text(description, `${path}.${label}`, CAPS.labelDescription);
     }
     return labels;
@@ -222,6 +226,8 @@ class Walk {
     if (typeof raw !== "string") fail(path, "must be a string");
     const key = raw.trim();
     if (!KEY_PATTERN.test(key)) fail(path, KEY_RULE);
+    const issue = toneIssue(key);
+    if (issue) fail(path, issue);
     if (this.keys.has(key)) fail(path, `"${key}" is used twice`);
     this.keys.add(key);
     return key;

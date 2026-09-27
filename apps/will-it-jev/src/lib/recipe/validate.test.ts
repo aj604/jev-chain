@@ -131,6 +131,28 @@ describe("validateRecipe", () => {
     expect(passes(raw)).toEqual(base());
   });
 
+  describe("hostile input", () => {
+    it("fails instead of throwing when reading a field throws", () => {
+      const boom = () => {
+        throw new Error("boom");
+      };
+      const root = structuredClone(base().root);
+      Object.defineProperty(root, "kind", { get: boom });
+      expect(problem({ ...base(), root })).toBe("recipe: could not be read");
+      expect(problem(new Proxy({}, { get: boom }))).toBe("recipe: could not be read");
+    });
+
+    it("checks the holes in a sparse list", () => {
+      // A hole must fail like a missing entry, not pass through as ok.
+      const questions = [, yesNo("friends", "Are friends coming?", 2, true)];
+      expect(problem(at(`${RATE}.questions`, questions))).toBe(`${RATE}.questions[0]: must be an object`);
+      const levels = [, "fine", "steep"];
+      expect(problem(at(`${RATE}.questions[1].levels`, levels))).toBe(
+        `${RATE}.questions[1].levels[0]: must be a string`,
+      );
+    });
+  });
+
   describe("the envelope", () => {
     it("rejects anything that is not an object", () => {
       for (const raw of [undefined, null, "recipe", 3, [], true]) {
@@ -171,6 +193,12 @@ describe("validateRecipe", () => {
     it("counts a route as a decision", () => {
       const raw = at(TENTH, fan(["a", "b"], () => verdict("jevs", "It jevs.")), ladder(10));
       expect(problem(raw)).toBe(`${TENTH}: ${TOO_DEEP}`);
+    });
+
+    it("adds a route to the depth of the decisions below it", () => {
+      const leaf = verdict("jevs", "It jevs.");
+      const raw = wrap(fan(["a", "b"], (l) => (l === "a" ? chain("g", 10, leaf) : leaf)));
+      expect(problem(raw)).toBe(`root.branches.a${".then".repeat(9)}: ${TOO_DEEP}`);
     });
 
     it("measures each path on its own", () => {
@@ -423,6 +451,7 @@ describe("validateRecipe", () => {
       [`${RATE}.questions[1].levels[0]`, 40],
       ["root.otherwise.line", 140],
       [`${RATE}.verdicts.jevs`, 140],
+      [`${RATE}.verdicts.kinda`, 140],
       [`${RATE}.verdicts.nope`, 140],
     ];
 
@@ -469,6 +498,17 @@ describe("validateRecipe", () => {
       for (const [text, message] of bad) {
         expect(problem(at(path, text)), text).toBe(`${path}: ${message}`);
       }
+    });
+
+    it("holds keys and label names to the tone rule", () => {
+      expect(problem(at("root.then.key", "lol"))).toBe("root.then.key: no lol");
+      expect(problem(at(`${RATE}.questions[0].key`, "lol-q"))).toBe(`${RATE}.questions[0].key: no lol`);
+      const labelled = at("root.then.labels.lmao", "Loud");
+      const raw = at("root.then.branches.lmao", verdict("nope", "It does not jev."), labelled);
+      expect(problem(raw)).toBe("root.then.labels.lmao: no lol");
+      expect(problem(at(`${RATE}.questions[2].labels.lol`, "Far"))).toBe(
+        `${RATE}.questions[2].labels.lol: no lol`,
+      );
     });
 
     it("allows a lone brace", () => {
