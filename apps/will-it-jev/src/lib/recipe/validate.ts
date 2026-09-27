@@ -196,12 +196,14 @@ class Walk {
     if (!Array.isArray(rawGood)) fail(`${path}.good`, "must be a list");
     if (rawGood.length === 0) fail(`${path}.good`, "needs at least one label");
     const good: string[] = [];
-    rawGood.forEach((label, i) => {
+    // Walk by index: forEach would skip holes and let an all-holes list pass empty.
+    for (let i = 0; i < rawGood.length; i++) {
+      const label: unknown = rawGood[i];
       if (typeof label !== "string") fail(`${path}.good[${i}]`, "must be a string");
       const trimmed = label.trim();
       if (!Object.hasOwn(labels, trimmed)) fail(`${path}.good`, `"${trimmed}" is not a label`);
       if (!good.includes(trimmed)) good.push(trimmed);
-    });
+    }
     return { ...base, kind, labels, good };
   }
 

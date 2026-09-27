@@ -150,6 +150,13 @@ describe("validateRecipe", () => {
       expect(problem(at(`${RATE}.questions[1].levels`, levels))).toBe(
         `${RATE}.questions[1].levels[0]: must be a string`,
       );
+      // An all-holes choice good must not pass as an empty list.
+      expect(problem(at(`${RATE}.questions[2].good`, new Array(2)))).toBe(
+        `${RATE}.questions[2].good[0]: must be a string`,
+      );
+      expect(problem(at(`${RATE}.questions[2].good`, [, "home"]))).toBe(
+        `${RATE}.questions[2].good[0]: must be a string`,
+      );
     });
   });
 
