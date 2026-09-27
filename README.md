@@ -62,7 +62,7 @@ pnpm test                                # framework + web unit tests (live API 
 
 ```
 packages/jevchain     the framework (published as `jevchain`): zero dependencies
-packages/examples     five silly chains that each teach a real composition pattern, plus a CLI
+packages/examples     six silly chains that each teach a real composition pattern, plus a CLI
 apps/web              Next.js studio, examples gallery, docs, and the API proxy
 ```
 
@@ -131,6 +131,7 @@ Each one is silly and each one teaches a real composition pattern:
 | [Should I Text Them Back?](packages/examples/src/text-them-back.ts) | cascade: cheap tier → full-context tier → fallback |
 | [Could This Meeting Be An Email?](packages/examples/src/meeting-email.ts) | threshold gate on a score + "unsure" band |
 | [Pull Request Horoscope](packages/examples/src/pr-horoscope.ts) | one multi-question ask + weighted scoring |
+| [Will Your Plan For Tonight Jev?](packages/examples/src/tonight.ts) | deep gate ladder: ten nested gates, only the path taken is asked |
 
 ## Testing
 

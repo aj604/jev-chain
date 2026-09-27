@@ -4,10 +4,11 @@ import { examples } from "jevchain-examples";
 import { ChainDivider, ChainLinks } from "@/components/brand/chain-links";
 import { ChainMapLegend } from "@/components/chain-map/chain-map";
 import { ExampleCard } from "@/components/examples/example-card";
+import { countWord } from "@/lib/count-word";
 
 export const metadata: Metadata = {
   title: "examples",
-  description: "Five silly chains that teach serious patterns: routing, gating, fan-out, cascades and composite scoring.",
+  description: `${countWord(examples.length, { capital: true })} silly chains that teach serious patterns: routing, gating, fan-out, cascades and composite scoring.`,
 };
 
 export default function ExamplesPage() {

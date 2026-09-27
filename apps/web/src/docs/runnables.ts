@@ -1,5 +1,5 @@
 /**
- * Everything a docs page can "run": the five gallery examples plus the small
+ * Everything a docs page can "run": the gallery examples plus the small
  * docs chains. One lookup by id, whichever registry it lives in.
  */
 import type { AnyNode, Json } from "jevchain";

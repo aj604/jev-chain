@@ -1,7 +1,9 @@
+import { examples } from "jevchain-examples";
 import { DocExample } from "@/components/docs/doc-example";
 import { A, C, Callout, Cell, DocPage, H2, Li, List, P, Shell, Snippet, Step, Steps, TwoUp } from "@/components/docs/doc-ui";
 import { Code } from "@/components/ui/code-block";
 import { docMetadata } from "@/docs/nav";
+import { countWord } from "@/lib/count-word";
 
 export const metadata = docMetadata("");
 
@@ -165,7 +167,7 @@ export default function DocsIntroduction() {
           <A href="/docs/traces">Traces</A>: what a run leaves behind, and how to read it.
         </Li>
         <Li>
-          <A href="/examples">The gallery</A>: five silly chains, each teaching one serious pattern.
+          <A href="/examples">The gallery</A>: {countWord(examples.length)} silly chains, each teaching one serious pattern.
         </Li>
       </List>
     </DocPage>
