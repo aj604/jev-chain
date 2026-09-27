@@ -4,6 +4,7 @@
   "packageManager": "pnpm@10.34.1",
   "scripts": {
     "dev": "pnpm --filter web dev",
+    "will-it-jev": "pnpm --filter will-it-jev dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
