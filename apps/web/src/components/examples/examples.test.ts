@@ -488,6 +488,22 @@ const proofs: Record<string, Record<string, Proof>> = {
       },
     },
   },
+
+  tonight: {
+    [LESSON]: {
+      says: ["Ten yes/no questions", "only asked if the gate before it let the night continue"],
+      run: async () => {
+        // A plan that clears every gate asks all ten questions, one request each…
+        const good = await runExample("tonight");
+        expect(good.requests).toHaveLength(10);
+        expect(good.output).toEqual({ tier: "jevs", line: "It jevs. This is a plan, not a night out." });
+        // …and a plan that fails the first gate asks nothing below it.
+        const doomed = await runExample("tonight", by({ "just one drink": { noul: 0.9 } }));
+        expect(doomed.requests).toHaveLength(1);
+        expect(doomed.ran).toEqual(["one-drink", "one-drink-otherwise"]);
+      },
+    },
+  },
 };
 
 describe("every lesson and note in the gallery is proved", () => {
