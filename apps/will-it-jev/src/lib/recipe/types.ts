@@ -100,6 +100,8 @@ export const CAPS = {
   levels: { min: 2, max: 5 },
   rateQuestions: { min: 1, max: 6 },
   key: 32,
+  /** The visitor's text, which a run sends to Jev unchanged as `state`. */
+  input: 2000,
 } as const;
 
 /** Node keys and rated question keys. */
