@@ -1,4 +1,24 @@
-import { toJSON, type ChainDocument, type JevCall, type Json, type Span, type Trace } from "jevchain";
+import {
+  childPath,
+  childrenOf,
+  DECISION_KEY,
+  ROOT_PATH,
+  toJSON,
+  toJsonSafe,
+  TRACE_VERSION,
+  walk,
+  type AnyJevNode,
+  type AnyNode,
+  type ChainDocument,
+  type GateNode,
+  type JevCall,
+  type Json,
+  type Question,
+  type Questions,
+  type RouteNode,
+  type Span,
+  type Trace,
+} from "jevchain";
 import { CURATED, getCurated } from "@/recipes";
 import { COPY } from "./copy";
 import { compileRecipe } from "./recipe/compile";
@@ -245,9 +265,13 @@ function count(value: string | undefined, max: number): number | null {
 // Verdict links
 
 /**
- * The hash's JSON. The trace is slimmed: span inputs and call states are
- * copies of the input (a compiled recipe sets no state), so they are dropped
- * and `restoreTrace` puts them back.
+ * The hash's JSON. The trace is slimmed: everything in it that is a copy of
+ * the input or of the recipe is dropped, and `restoreTrace` puts it back.
+ *
+ * - The input: span inputs and call states (a compiled recipe sets no state).
+ * - The recipe: span titles and call questions, which the compiled node has.
+ * - Outputs: an emit's is its node's value, an ask's is its call's answers,
+ *   and a gate's or route's is its child's. The trace's is the root span's.
  */
 interface WirePayload {
   v: 1;
@@ -256,9 +280,9 @@ interface WirePayload {
   trace: WireTrace;
 }
 
-type WireCall = Omit<JevCall, "state">;
-type WireSpan = Omit<Span, "input" | "calls"> & { calls: WireCall[] };
-type WireTrace = Omit<Trace, "spans"> & { spans: WireSpan[] };
+type WireCall = Omit<JevCall, "state" | "questions">;
+type WireSpan = Omit<Span, "input" | "title" | "output" | "calls"> & { calls: WireCall[] };
+type WireTrace = Omit<Trace, "output" | "spans"> & { spans: WireSpan[] };
 
 /**
  * Everything that makes a hash smaller lives here: the input is truncated
@@ -267,33 +291,59 @@ type WireTrace = Omit<Trace, "spans"> & { spans: WireSpan[] };
 function slimPayload(p: { recipe: Recipe; input: string; trace: Trace }): WirePayload {
   const input = truncateInput(p.input);
   const spans = p.trace.spans.map((span) => ({
-    ...without(span, "input"),
-    calls: span.calls.map((call) => without(call, "state")),
+    ...without(span, "input", "title", "output"),
+    calls: span.calls.map((call) => without(call, "state", "questions")),
   }));
-  return { v: 1, recipe: p.recipe, input, trace: { ...p.trace, input, spans } };
+  return { v: 1, recipe: p.recipe, input, trace: { ...without(p.trace, "output"), input, spans } };
 }
 
-/** A shallow copy of `value` minus `key`. */
-function without<T extends object, K extends keyof T>(value: T, key: K): Omit<T, K> {
+/** A shallow copy of `value` minus `keys`. */
+function without<T extends object, K extends keyof T>(value: T, ...keys: K[]): Omit<T, K> {
   const copy = { ...value };
-  delete copy[key];
+  for (const key of keys) delete copy[key];
   return copy;
 }
 
 /**
- * The inverse of `slimPayload`'s trace slimming: the trace input, every span
- * input and every call state become `input` again. Tolerates junk spans and
- * calls (it leaves them as they are), so it never throws on a decoded trace.
+ * The inverse of `slimPayload`: the trace input, span inputs and call states
+ * become `input`, and titles, call questions and outputs come back from the
+ * compiled chain, the way the jevchain runtime wrote them. Expects a trace
+ * that passed `checkTrace` against `chain`: one ok span per node on one path
+ * from the root, and one call on each span that asks.
  */
-function restoreTrace(trace: WireTrace, input: string): Trace {
-  const spans = trace.spans.map((span) => {
-    if (!isRecord(span)) return span;
-    const calls = Array.isArray(span.calls)
-      ? span.calls.map((call) => (isRecord(call) ? { ...call, state: input } : call))
-      : span.calls;
-    return { ...span, input, calls };
-  });
-  return { ...trace, input, spans } as Trace;
+function restoreTrace(trace: WireTrace, input: string, chain: AnyNode): Trace {
+  const nodes = nodesById(chain);
+  const spans: Span[] = [];
+  // Last span first: a gate's or route's output is its child's.
+  let childOutput: Json | undefined;
+  for (let i = trace.spans.length - 1; i >= 0; i--) {
+    const wire = trace.spans[i]!;
+    const node = nodes.get(wire.nodeId)!;
+    const calls = wire.calls.map((call): JevCall => ({ ...call, state: input, questions: questionsOf(node) }));
+    const output = node.kind === "emit" ? json(node.value) : node.kind === "ask" ? json(calls[0]!.answers) : childOutput!;
+    spans.unshift({ ...wire, ...(node.title ? { title: node.title } : {}), input, output, calls });
+    childOutput = output;
+  }
+  return { ...trace, input, output: childOutput!, spans };
+}
+
+/** The node's own questions, as the runtime sends them. A compiled recipe has no `alsoAsk`. */
+function questionsOf(node: AnyJevNode): Questions {
+  if (node.kind === "ask") return node.questions;
+  if (node.kind === "gate" || node.kind === "route") return { [DECISION_KEY]: node.ask };
+  return {};
+}
+
+/** A trace's copy of `value`: the runtime keeps outputs through `toJsonSafe`. */
+function json(value: unknown): Json {
+  return toJsonSafe(value);
+}
+
+/** Every node in a compiled chain by id. A compiled recipe's ids are unique. */
+function nodesById(chain: AnyNode): Map<string, AnyJevNode> {
+  const nodes = new Map<string, AnyJevNode>();
+  walk(chain, (node) => nodes.set(node.id, node as AnyJevNode));
+  return nodes;
 }
 
 /**
@@ -321,14 +371,22 @@ export async function verdictHref(p: {
  * The steps, in order:
  * 1. `decodeBlob`: size caps, base64url, deflate-raw, JSON.
  * 2. `readWirePayload`: `v`, the input and the recipe.
- * 3. `checkTrace`: the trace's shape.
+ * 3. `checkTrace`: the trace's shape, and that it fits the compiled recipe.
  * 4. `restoreTrace`, then the verdict must recompute from recipe and trace.
  */
 export async function readVerdictPayload(hash: string): Promise<VerdictPayload> {
-  const data = await decodeBlob(hash.startsWith("#") ? hash.slice(1) : hash);
+  return verdictPayloadOf(await decodeBlob(hash.startsWith("#") ? hash.slice(1) : hash));
+}
+
+/**
+ * Steps 2 to 4 of `readVerdictPayload`, on a hash that is already decoded.
+ * Throws `ShareError(COPY.badLink)`.
+ */
+export function verdictPayloadOf(data: unknown): VerdictPayload {
   const { recipe, input, trace: wire } = readWirePayload(data);
-  checkTrace(wire);
-  const trace = restoreTrace(wire, input);
+  const chain = compileRecipe(recipe);
+  checkTrace(wire, chain);
+  const trace = restoreTrace(wire, input, chain);
   if (!verdictOf(recipe, { status: trace.status, output: trace.output, trace })) throw new ShareError();
   return { v: 1, recipe, input, trace };
 }
@@ -342,15 +400,157 @@ function readWirePayload(data: unknown): { recipe: Recipe; input: string; trace:
 }
 
 /**
- * The trace check before the verdict is recomputed. Today it is the minimal
- * shape the studio also asks for: an object with a `spans` array and a
- * string `status`. The full trace shape and whether the trace fits the recipe
- * belong here too (#63).
+ * The trace check before the trace is restored and the verdict recomputed.
+ * It passes what a finished run of `chain` writes, and nothing a run of it
+ * could not have written:
+ *
+ * - Shape: every field the restored trace keeps has its jevchain type, so
+ *   the verdict, the circuit and the studio read what they expect.
+ * - Fit: the spans walk one path down from the root of `chain`, one span per
+ *   node, each on the edge the decision above it took, ending at a leaf. So
+ *   every node is in the chain and every span is reachable from the root.
+ *   Each span has its node's kind. A gate or route has a decision on its own
+ *   edges. A verdict's emit makes no call, and every other span makes one,
+ *   whose answers are exactly its node's questions, each fitting its kind.
+ *
+ * The run must have finished "ok", so every span did too: a compiled recipe
+ * has one path and no fallbacks, so any failure fails the run.
  */
-function checkTrace(trace: unknown): asserts trace is WireTrace {
-  if (!isRecord(trace) || !Array.isArray(trace.spans) || typeof trace.status !== "string") {
-    throw new ShareError();
+function checkTrace(trace: unknown, chain: AnyNode): asserts trace is WireTrace {
+  const t = record(trace);
+  if (t.version !== TRACE_VERSION || t.status !== "ok") throw new ShareError();
+  strings(t, "runId", "chainId", "startedAt");
+  numbers(t, "durationMs");
+  numbers(record(t.usage), "calls", "requests", "inputTokens", "outputTokens", "costUsd");
+  if (!list(t.models).every((model) => typeof model === "string")) throw new ShareError();
+
+  let node: AnyJevNode | undefined = chain as AnyJevNode;
+  let parentPath: string | null = null;
+  let edge: string | null = null;
+  for (const raw of list(t.spans)) {
+    // A span after the leaf.
+    if (!node) throw new ShareError();
+    const span = record(raw);
+    const path: string = parentPath === null ? ROOT_PATH : childPath(parentPath, edge!);
+    if (span.path !== path || span.parentPath !== parentPath || span.edge !== edge) throw new ShareError();
+    if (span.nodeId !== node.id || span.kind !== node.kind || span.status !== "ok") throw new ShareError();
+    numbers(span, "start", "end");
+    records(span.retries);
+    records(span.logs);
+
+    const calls = list(span.calls);
+    if (calls.length !== (node.kind === "emit" ? 0 : 1)) throw new ShareError();
+    for (const call of calls) checkCall(call, questionsOf(node));
+
+    parentPath = path;
+    if (node.kind === "gate" || node.kind === "route") {
+      edge = checkDecision(span.decision, node);
+      node = childrenOf(node).find((child) => child.edge === edge)!.node as AnyJevNode;
+    } else {
+      if (span.decision !== undefined) throw new ShareError();
+      node = undefined;
+    }
   }
+  // No spans, or a path that stops before a leaf.
+  if (node) throw new ShareError();
+}
+
+/** A call's fields, and answers that are exactly `questions`, each fitting its question. */
+function checkCall(raw: unknown, questions: Questions): void {
+  const call = record(raw);
+  strings(call, "id", "model");
+  numbers(call, "inputTokens", "outputTokens", "costUsd", "start", "end", "latencyMs", "attempts");
+  if (call.requestId !== undefined) strings(call, "requestId");
+  if (call.tier !== undefined) strings(call, "tier");
+  if (call.batch !== undefined) numbers(record(call.batch), "size", "questions");
+
+  const answers = record(call.answers);
+  const keys = Object.keys(questions);
+  // Own keys only, so a JSON "__proto__" key counts as an extra answer.
+  if (Object.keys(answers).length !== keys.length) throw new ShareError();
+  for (const key of keys) {
+    if (!Object.hasOwn(answers, key)) throw new ShareError();
+    checkAnswer(answers[key], questions[key]!);
+  }
+}
+
+/**
+ * An answer of the question's kind: a noul from 0 to 1, a choice of one of
+ * its labels with probabilities only for its labels, or a score within its
+ * levels (0 to the top level's index).
+ */
+function checkAnswer(raw: unknown, question: Question): void {
+  const answer = record(raw);
+  if (answer.type !== question.type) throw new ShareError();
+  switch (question.type) {
+    case "noul":
+      if (!within(answer.noul, 0, 1)) throw new ShareError();
+      return;
+    case "score":
+      if (!within(answer.score, 0, question.criteria.length - 1)) throw new ShareError();
+      return;
+    case "choice": {
+      const labels = question.criteria;
+      if (typeof answer.choice !== "string" || !Object.hasOwn(labels, answer.choice)) throw new ShareError();
+      const probabilities = Object.entries(record(answer.probabilities));
+      if (!probabilities.every(([label, p]) => Object.hasOwn(labels, label) && within(p, 0, 1))) throw new ShareError();
+      return;
+    }
+  }
+}
+
+/**
+ * A gate's or route's decision: on its own question, with one edge score per
+ * edge of the node in the node's order, and exactly the taken one marked
+ * taken. Returns the edge taken.
+ */
+function checkDecision(raw: unknown, node: GateNode | RouteNode): string {
+  const decision = record(raw);
+  if (decision.kind !== node.kind || decision.question !== DECISION_KEY) throw new ShareError();
+  strings(decision, "taken", "metric", "summary");
+  numbers(decision, "value");
+  if (decision.confidence !== undefined) numbers(decision, "confidence");
+  if (decision.threshold !== undefined) record(decision.threshold);
+
+  const edges = childrenOf(node).map((child) => child.edge);
+  const scores = list(decision.edges);
+  if (!edges.includes(decision.taken as string) || scores.length !== edges.length) throw new ShareError();
+  scores.forEach((raw, i) => {
+    const score = record(raw);
+    if (score.edge !== edges[i] || score.taken !== (score.edge === decision.taken)) throw new ShareError();
+    if (score.value !== null) numbers(score, "value");
+  });
+  return decision.taken as string;
+}
+
+/** `value` as an object, or a `ShareError`. */
+function record(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new ShareError();
+  return value;
+}
+
+/** `value` as an array, or a `ShareError`. */
+function list(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new ShareError();
+  return value;
+}
+
+/** An array of objects, or a `ShareError`. */
+function records(value: unknown): void {
+  if (!list(value).every(isRecord)) throw new ShareError();
+}
+
+function strings(value: Record<string, unknown>, ...keys: string[]): void {
+  if (!keys.every((key) => typeof value[key] === "string")) throw new ShareError();
+}
+
+/** Finite numbers: JSON can spell Infinity as `1e999`. */
+function numbers(value: Record<string, unknown>, ...keys: string[]): void {
+  if (!keys.every((key) => Number.isFinite(value[key]))) throw new ShareError();
+}
+
+function within(value: unknown, min: number, max: number): boolean {
+  return typeof value === "number" && value >= min && value <= max;
 }
 
 /**
