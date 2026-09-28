@@ -28,7 +28,6 @@ import {
   studioHref,
   truncateInput,
   verdictHref,
-  verdictPayloadOf,
   type VerdictPayload,
 } from "./share";
 
@@ -73,6 +72,32 @@ async function expectBadLink(promise: Promise<unknown>) {
   );
   expect(error).toBeInstanceOf(ShareError);
   expect((error as ShareError).message).toBe(COPY.badLink);
+}
+
+/**
+ * `value`'s JSON, padded with trailing spaces and stored uncompressed in one
+ * deflate-raw stored block (BTYPE=00), so the blob is exactly `length`
+ * base64url characters. The same bytes whatever the JSON, so the length is
+ * exact without searching. `length % 4` can't be 1: base64 has no such length.
+ */
+function storedBlob(value: unknown, length: number): string {
+  // A stored block is a 1-byte header, then LEN and NLEN (2 bytes each), then the bytes.
+  const size = Math.floor((length * 3) / 4) - 5;
+  const json = new TextEncoder().encode(JSON.stringify(value));
+  if (length % 4 === 1 || json.byteLength > size || size > 0xffff) throw new Error(`no stored blob is ${length} characters`);
+  const bytes = new Uint8Array(5 + size).fill(0x20);
+  bytes.set([0x01, size & 0xff, size >> 8, ~size & 0xff, (~size >> 8) & 0xff]);
+  bytes.set(json, 5);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const blob = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  expect(blob).toHaveLength(length);
+  // It would decode: it inflates to the padded JSON, under the payload cap.
+  const inflated = inflateRawSync(Buffer.from(bytes));
+  expect(inflated.byteLength).toBe(size);
+  expect(inflated.byteLength).toBeLessThan(MAX_PAYLOAD_BYTES);
+  expect(JSON.parse(inflated.toString("utf8"))).toEqual(value);
+  return blob;
 }
 
 /** Every noul says 0.9, every score the top level, every choice the last label. As in the recipes' tests. */
@@ -208,8 +233,16 @@ describe("encodeBlob and decodeBlob", () => {
     await expectBadLink(decodeBlob("A"));
   });
 
+  it(`accepts a blob of exactly ${MAX_HASH_BYTES} bytes`, async () => {
+    // The owner's decision on #63: 64 KB, so the site's own links for large valid recipes are accepted.
+    expect(MAX_HASH_BYTES).toBe(64 * 1024);
+    const value = { v: 1, text: "at the cap" };
+    expect(await decodeBlob(storedBlob(value, MAX_HASH_BYTES))).toEqual(value);
+  });
+
   it(`rejects a blob over ${MAX_HASH_BYTES} bytes, even one that would decode`, async () => {
-    await expectBadLink(decodeBlob("A".repeat(MAX_HASH_BYTES + 1)));
+    // The next length base64url can have after the cap.
+    await expectBadLink(decodeBlob(storedBlob({ v: 1, text: "past the cap" }, MAX_HASH_BYTES + 2)));
     // Pseudo-random text from a wide, mostly-incompressible alphabet: the JSON
     // stays under the payload cap, but base64url still pushes it past the hash cap.
     const ALPHABET = Array.from({ length: 95 }, (_, i) => String.fromCharCode(33 + i))
@@ -553,8 +586,11 @@ describe("verdictHref and readVerdictPayload", () => {
       await expectBadLink(readVerdictPayload(hash.slice(0, -1)));
     });
 
-    it(`that is over ${MAX_HASH_BYTES} bytes encoded`, async () => {
-      await expectBadLink(readVerdictPayload("#" + "A".repeat(MAX_HASH_BYTES + 1)));
+    it(`that is over ${MAX_HASH_BYTES} bytes encoded, though it would decode`, async () => {
+      const wire = await goodWire();
+      // The same payload at exactly the cap is a good link.
+      expect(recomputed(await readVerdictPayload("#" + storedBlob(wire, MAX_HASH_BYTES)))).not.toBeNull();
+      await expectBadLink(readVerdictPayload("#" + storedBlob(wire, MAX_HASH_BYTES + 2)));
     });
 
     it("that isn't JSON", async () => {
@@ -813,13 +849,12 @@ describe("the every-cap recipe", () => {
   /** Over 500 characters, so it is trimmed. Words, like the recipe, so it doesn't compress by repeating. */
   const input = new Words(500).text(CAPS.input);
 
-  /** The recipe's run along its deepest path, shared, with the hash's JSON read without the hash cap. */
+  /** The recipe's run along its deepest path, shared, with the hash's bytes inflated without any cap. */
   async function shared() {
     const { trace, verdict } = await runRecipe(r, input);
     const href = await verdictHref({ recipe: r, input, trace, verdict });
     const b64 = href.slice(href.indexOf("#") + 1).replace(/-/g, "+").replace(/_/g, "/");
-    const inflated = inflateRawSync(Buffer.from(b64, "base64"));
-    return { trace, verdict, href, inflated, wire: JSON.parse(inflated.toString("utf8")) as unknown };
+    return { trace, verdict, href, inflated: inflateRawSync(Buffer.from(b64, "base64")) };
   }
 
   it("is valid and at every cap", () => {
@@ -853,18 +888,6 @@ describe("the every-cap recipe", () => {
     expect(verdict).toMatchObject({ depth: LIMITS.depth, gates: LIMITS.depth + CAPS.rateQuestions.max });
   });
 
-  it("round-trips exactly, under the 64 KB inflate cap", async () => {
-    const { trace, verdict, inflated, wire } = await shared();
-    expect(inflated.byteLength).toBeLessThan(MAX_PAYLOAD_BYTES);
-    const payload = verdictPayloadOf(wire);
-    expect(payload.input).toHaveLength(MAX_SHARED_INPUT);
-    expect(payload.input.endsWith("…")).toBe(true);
-    expect(payload.recipe).toEqual(r);
-    // The live trace with its input trimmed the way the link trims it.
-    expect(asJson(payload.trace)).toStrictEqual(asJson(withInput(trace, payload.input)));
-    expect(recomputed(payload)).toEqual(verdict);
-  });
-
   it("adds little to the link beyond the recipe and the input", async () => {
     const { href } = await shared();
     const bare = await encodeBlob({ v: 1, recipe: r, input: truncateInput(input) });
@@ -877,11 +900,12 @@ describe("the every-cap recipe", () => {
    * worst case a share link can be: about 29.5 KB, well over 8192 but under
    * the 64 KB (`MAX_HASH_BYTES`) budget the owner set for #63. It still
    * decodes through the public `readVerdictPayload` path, same as any other
-   * link.
+   * link, and round-trips exactly, under the 64 KB inflate cap.
    */
-  it("gives a link under 65536 characters", async () => {
-    const { href, trace, verdict } = await shared();
+  it("gives a link under 65536 characters that round-trips exactly, under the 64 KB inflate cap", async () => {
+    const { href, trace, verdict, inflated } = await shared();
     expect(href.length).toBeLessThan(65536);
+    expect(inflated.byteLength).toBeLessThan(MAX_PAYLOAD_BYTES);
     const payload = await readVerdictPayload(href.slice(href.indexOf("#")));
     expect(payload.input).toHaveLength(MAX_SHARED_INPUT);
     expect(payload.input.endsWith("…")).toBe(true);

@@ -375,14 +375,7 @@ export async function verdictHref(p: {
  * 4. `restoreTrace`, then the verdict must recompute from recipe and trace.
  */
 export async function readVerdictPayload(hash: string): Promise<VerdictPayload> {
-  return verdictPayloadOf(await decodeBlob(hash.startsWith("#") ? hash.slice(1) : hash));
-}
-
-/**
- * Steps 2 to 4 of `readVerdictPayload`, on a hash that is already decoded.
- * Throws `ShareError(COPY.badLink)`.
- */
-export function verdictPayloadOf(data: unknown): VerdictPayload {
+  const data = await decodeBlob(hash.startsWith("#") ? hash.slice(1) : hash);
   const { recipe, input, trace: wire } = readWirePayload(data);
   const chain = compileRecipe(recipe);
   checkTrace(wire, chain);
