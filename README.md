@@ -64,6 +64,7 @@ pnpm test                                # framework + web unit tests (live API 
 packages/jevchain     the framework (published as `jevchain`): zero dependencies
 packages/examples     six silly chains that each teach a real composition pattern, plus a CLI
 apps/web              Next.js studio, examples gallery, docs, and the API proxy
+apps/will-it-jev      Will it jev?: break anything into nested jev gates, get a shareable verdict
 ```
 
 ## Architecture
@@ -132,6 +133,10 @@ Each one is silly and each one teaches a real composition pattern:
 | [Could This Meeting Be An Email?](packages/examples/src/meeting-email.ts) | threshold gate on a score + "unsure" band |
 | [Pull Request Horoscope](packages/examples/src/pr-horoscope.ts) | one multi-question ask + weighted scoring |
 | [Will Your Plan For Tonight Jev?](packages/examples/src/tonight.ts) | deep gate ladder: ten nested gates, only the path taken is asked |
+
+## Will it jev?
+
+[`apps/will-it-jev`](apps/will-it-jev/README.md) is a small public site built on the framework. Paste anything and it is broken into a tree of nested jev gates, run live, and given a verdict: *It jevs.*, *It sort of jevs.* or *It does not jev.* Every run shares as a link that replays the circuit from the URL hash, with nothing stored. Run it with `pnpm will-it-jev` (http://localhost:3001); the [app README](apps/will-it-jev/README.md) covers its environment and how it works.
 
 ## Testing
 
