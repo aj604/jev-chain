@@ -2,7 +2,7 @@
 
 /**
  * useReask: ask Jev the same input again, `REASKS` more times, one after
- * another, and remember which run it was asking about (see `lib/trace/reask`).
+ * another, and remember which run it was asking about (see `jevchain-trace-ui` (reask)).
  *
  *   const reask = useReask();
  *   await reask.start(node, trace, input);   // trace = the run being asked about; resolves with the final state
@@ -13,9 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnyNode, Json, Trace } from "jevchain";
-import { reaskInputs } from "@/lib/trace/reask";
-import type { RunIssue } from "@/lib/trace/run-error";
-import { runSweep, type SweepRow } from "@/lib/trace/sweep";
+import { reaskInputs, type RunIssue, runSweep, type SweepRow } from "jevchain-trace-ui/helpers";
 import { browserClient, type RunPhase } from "@/components/trace/use-chain-run";
 
 export interface ReaskState {

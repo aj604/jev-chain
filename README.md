@@ -63,8 +63,9 @@ pnpm test                                # framework + web unit tests (live API 
 ```
 packages/jevchain     the framework (published as `jevchain`): zero dependencies
 packages/examples     six silly chains that each teach a real composition pattern, plus a CLI
+packages/trace-ui     the run visualization (`jevchain-trace-ui`): trace graph, why panel, inspector, timeline
 apps/web              Next.js studio, examples gallery, docs, and the API proxy
-apps/will-it-jev      Will it jev?: break anything into nested jev gates, get a shareable verdict
+apps/will-it-jev      Will it jev?: route anything through a desk of jev gates to one absurd outcome
 ```
 
 ## Architecture
@@ -136,7 +137,7 @@ Each one is silly and each one teaches a real composition pattern:
 
 ## Will it jev?
 
-[`apps/will-it-jev`](apps/will-it-jev/README.md) is a small public site built on the framework. Paste anything and it is broken into a tree of nested jev gates, run live, and given a verdict: *It jevs.*, *It sort of jevs.* or *It does not jev.* Every run shares as a link that replays the circuit from the URL hash, with nothing stored. Run it with `pnpm will-it-jev` (http://localhost:3001); the [app README](apps/will-it-jev/README.md) covers its environment and how it works.
+[`apps/will-it-jev`](apps/will-it-jev/README.md) is a small public site built on the framework. Paste anything and Jev routes it through a small, serious bureaucracy of nested gates to one specific outcome, drawn live with the studio's trace graph. Every run shares as a link that replays it from the URL hash, with nothing stored. Run it with `pnpm will-it-jev` (http://localhost:3001); the [app README](apps/will-it-jev/README.md) covers its environment and how it works.
 
 ## Testing
 

@@ -16,8 +16,8 @@ export async function generateMetadata({ searchParams }: PageProps<"/v">): Promi
 
 export default function VerdictPage() {
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-4 py-12 sm:py-16">
-      <h1 className="text-4xl font-semibold tracking-tight">
+    <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-8 px-4 py-12 sm:py-16">
+      <h1 className="font-display text-5xl tracking-tight italic sm:text-6xl">
         <Link href="/">{COPY.siteTitle}</Link>
       </h1>
       <SharedVerdict />

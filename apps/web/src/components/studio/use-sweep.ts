@@ -2,7 +2,7 @@
 
 /**
  * useSweep: run one chain over a list of inputs, one after another, with the
- * rows filling in as each finishes (see `lib/trace/sweep`).
+ * rows filling in as each finishes (see `jevchain-trace-ui` (sweep)).
  *
  *   const sweep = useSweep();
  *   sweep.start(node, inputs, { rehearse });
@@ -11,9 +11,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnyNode } from "jevchain";
-import { rehearsalClient } from "@/lib/trace/rehearsal";
-import type { RunIssue } from "@/lib/trace/run-error";
-import { runSweep, type SweepInput, type SweepRow } from "@/lib/trace/sweep";
+import { rehearsalClient, type RunIssue, runSweep, type SweepInput, type SweepRow } from "jevchain-trace-ui/helpers";
 import { browserClient, type RunPhase } from "@/components/trace/use-chain-run";
 
 export interface SweepState {

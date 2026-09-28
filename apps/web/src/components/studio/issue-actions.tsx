@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useShell } from "@/components/shell/shell-provider";
 import { Button } from "@/components/ui/button";
-import type { RunIssue } from "@/lib/trace/run-error";
+import type { RunIssue } from "jevchain-trace-ui/helpers";
 
 /**
  * The button that fixes a run issue: add a key (or rehearse without one), or

@@ -1,17 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { COPY, TIER_TEXT, lineRest } from "./copy";
+import { COPY } from "./copy";
 import { toneIssue } from "./deadpan";
-import { TIERS } from "./tiers";
-
-describe("TIER_TEXT", () => {
-  it("reads exactly, in TIERS order", () => {
-    expect(TIERS.map((t) => TIER_TEXT[t])).toEqual([
-      "It jevs.",
-      "It sort of jevs.",
-      "It does not jev.",
-    ]);
-  });
-});
 
 describe("COPY", () => {
   const strings = Object.entries(COPY).flatMap(([key, value]) =>
@@ -22,12 +11,20 @@ describe("COPY", () => {
     const actual = Object.fromEntries(strings);
     expect(actual).toEqual({
       siteTitle: "Will it jev?",
-      tagline: "Every computer is AND gates. Every decision is jev gates.",
+      jevs: "It jevs.",
+      tagline: "Paste anything. Jev routes it through a small, serious bureaucracy, and you watch every decision it makes.",
+      motto: "Every computer is AND gates. Every decision is jev gates.",
       prompt: "What do you want to jev?",
       placeholder: "Paste a text, a pitch, a plan. Anything that needs deciding.",
       submit: "Jev it",
-      examplesHeading: "Or jev one of these.",
-      writeYourOwn: "Write your own",
+      desksHeading: "Pick a desk",
+      newDesk: "New desk for anything",
+      newDeskTitle: "A new desk",
+      newDeskNote: "Paste anything and Jev sets up a desk for it: the gates, the departments and where it all ends up.",
+      noDeskYet: "The desk is drawn here once your text is broken down.",
+      samplesLabel: "Sample input",
+      graphHint: "Click any gate to see Jev's numbers.",
+      whyHeading: "Every decision, and why",
       decomposing: "Breaking it down into gates.",
       running: "Jevving.",
       decomposerOff: "Free-form jevving is off. The examples still work.",
@@ -45,7 +42,7 @@ describe("COPY", () => {
       showCode: "Show the code",
       hideCode: "Hide the code",
       codeNote:
-        "This is the circuit. The site works out the verdict from its answers, so that part is not in the code.",
+        "This is the desk as jevchain code. The site works out a rating's outcome from its answers, so that part is not in the code.",
       again: "Jev something else",
       badLink: "This link is damaged. Part of it is missing.",
       jevSomething: "Jev something yourself",
@@ -54,7 +51,6 @@ describe("COPY", () => {
       trimmed: "The text was trimmed to keep the link short.",
       disclosure:
         "Your text goes to an LLM provider to be broken down into gates. This site keeps none of it.",
-      rating: "Rating",
       noKey: "This server has no TYPESAFE_API_KEY. Nothing can be jevved.",
       tooLarge: "That request is too large to jev.",
       notJson: "The request is not JSON.",
@@ -64,7 +60,7 @@ describe("COPY", () => {
 
   it("keeps every string flat", () => {
     expect(strings.length).toBeGreaterThan(30);
-    for (const [key, text] of [...strings, ...Object.entries(TIER_TEXT)]) {
+    for (const [key, text] of [...strings]) {
       expect(toneIssue(text), key).toBeNull();
     }
   });
@@ -74,8 +70,8 @@ describe("COPY", () => {
       COPY.gatesAndDepth(1, 1),
       COPY.gatesAndDepth(9, 4),
       COPY.stats(9, 4, 212),
+      COPY.stats(9, 4, 212, 0.5),
       COPY.score(0.7),
-      COPY.gateLabel(3),
       COPY.shape(1, 1),
       COPY.shape(10, 10),
     ];
@@ -89,6 +85,11 @@ describe("COPY", () => {
 
   it("formats stats", () => {
     expect(COPY.stats(9, 4, 212)).toBe("9 gates. 4 deep. 212ms.");
+    expect(COPY.stats(9, 4, 212, null)).toBe("9 gates. 4 deep. 212ms.");
+  });
+
+  it("puts a rating's score last in the stats", () => {
+    expect(COPY.stats(1, 0, 90, 0.5)).toBe("1 gate. 0 deep. 90ms. Score 0.50.");
   });
 
   it("formats a score to two places", () => {
@@ -96,28 +97,8 @@ describe("COPY", () => {
     expect(COPY.score(1)).toBe("Score 1.00.");
   });
 
-  it("labels a gate", () => {
-    expect(COPY.gateLabel(3)).toBe("Gate 3");
-  });
-
   it("describes a shape, one decision or many", () => {
     expect(COPY.shape(1, 1)).toBe("1 decision. 1 deep.");
     expect(COPY.shape(10, 10)).toBe("10 decisions. Up to 10 deep.");
-  });
-});
-
-describe("lineRest", () => {
-  it("strips the tier sentence", () => {
-    expect(lineRest("It jevs. Send it.", "jevs")).toBe("Send it.");
-  });
-
-  it("leaves nothing when the line is only the tier sentence", () => {
-    expect(lineRest("It does not jev.", "nope")).toBe("");
-  });
-
-  it("returns other lines unchanged", () => {
-    expect(lineRest("Send it anyway.", "jevs")).toBe("Send it anyway.");
-    expect(lineRest("It sort of jevs. Maybe.", "jevs")).toBe("It sort of jevs. Maybe.");
-    expect(lineRest("Well. It jevs. Send it.", "jevs")).toBe("Well. It jevs. Send it.");
   });
 });

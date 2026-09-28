@@ -1,26 +1,23 @@
 "use client";
 
-import type { Jev } from "jevchain";
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { graphOf, type Jev } from "jevchain";
+import { Inspector } from "jevchain-trace-ui/components/inspector";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import { COPY } from "@/lib/copy";
 import { browserJev } from "@/lib/jev";
+import { compileRecipe } from "@/lib/recipe/compile";
 import { recipeShape } from "@/lib/recipe/tree";
 import { CAPS, type Recipe } from "@/lib/recipe/types";
 import { validateRecipe } from "@/lib/recipe/validate";
 import { runRecipe } from "@/lib/run";
 import { curatedSlugFor } from "@/lib/share";
 import { CURATED, type CuratedRecipe } from "@/recipes";
+import { DeskGraph, pacedTrace } from "./desk-graph";
 import { RunView, type LiveRun } from "./run-view";
-import { prefersReducedMotion } from "./use-reveal";
+import { prefersReducedMotion, useReveal } from "./use-reveal";
 
 /** Shorter input is "nothing here to jev". The decomposer's `MIN_THING`, which the page doesn't import. */
 const MIN_INPUT = 2;
-
-/** Each curated recipe with its shape line, in library order. */
-const EXAMPLES = CURATED.map((curated) => {
-  const shape = recipeShape(curated.recipe);
-  return { curated, shape: COPY.shape(shape.decisions, shape.maxDepth) };
-});
 
 /** What `GET /api/decompose` says. Until it answers, free text is assumed on and nothing is paused. */
 interface DecomposeStatus {
@@ -28,20 +25,26 @@ interface DecomposeStatus {
   paused: boolean;
 }
 
+const chip =
+  "border-soft bg-surface px-3 py-1.5 text-left text-[14px] text-ink-2 transition-colors duration-(--dur-fast) hover:border-ink-3 hover:text-ink aria-pressed:border-hard aria-pressed:bg-ink aria-pressed:text-paper aria-checked:border-hard aria-checked:bg-ink aria-checked:text-paper";
+
 /**
- * The jevver: the input box, the live run and the curated examples.
+ * The jevver: pick a desk (a curated recipe) or open a new one for free text,
+ * see the desk drawn as a graph, paste something and watch it go through.
  *
- * A picked example runs its own recipe on the box's text. Free text goes to
- * `/api/decompose` first. Every submission aborts the one before it, whether
- * it is still decomposing or already running, and replaces its run.
+ * A picked desk runs its own recipe on the box's text. Free text goes to
+ * `/api/decompose` first, and its desk is drawn once it comes back. Every
+ * submission aborts the one before it, whether it is still decomposing or
+ * already running, and replaces its run.
  */
 export function Jevver() {
   const [status, setStatus] = useState<DecomposeStatus>({ enabled: true, paused: false });
-  const [picked, setPicked] = useState<CuratedRecipe | null>(null);
-  const [text, setText] = useState("");
+  const [picked, setPicked] = useState<CuratedRecipe | null>(CURATED[0]!);
+  const [text, setText] = useState(CURATED[0]!.samples[0]!.input);
   const [note, setNote] = useState<string | null>(null);
   const [decomposing, setDecomposing] = useState(false);
   const [run, setRun] = useState<LiveRun | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
 
   const attempt = useRef<AbortController | null>(null);
   const runIds = useRef(0);
@@ -52,7 +55,7 @@ export function Jevver() {
   const inputId = useId();
   const aboutId = useId();
   const noteId = useId();
-  const examplesId = useId();
+  const desksId = useId();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -72,7 +75,17 @@ export function Jevver() {
     return () => current.current?.abort();
   }, []);
 
+  // Spans come out one step at a time, so a fast run can still be followed on the graph.
+  const spans = run?.trace?.spans.length ?? 0;
+  const shown = useReveal(spans);
+  const trace = pacedTrace(run?.trace, shown);
+  const settled = run?.outcome && shown >= spans ? run.outcome : null;
+
   const freeTextOff = !picked && !status.enabled;
+  // The desk on screen: the run's (which may be a new desk), else the picked one.
+  const desk: Recipe | null = run?.recipe ?? picked?.recipe ?? null;
+  const chain = useMemo(() => (desk ? compileRecipe(desk) : null), [desk]);
+  const graph = useMemo(() => (chain ? graphOf(chain) : null), [chain]);
 
   /** Aborts the attempt in flight, clears its run and messages, and starts a new one. */
   function begin(): AbortController {
@@ -82,6 +95,7 @@ export function Jevver() {
     setNote(null);
     setDecomposing(false);
     setRun(null);
+    setSelected(null);
     return controller;
   }
 
@@ -95,12 +109,12 @@ export function Jevver() {
     try {
       const out = await runRecipe(jev.current, recipe, input, {
         signal: controller.signal,
-        onTrace: (trace) => update({ trace }),
+        onTrace: (t) => update({ trace: t }),
       });
-      update({ trace: out.result.trace, outcome: { verdict: out.verdict, failure: out.failure } });
+      update({ trace: out.run.trace, outcome: { result: out.result, failure: out.failure } });
     } catch {
       // Only a recipe that doesn't compile throws. It reads as no answer.
-      update({ outcome: { verdict: null, failure: "no-answer" } });
+      update({ outcome: { result: null, failure: "no-answer" } });
     }
   }
 
@@ -145,109 +159,169 @@ export function Jevver() {
   const again = () => {
     attempt.current?.abort();
     setRun(null);
+    setSelected(null);
     toForm();
     box.current?.focus({ preventScroll: true });
   };
 
-  const pick = (curated: CuratedRecipe) => {
+  const pick = (curated: CuratedRecipe | null) => {
+    attempt.current?.abort();
+    setRun(null);
+    setSelected(null);
     setPicked(curated);
-    setText(curated.samples[0]!.input);
+    setText(curated ? curated.samples[0]!.input : "");
     setNote(null);
-    toForm();
   };
 
-  const primary =
-    "rounded-md bg-ink px-4 py-2 font-medium text-paper hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
-  const secondary = "rounded-md border border-rule px-3 py-1.5 text-sm text-ink hover:border-ink-3";
-
   const message = status.paused ? COPY.paused : decomposing ? COPY.decomposing : note;
+  const shape = desk ? recipeShape(desk) : null;
 
   return (
     <div className="flex min-w-0 flex-col gap-10">
-      <form ref={form} onSubmit={submit} noValidate className="flex min-w-0 scroll-mt-6 flex-col gap-3">
-        <label htmlFor={inputId} className="wrap-break-word font-medium text-ink">
-          {picked ? picked.recipe.title : COPY.prompt}
-        </label>
-        <textarea
-          ref={box}
-          id={inputId}
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            setNote(null);
-          }}
-          placeholder={COPY.placeholder}
-          maxLength={CAPS.input}
-          rows={5}
-          disabled={freeTextOff}
-          aria-describedby={picked ? noteId : `${aboutId} ${noteId}`}
-          className="w-full min-w-0 resize-y rounded-md border border-rule bg-transparent p-3 text-ink placeholder:text-ink-3 disabled:cursor-not-allowed disabled:opacity-60"
-        />
-        {picked && (
-          <div className="flex flex-wrap gap-2">
-            {picked.samples.map((sample) => (
-              <button
-                key={sample.label}
-                type="button"
-                className={`${secondary} aria-pressed:border-ink`}
-                aria-pressed={text === sample.input}
-                onClick={() => {
-                  setText(sample.input);
-                  setNote(null);
-                }}
-              >
-                {sample.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              className={secondary}
-              onClick={() => {
-                setPicked(null);
-                setNote(null);
-              }}
-            >
-              {COPY.writeYourOwn}
-            </button>
-          </div>
-        )}
-        {!picked && (
-          <p id={aboutId} className="text-sm text-ink-2">
-            {status.enabled ? COPY.disclosure : COPY.decomposerOff}
-          </p>
-        )}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <button type="submit" className={primary} disabled={status.paused || freeTextOff}>
-            {COPY.submit}
-          </button>
-          <p id={noteId} role="status" className="min-w-0 text-sm text-ink-2">
-            {message}
-          </p>
-        </div>
-      </form>
-
-      <RunView run={run} onRetry={retry} onAgain={again} />
-
-      <section aria-labelledby={examplesId} className="flex min-w-0 flex-col gap-3">
-        <h2 id={examplesId} className="font-medium text-ink">
-          {COPY.examplesHeading}
+      <section aria-labelledby={desksId} className="flex min-w-0 flex-col gap-3">
+        <h2 id={desksId} className="font-mono text-[12px] text-ink-3">
+          {COPY.desksHeading}
         </h2>
-        <ul className="flex flex-col border-t border-rule">
-          {EXAMPLES.map(({ curated, shape }) => (
-            <li key={curated.slug} className="border-b border-rule">
+        <ul className="flex flex-wrap gap-2">
+          {CURATED.map((curated) => (
+            <li key={curated.slug}>
               <button
                 type="button"
+                className={chip}
                 aria-pressed={picked?.slug === curated.slug}
                 onClick={() => pick(curated)}
-                className="flex w-full min-w-0 flex-col items-start gap-1 py-3 text-left hover:bg-rule/40 aria-pressed:bg-rule/40"
               >
-                <span className="wrap-break-word text-ink">{curated.recipe.title}</span>
-                <span className="text-sm tabular-nums text-ink-3">{shape}</span>
+                {curated.recipe.title}
               </button>
             </li>
           ))}
+          <li>
+            <button
+              type="button"
+              className={`${chip} border-dashed`}
+              aria-pressed={picked === null}
+              onClick={() => pick(null)}
+            >
+              {COPY.newDesk}
+            </button>
+          </li>
         </ul>
       </section>
+
+      <form
+        ref={form}
+        onSubmit={submit}
+        noValidate
+        className="flex min-w-0 scroll-mt-6 flex-col border-hard bg-surface"
+      >
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-soft-b px-4 py-3 sm:px-5">
+          <p className="min-w-0 wrap-break-word font-display text-2xl italic sm:text-3xl">
+            {desk?.title ?? COPY.newDeskTitle}
+          </p>
+          {shape && (
+            <p className="font-mono text-[12px] tabular-nums text-ink-3">
+              {COPY.shape(shape.decisions, shape.maxDepth)}
+            </p>
+          )}
+        </div>
+
+        <div className="relative h-80 border-soft-b bg-paper sm:h-96">
+          {desk ? (
+            <DeskGraph
+              recipe={desk}
+              trace={trace}
+              selected={selected}
+              onSelect={setSelected}
+              className="h-full"
+            />
+          ) : (
+            <div className="bg-grid flex h-full items-center justify-center px-6">
+              <p className="max-w-[40ch] text-center text-ink-2">{COPY.noDeskYet}</p>
+            </div>
+          )}
+          {desk && !selected && (
+            <p className="pointer-events-none absolute right-3 bottom-2 font-mono text-[11px] text-ink-3">
+              {COPY.graphHint}
+            </p>
+          )}
+        </div>
+
+        {graph && chain && selected && (
+          <Inspector
+            graph={graph}
+            trace={trace}
+            selected={selected}
+            onSelect={setSelected}
+            root={chain}
+            className="max-h-96 overflow-y-auto border-soft-b"
+          />
+        )}
+
+        <div className="flex min-w-0 flex-col gap-3 px-4 py-4 sm:px-5">
+          {picked ? (
+            <div role="radiogroup" aria-label={COPY.samplesLabel} className="flex flex-wrap gap-1.5">
+              {picked.samples.map((sample) => (
+                <button
+                  key={sample.label}
+                  type="button"
+                  role="radio"
+                  className={`${chip} py-1 font-mono text-[12px]`}
+                  aria-checked={text === sample.input}
+                  onClick={() => {
+                    setText(sample.input);
+                    setNote(null);
+                  }}
+                >
+                  {sample.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p id={aboutId} className="text-sm text-ink-2">
+              {status.enabled ? `${COPY.newDeskNote} ${COPY.disclosure}` : COPY.decomposerOff}
+            </p>
+          )}
+          <label htmlFor={inputId} className="sr-only">
+            {COPY.prompt}
+          </label>
+          <textarea
+            ref={box}
+            id={inputId}
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setNote(null);
+            }}
+            placeholder={COPY.placeholder}
+            maxLength={CAPS.input}
+            rows={3}
+            disabled={freeTextOff}
+            aria-describedby={picked ? noteId : `${aboutId} ${noteId}`}
+            className="w-full min-w-0 resize-y border-soft bg-paper p-3 text-[15px] leading-relaxed text-ink placeholder:text-ink-3 focus-visible:border-ink disabled:cursor-not-allowed disabled:opacity-60"
+          />
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              type="submit"
+              disabled={status.paused || freeTextOff}
+              className="border-hard bg-accent px-5 py-2 font-semibold text-accent-ink transition-colors duration-(--dur-fast) hover:bg-accent-2 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {COPY.submit}
+            </button>
+            <p id={noteId} role="status" className="min-w-0 text-sm text-ink-2">
+              {message}
+            </p>
+          </div>
+        </div>
+      </form>
+
+      <RunView
+        run={run}
+        trace={trace}
+        settled={settled}
+        onRetry={retry}
+        onAgain={again}
+        onSelect={setSelected}
+      />
     </div>
   );
 }

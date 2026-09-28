@@ -7,9 +7,10 @@
  * the path taken are ever asked, so a doomed plan costs one request and a good
  * one costs ten.
  *
- * This is the same chain Will It Jev compiles from its `tonight` recipe
- * (apps/will-it-jev/src/recipes/tonight.ts). A test there checks the two
- * serialize to the same document, so change them together.
+ * Will It Jev's `tonight` recipe (apps/will-it-jev/src/recipes/tonight.ts)
+ * asks these same ten questions in the same order, and a test there checks
+ * the two ladders still match, so change the questions together. The leaves
+ * differ on purpose: here the plan is graded, there it is filed.
  */
 import { emit, gate, noul } from "jevchain";
 import type { Example } from "./types";

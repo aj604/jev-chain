@@ -22,21 +22,24 @@ import {
 import { CURATED, getCurated } from "@/recipes";
 import { COPY } from "./copy";
 import { compileRecipe } from "./recipe/compile";
-import { LIMITS, type Recipe } from "./recipe/types";
+import { resultOf, type Result } from "./recipe/result";
+import { findOutcome } from "./recipe/tree";
+import { KEY_PATTERN, LIMITS, type Recipe } from "./recipe/types";
 import { validateRecipe } from "./recipe/validate";
-import { verdictOf, type Verdict } from "./recipe/verdict";
-import { TIERS, type Tier } from "./tiers";
 
 /**
- * Share links. Nothing is stored server-side: a link is the verdict page
+ * Share links. Nothing is stored server-side: a link is the result page
  * path, a query string of bounded counts for previews, and a hash that
  * carries the whole run. The hash never reaches the server.
  *
- * `/v?t=jevs&g=10&d=10&r=tonight#<blob>`
+ * `/v?g=10&d=10&r=tonight&o=book-exorcist#<blob>` for a curated recipe,
+ * `/v?g=4&d=3#<blob>` for a generated one.
  *
- * The hash is the truth. The query never holds user text, and the verdict
- * page recomputes everything it shows from the hash, so a query that
- * disagrees with it changes nothing but a preview. The hash is untrusted:
+ * The hash is the truth. The query never holds user text: `o`, the outcome
+ * key, is only ever sent with `r` and must be one of that curated recipe's
+ * own outcomes, because a generated recipe's keys are model output made from
+ * the visitor's text. The result page recomputes everything it shows from
+ * the hash, so a query that disagrees with it changes nothing but a preview. The hash is untrusted:
  * `readVerdictPayload` is its one door. A forged but valid recipe with a
  * trace that fits it is accepted by design.
  */
@@ -45,8 +48,13 @@ import { TIERS, type Tier } from "./tiers";
 export const MAX_SHARED_INPUT = 500;
 /** The longest encoded hash `decodeBlob` looks at. */
 export const MAX_HASH_BYTES = 64 * 1024;
-/** Decompression stops once the payload passes this. */
-export const MAX_PAYLOAD_BYTES = 64 * 1024;
+/**
+ * Decompression stops once the payload passes this. v2 recipes carry more
+ * text (means, stamps, four-band rates), and the biggest valid run inflates
+ * to about 65 KB with the fake Jev's short answers, so 64 KB left no room for
+ * real answers. Inflation is fed in slices, so a bomb still stops near here.
+ */
+export const MAX_PAYLOAD_BYTES = 128 * 1024;
 /** Where "Open in the studio" goes. No trailing slash. */
 export const STUDIO_URL = trimSlashes(process.env.NEXT_PUBLIC_STUDIO_URL || "https://jev-chain.com");
 
@@ -63,22 +71,33 @@ export class ShareError extends Error {
   }
 }
 
-/** A decoded verdict link. The trace is restored: every call state is back. */
+/**
+ * The hash's version. Version 1 carried v1 recipes (tiers), which no longer
+ * validate, so those links read as damaged.
+ */
+const PAYLOAD_VERSION = 2;
+
+/** A decoded result link. The trace is restored: every call state is back. */
 export interface VerdictPayload {
-  v: 1;
+  v: typeof PAYLOAD_VERSION;
   recipe: Recipe;
   input: string;
   trace: Trace;
 }
 
 /** The query string's counts. They are only ever read for previews. */
-export interface ShareQuery {
-  tier: Tier;
+export type ShareQuery = {
   gates: number;
   depth: number;
-  /** A curated recipe's slug, or null for a generated recipe. */
-  slug: string | null;
-}
+} & (
+  | { /** A generated recipe: no slug and no outcome. */ slug: null; outcome: null }
+  | {
+      /** A curated recipe's slug. */
+      slug: string;
+      /** The key of one of that curated recipe's outcomes. */
+      outcome: string;
+    }
+);
 
 /** The studio's `SharePayload` (apps/web/src/lib/trace/share.ts), doc form only. */
 interface StudioPayload {
@@ -214,11 +233,14 @@ function fromBase64Url(s: string): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// The query string: `t`, `g`, `d` and, for curated recipes, `r`. Never user text.
+// The query string: `g`, `d` and, for curated recipes, `r` and `o`. Never user text.
 
 export function shareQueryString(q: ShareQuery): string {
-  const params = new URLSearchParams({ t: q.tier, g: String(q.gates), d: String(q.depth) });
-  if (q.slug !== null) params.set("r", q.slug);
+  const params = new URLSearchParams({ g: String(q.gates), d: String(q.depth) });
+  if (q.slug !== null) {
+    params.set("r", q.slug);
+    params.set("o", q.outcome);
+  }
   return params.toString();
 }
 
@@ -226,8 +248,10 @@ type QueryInput = URLSearchParams | Record<string, string | string[] | undefined
 
 /**
  * The query's counts, for previews only, or null for the plain card. Null
- * when `t`, `g` or `d` is missing, repeated or out of bounds, or `r` is
- * present and not exactly one curated slug. Accepts Next's `searchParams`.
+ * when `g` or `d` is missing, repeated or out of bounds, when only one of
+ * `r` and `o` is there or either is repeated, or when `r` is not a curated
+ * slug or `o` not one of that recipe's outcome keys. Accepts Next's
+ * `searchParams`.
  */
 export function parseShareQuery(params: QueryInput): ShareQuery | null {
   const all = (key: string): string[] => {
@@ -240,18 +264,18 @@ export function parseShareQuery(params: QueryInput): ShareQuery | null {
     return values.length === 1 ? values[0] : undefined;
   };
 
-  const tier = one("t");
-  if (!(TIERS as readonly (string | undefined)[]).includes(tier)) return null;
   const gates = count(one("g"), LIMITS.questions);
   const depth = count(one("d"), LIMITS.depth);
   if (gates === null || depth === null) return null;
 
   const slugs = all("r");
-  if (slugs.length > 1) return null;
-  const slug = slugs.length === 1 ? slugs[0] : null;
-  if (slug !== null && !getCurated(slug)) return null;
-
-  return { tier: tier as Tier, gates, depth, slug };
+  const outcomes = all("o");
+  if (slugs.length === 0 && outcomes.length === 0) return { gates, depth, slug: null, outcome: null };
+  if (slugs.length !== 1 || outcomes.length !== 1) return null;
+  const [slug, outcome] = [slugs[0]!, outcomes[0]!];
+  const curated = getCurated(slug);
+  if (!curated || !KEY_PATTERN.test(outcome) || !findOutcome(curated.recipe, outcome)) return null;
+  return { gates, depth, slug, outcome };
 }
 
 /** A whole number from 0 to `max`, written plainly ("7", not "07" or "7.0"), or null. */
@@ -274,7 +298,7 @@ function count(value: string | undefined, max: number): number | null {
  *   and a gate's or route's is its child's. The trace's is the root span's.
  */
 interface WirePayload {
-  v: 1;
+  v: typeof PAYLOAD_VERSION;
   recipe: Recipe;
   input: string;
   trace: WireTrace;
@@ -294,7 +318,7 @@ function slimPayload(p: { recipe: Recipe; input: string; trace: Trace }): WirePa
     ...without(span, "input", "title", "output"),
     calls: span.calls.map((call) => without(call, "state", "questions")),
   }));
-  return { v: 1, recipe: p.recipe, input, trace: { ...without(p.trace, "output"), input, spans } };
+  return { v: PAYLOAD_VERSION, recipe: p.recipe, input, trace: { ...without(p.trace, "output"), input, spans } };
 }
 
 /** A shallow copy of `value` minus `keys`. */
@@ -347,18 +371,25 @@ function nodesById(chain: AnyNode): Map<string, AnyJevNode> {
 }
 
 /**
- * The relative link to the verdict page for one run. The query's counts come
- * from `verdict`. `r` is set only when `slug` names a curated recipe.
+ * The relative link to the result page for one run. The query's counts come
+ * from `result`. `r` and `o` are set only when `slug` names a curated recipe
+ * that has the result's outcome key.
  */
 export async function verdictHref(p: {
   recipe: Recipe;
   input: string;
   trace: Trace;
-  verdict: Verdict;
+  result: Result;
   slug?: string | null;
 }): Promise<string> {
-  const slug = p.slug != null && getCurated(p.slug) ? p.slug : null;
-  const query = shareQueryString({ tier: p.verdict.tier, gates: p.verdict.gates, depth: p.verdict.depth, slug });
+  const { gates, depth } = p.result;
+  const curated = getCurated(p.slug);
+  const key = p.result.outcome.key;
+  const query = shareQueryString(
+    curated && findOutcome(curated.recipe, key)
+      ? { gates, depth, slug: curated.slug, outcome: key }
+      : { gates, depth, slug: null, outcome: null },
+  );
   const blob = await encodeBlob(slimPayload(p));
   return `${VERDICT_PATH}?${query}#${blob}`;
 }
@@ -372,7 +403,7 @@ export async function verdictHref(p: {
  * 1. `decodeBlob`: size caps, base64url, deflate-raw, JSON.
  * 2. `readWirePayload`: `v`, the input and the recipe.
  * 3. `checkTrace`: the trace's shape, and that it fits the compiled recipe.
- * 4. `restoreTrace`, then the verdict must recompute from recipe and trace.
+ * 4. `restoreTrace`, then the result must recompute from recipe and trace.
  */
 export async function readVerdictPayload(hash: string): Promise<VerdictPayload> {
   const data = await decodeBlob(hash.startsWith("#") ? hash.slice(1) : hash);
@@ -380,34 +411,36 @@ export async function readVerdictPayload(hash: string): Promise<VerdictPayload> 
   const chain = compileRecipe(recipe);
   checkTrace(wire, chain);
   const trace = restoreTrace(wire, input, chain);
-  if (!verdictOf(recipe, { status: trace.status, output: trace.output, trace })) throw new ShareError();
-  return { v: 1, recipe, input, trace };
+  if (!resultOf(recipe, { status: trace.status, output: trace.output, trace })) throw new ShareError();
+  return { v: PAYLOAD_VERSION, recipe, input, trace };
 }
 
 /** The payload's version, input and recipe. The recipe comes back cleaned by `validateRecipe`. */
 function readWirePayload(data: unknown): { recipe: Recipe; input: string; trace: unknown } {
-  if (!isRecord(data) || data.v !== 1 || typeof data.input !== "string") throw new ShareError();
+  if (!isRecord(data) || data.v !== PAYLOAD_VERSION || typeof data.input !== "string") throw new ShareError();
   const check = validateRecipe(data.recipe);
   if (!check.ok) throw new ShareError();
   return { recipe: check.recipe, input: data.input, trace: data.trace };
 }
 
 /**
- * The trace check before the trace is restored and the verdict recomputed.
+ * The trace check before the trace is restored and the result recomputed.
  * It passes what a finished run of `chain` writes, and nothing a run of it
  * could not have written:
  *
  * - Shape: every field the restored trace keeps has its jevchain type, so
- *   the verdict, the circuit and the studio read what they expect.
+ *   the result, the circuit and the studio read what they expect.
  * - Fit: the spans walk one path down from the root of `chain`, one span per
  *   node, each on the edge the decision above it took, ending at a leaf. So
  *   every node is in the chain and every span is reachable from the root.
  *   Each span has its node's kind. A gate or route has a decision on its own
- *   edges. A verdict's emit makes no call, and every other span makes one,
+ *   edges, escape hatches included. An outcome's emit makes no call, and
+ *   every other span makes one,
  *   whose answers are exactly its node's questions, each fitting its kind.
  *
  * The run must have finished "ok", so every span did too: a compiled recipe
- * has one path and no fallbacks, so any failure fails the run.
+ * has one path, and its escape hatches are decisions, not error fallbacks,
+ * so any failure fails the run.
  */
 function checkTrace(trace: unknown, chain: AnyNode): asserts trace is WireTrace {
   const t = record(trace);

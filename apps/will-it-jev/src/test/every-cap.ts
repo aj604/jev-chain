@@ -1,31 +1,36 @@
-import { gate, pick, rate, recipe, route, scale, verdict, yesNo } from "@/lib/recipe/build";
-import { CAPS, LIMITS, type RatedQuestion, type Recipe, type RecipeNode } from "@/lib/recipe/types";
-import type { Tier } from "@/lib/tiers";
+import { CAPS, LIMITS, type RatedQuestion, type Recipe, type RecipeNode, type RecipeOutcome } from "@/lib/recipe/types";
+import { gate, outcome, pick, rate, recipe, route, scale, yesNo } from "./build";
 
 /**
  * The biggest recipe the validator lets through, for measuring share links.
  *
  * - 40 nodes, 30 questions and 10 decisions deep: every `LIMITS` cap.
- * - Every string at its `CAPS` length: title, thing, keys, questions,
- *   labels and their descriptions, levels, and verdict and rate lines.
- * - Every route and choice has 6 labels and every score 5 levels, except one
- *   5-label route: 40 nodes leave room for 39 children, an odd number.
+ * - Every string at its `CAPS` length: title, thing, keys, node titles,
+ *   questions, `means`, labels and their descriptions, levels, and outcome
+ *   stamps and lines. Every rate has `CAPS.bands.max` bands.
+ * - Every gate has `means`. One gate has `unsure` and one route has
+ *   `lowConfidence`, so both escape hatches are in the tree; the rest of the
+ *   node budget goes to route labels, which cost more than an escape hatch.
+ *   Routes have 6, 6, 5, 5 and 5 labels.
  *
  * The spine is 5 gates and 5 routes, alternating, and ends at a 6-question
- * rate. The fake Jev's default answers (noul 0.1, the first label) walk it,
- * so a default run is the deepest and most questioned one: 11 spans, 16
- * answers. The other 29 children hang off the spine as leaves: 3 more rates
- * and 26 verdicts.
+ * rate. Each gate continues on `no` and each route on its first label, which
+ * is what the fake Jev's default answers (noul 0.1, the first label at 0.9)
+ * pick, so a default run is the deepest and most questioned one: 11 spans,
+ * 16 answers. The other 29 children hang off the spine as leaves: 3 more
+ * rates and 26 outcomes.
  *
  * The text is pseudo-random words from a fixed seed, so nothing in it repeats
  * and the numbers don't depend on repeated strings compressing well.
  */
 export function everyCapRecipe(seed = 63): Recipe {
   const words = new Words(seed);
-  const tiers: Tier[] = ["jevs", "kinda", "nope"];
-  let verdicts = 0;
-  const leaf = (): RecipeNode => verdict(tiers[verdicts++ % 3]!, words.text(CAPS.line));
-  const lines = () => ({ jevs: words.text(CAPS.line), kinda: words.text(CAPS.line), nope: words.text(CAPS.line) });
+  const end = (): RecipeOutcome => outcome(words.key(), words.text(CAPS.stamp), words.text(CAPS.line));
+  const title = () => ({ title: words.text(CAPS.nodeTitle) });
+  const bands = (): [number, RecipeOutcome][] => {
+    const n = CAPS.bands.max;
+    return Array.from({ length: n }, (_, i) => [(n - 1 - i) / n, end()]);
+  };
   const labels = (n: number) => {
     const out: Record<string, string> = {};
     while (Object.keys(out).length < n) out[words.label()] = words.text(CAPS.labelDescription);
@@ -44,33 +49,33 @@ export function everyCapRecipe(seed = 63): Recipe {
       "high",
     );
   const noulQ = (): RatedQuestion => yesNo(words.key(), words.text(CAPS.question), CAPS.maxWeight, true);
+  const rated = (questions: RatedQuestion[]) => rate(words.key(), questions, bands(), title());
 
   // The spine's end, and the three rates that hang off it.
-  const deepest = rate(words.key(), [choiceQ(), choiceQ(), choiceQ(), choiceQ(), scoreQ(), noulQ()], lines());
+  const deepest = rated([choiceQ(), choiceQ(), choiceQ(), choiceQ(), scoreQ(), noulQ()]);
   const side = [
-    rate(words.key(), [choiceQ(), choiceQ(), choiceQ(), choiceQ(), choiceQ(), scoreQ()], lines()),
-    rate(words.key(), [choiceQ(), choiceQ(), choiceQ(), choiceQ(), choiceQ(), choiceQ()], lines()),
-    rate(words.key(), [choiceQ(), noulQ()], lines()),
+    rated([choiceQ(), choiceQ(), choiceQ(), choiceQ(), choiceQ(), scoreQ()]),
+    rated([choiceQ(), choiceQ(), choiceQ(), choiceQ(), choiceQ(), choiceQ()]),
+    rated([choiceQ(), noulQ()]),
   ];
-  const offSpine = () => side.shift() ?? leaf();
+  const offSpine = (): RecipeNode => side.shift() ?? end();
 
-  // Built from the bottom up. Route sizes, from the bottom: 5, then 6s.
+  // Built from the bottom up. Route sizes, from the bottom: 5, 5, 5, 6, 6.
+  // The top gate has `unsure` and the top route `lowConfidence`.
   let node: RecipeNode = deepest;
   for (let i = LIMITS.depth - 1; i >= 0; i--) {
     if (i % 2 === 1) {
-      const size = i === LIMITS.depth - 1 ? CAPS.labels.max - 1 : CAPS.labels.max;
-      const l = labels(size);
+      const l = labels(i >= 5 ? CAPS.labels.max - 1 : CAPS.labels.max);
       const [first, ...rest] = Object.keys(l);
       const branches: Record<string, RecipeNode> = { [first!]: node };
       for (const label of rest) branches[label] = offSpine();
-      node = route(words.key(), words.text(CAPS.question), l, branches);
+      const q = words.text(CAPS.question);
+      node = route(words.key(), q, l, branches, { ...title(), ...(i === 1 ? { lowConfidence: offSpine() } : {}) });
     } else {
-      // Passing on "no" continues on `then`; passing on "yes" fails on 0.1 and continues on `otherwise`.
-      const pass = i % 4 === 0 ? "no" : "yes";
-      node =
-        pass === "no"
-          ? gate(words.key(), words.text(CAPS.question), pass, node, offSpine())
-          : gate(words.key(), words.text(CAPS.question), pass, offSpine(), node);
+      const means = { yes: words.text(CAPS.means), no: words.text(CAPS.means) };
+      const key = words.key();
+      const q = words.text(CAPS.question);
+      node = gate(key, q, offSpine(), node, { ...title(), means, ...(i === 0 ? { unsure: offSpine() } : {}) });
     }
   }
   return recipe(words.text(CAPS.title), words.text(CAPS.thing), node);

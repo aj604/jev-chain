@@ -36,8 +36,8 @@ loadRootEnv();
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  // `jevchain` ships TypeScript source (exports → ./src/index.ts).
-  transpilePackages: ["jevchain"],
+  // `jevchain` and `jevchain-trace-ui` ship TypeScript source (exports → ./src/…).
+  transpilePackages: ["jevchain", "jevchain-trace-ui"],
   turbopack: { root: repoRoot },
   outputFileTracingRoot: repoRoot,
 };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toneIssue } from "@/lib/deadpan";
 import { CAPS, LIMITS } from "@/lib/recipe/types";
-import { breakup, startup } from "@/recipes";
+import { breakup, excuse, startup } from "@/recipes";
 import { SYSTEM_PROMPT } from "./prompt";
 
 describe("SYSTEM_PROMPT", () => {
@@ -9,8 +9,9 @@ describe("SYSTEM_PROMPT", () => {
     expect(toneIssue(SYSTEM_PROMPT)).toBeNull();
   });
 
-  it("contains both example recipes' JSON", () => {
+  it("contains the example recipes' JSON", () => {
     expect(SYSTEM_PROMPT).toContain(JSON.stringify(breakup.recipe));
+    expect(SYSTEM_PROMPT).toContain(JSON.stringify(excuse.recipe));
     expect(SYSTEM_PROMPT).toContain(JSON.stringify(startup.recipe));
   });
 
@@ -34,15 +35,13 @@ describe("SYSTEM_PROMPT", () => {
     }
   });
 
-  it("teaches the node kinds, the rated question kinds and the verdict lines", () => {
-    for (const kind of ["gate", "route", "rate", "verdict", "noul", "score", "choice"]) {
+  it("teaches the v2 node kinds and the rated question kinds", () => {
+    for (const kind of ["gate", "route", "rate", "outcome", "noul", "score", "choice"]) {
       expect(SYSTEM_PROMPT).toContain(`- ${kind}: `);
     }
+    expect(SYSTEM_PROMPT).toContain('{"v": 2,');
     expect(SYSTEM_PROMPT).toContain("Levels are listed lowest first");
-    expect(SYSTEM_PROMPT).toContain('starts with "Will"');
-    for (const opener of ["It jevs.", "It sort of jevs.", "It does not jev."]) {
-      expect(SYSTEM_PROMPT).toContain(`"${opener}"`);
-    }
+    expect(SYSTEM_PROMPT).not.toContain("- verdict: ");
   });
 
   it("describes the curly brace rule without writing the braces", () => {

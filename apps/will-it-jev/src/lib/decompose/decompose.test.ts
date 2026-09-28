@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
-import { recipe, route, verdict } from "@/lib/recipe/build";
-import { breakup } from "@/recipes";
+import { outcome, recipe, route } from "@/test/build";
+import { desk } from "@/test/fixtures";
 import {
   decompose,
   DEFAULT_LLM_BASE_URL,
@@ -14,26 +14,31 @@ import {
 } from "./decompose";
 import { SYSTEM_PROMPT } from "./prompt";
 
+// The real prompt shows curated recipes, which this test doesn't depend on.
+vi.mock("./prompt", () => ({ SYSTEM_PROMPT: "You turn a thing someone wrote into a recipe." }));
+
+const DESK = desk();
+
 const COMPLETIONS = "https://llm.test/v1/chat/completions";
 const THING = "Hey. I don't want to keep seeing each other. I wish you well.";
 
-const GOOD = JSON.stringify(breakup.recipe);
+const GOOD = JSON.stringify(DESK);
 /** A route whose first label breaks the label pattern. */
 const BAD = JSON.stringify(
   recipe(
-    "Will your plan jev?",
+    "The Plan Desk",
     "your plan",
     route(
       "vibe",
       "What is the vibe?",
       { Bad: "A loud night", calm: "A quiet night" },
-      { Bad: verdict("nope", "It does not jev. Stay in."), calm: verdict("jevs", "It jevs. Sleep well.") },
+      { Bad: outcome("stay-in", "Stayed in", "Stay in."), calm: outcome("sleep", "Slept", "Sleep well.") },
     ),
   ),
 );
 const BAD_MESSAGE = "root.labels.Bad: labels are lowercase letters, digits and dashes, up to 40 characters";
 /** Valid JSON, but the recipe breaks the tone rule in its title. */
-const LOUD = GOOD.replace("Will your breakup text jev?", "Will your breakup text jev!");
+const LOUD = GOOD.replace("The Appliance Dispatch Desk", "The Appliance Dispatch Desk!");
 const LOUD_MESSAGE = "recipe.title: no exclamation marks. keep it flat";
 
 interface ChatBody {
@@ -137,8 +142,8 @@ describe("parseRecipeText", () => {
     ["bare JSON", GOOD],
     ["fenced JSON", "```json\n" + GOOD + "\n```"],
     ["prose-wrapped JSON", `Here is the recipe.\n\n${GOOD}\n\nIt has two gates and a rate.`],
-  ])("parses %s to the breakup recipe", (_, text) => {
-    expect(parseRecipeText(text)).toEqual({ ok: true, recipe: breakup.recipe });
+  ])("parses %s to the desk recipe", (_, text) => {
+    expect(parseRecipeText(text)).toEqual({ ok: true, recipe: DESK });
   });
 
   it("says when there is no object", () => {
@@ -151,6 +156,20 @@ describe("parseRecipeText", () => {
       ok: false,
       message: "recipe: the reply has no JSON object in it",
     });
+  });
+
+  it("keeps the escape hatches, means and bands of a v2 recipe", () => {
+    expect(parseRecipeText(GOOD)).toEqual({ ok: true, recipe: JSON.parse(GOOD) });
+    expect(GOOD).toContain('"lowConfidence"');
+    expect(GOOD).toContain('"unsure"');
+    expect(GOOD).toContain('"means"');
+    expect(GOOD).toContain('"bands"');
+  });
+
+  it("rejects a v1 recipe with the validator's message", () => {
+    const v1 = JSON.stringify({ v: 1, title: "Will it jev?", thing: "it", root: { kind: "verdict", tier: "jevs", line: "It jevs." } });
+    expect(parseRecipeText(v1)).toEqual({ ok: false, message: "recipe.v: must be 2" });
+    expect(parseRecipeText(GOOD.replace('"v":2', '"v":1'))).toEqual({ ok: false, message: "recipe.v: must be 2" });
   });
 
   it("says when the object is not JSON", () => {
@@ -173,7 +192,7 @@ describe("parseRecipeText", () => {
 describe("decompose", () => {
   it("returns the recipe from a valid first reply after one call", async () => {
     const llm = scripted(replying(GOOD));
-    expect(await decompose(THING, config(llm))).toEqual({ ok: true, recipe: breakup.recipe });
+    expect(await decompose(THING, config(llm))).toEqual({ ok: true, recipe: DESK });
 
     expect(llm).toHaveBeenCalledOnce();
     const [url, init] = llm.mock.calls[0];
@@ -194,7 +213,7 @@ describe("decompose", () => {
 
   it("retries an invalid reply once, carrying the reply and the validator's message", async () => {
     const llm = scripted(replying(BAD), replying(GOOD));
-    expect(await decompose(THING, config(llm))).toEqual({ ok: true, recipe: breakup.recipe });
+    expect(await decompose(THING, config(llm))).toEqual({ ok: true, recipe: DESK });
 
     expect(llm).toHaveBeenCalledTimes(2);
     const { messages } = bodyOf(llm, 1);
@@ -394,7 +413,7 @@ describe("decompose", () => {
       const run = start(llm, { firstAttemptMs: 100, totalMs: 150 });
       await vi.advanceTimersByTimeAsync(150);
       await run.done;
-      expect(run.state).toEqual({ result: { ok: true, recipe: breakup.recipe }, at: 140 });
+      expect(run.state).toEqual({ result: { ok: true, recipe: DESK }, at: 140 });
     });
 
     it("cuts a retry that would fit a fresh first-attempt budget but not the remaining total", async () => {

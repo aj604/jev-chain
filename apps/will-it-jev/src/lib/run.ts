@@ -2,15 +2,15 @@ import { reduceTrace, type Jev, type RunResult, type Trace } from "jevchain";
 import { COPY } from "./copy";
 import { compileRecipe } from "./recipe/compile";
 import type { Recipe } from "./recipe/types";
-import { verdictOf, type Verdict } from "./recipe/verdict";
+import { resultOf, type Result } from "./recipe/result";
 
-/** Why a run gave no verdict, for the page's plain message. */
+/** Why a run gave no result, for the page's plain message. */
 export type RunFailure = "rate-limited" | "paused" | "no-answer";
 
 export interface RecipeRun {
-  result: RunResult<unknown>;
+  run: RunResult<unknown>;
   /** Null unless the run finished `"ok"` at one of the recipe's leaves. */
-  verdict: Verdict | null;
+  result: Result | null;
   /** Null for a successful or aborted run. */
   failure: RunFailure | null;
 }
@@ -24,10 +24,10 @@ export const RUN_TIMEOUT_MS = 60_000;
  * `input` is the Jev state exactly as given. Compiled nodes have no state
  * template, so text that looks like one (`{{input}}`) goes to Jev as plain
  * text. Every event is folded with `reduceTrace` and the new trace goes to
- * `onTrace`. The last one is `result.trace` itself.
+ * `onTrace`. The last one is `run.trace` itself.
  *
  * A failed, halted, timed-out or aborted run resolves too, with a null
- * verdict; `result.status` and `failure` say why. It only throws when the
+ * result; `run.status` and `failure` say why. It only throws when the
  * recipe doesn't compile to a valid chain, so validate untrusted recipes
  * first, or when `onTrace` throws (which also stops the run).
  */
@@ -48,8 +48,8 @@ export async function runRecipe(
     trace = reduceTrace(trace, event);
     opts.onTrace?.(trace);
   }
-  const result = await s.result;
-  return { result, verdict: verdictOf(recipe, result), failure: runFailure(result) };
+  const run = await s.result;
+  return { run, result: resultOf(recipe, run), failure: runFailure(run) };
 }
 
 /**

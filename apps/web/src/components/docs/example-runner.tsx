@@ -5,16 +5,17 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Json } from "jevchain";
 import { useShell } from "@/components/shell/shell-provider";
-import { RunSummary } from "@/components/trace/run-summary";
+import { RunSummary } from "jevchain-trace-ui/components/run-summary";
 import { useChainRun, useRunClock } from "@/components/trace/use-chain-run";
-import { WhyPanel } from "@/components/trace/why-panel";
+import { WhyPanel } from "jevchain-trace-ui/components/why-panel";
 import { Button } from "@/components/ui/button";
 import { getRunnable } from "@/docs/runnables";
 import { cn } from "@/lib/cn";
+import { useTheme } from "@/lib/use-theme";
 import { previewInput, studioHref } from "@/lib/studio-link";
 
 // React Flow is the heavy part: only load it for examples that scroll near the viewport.
-const TraceGraph = dynamic(() => import("@/components/trace/trace-graph").then((m) => m.TraceGraph), {
+const TraceGraph = dynamic(() => import("jevchain-trace-ui/components/trace-graph").then((m) => m.TraceGraph), {
   ssr: false,
   loading: () => null,
 });
@@ -37,6 +38,8 @@ export interface ExampleRunnerProps {
 export function ExampleRunner({ id, inputs, preview }: ExampleRunnerProps) {
   const chain = useMemo(() => getRunnable(id)?.chain, [id]);
   const run = useChainRun();
+  // Follow the app's theme toggle, not the OS ("system" would ignore it).
+  const { resolved: resolvedTheme } = useTheme();
   const { openKeyDialog } = useShell();
   const [picked, setPicked] = useState(0);
   const [whyOpen, setWhyOpen] = useState(false);
@@ -70,7 +73,7 @@ export function ExampleRunner({ id, inputs, preview }: ExampleRunnerProps) {
     <div>
       <div ref={boxRef} className="relative h-72 overflow-hidden border-hard-b bg-paper sm:h-80">
         {near && chain ? (
-          <TraceGraph chain={chain} trace={run.trace} compact className="h-full" />
+          <TraceGraph chain={chain} trace={run.trace} compact className="h-full" colorMode={resolvedTheme} />
         ) : (
           <div className="bg-grid flex h-full items-center justify-center overflow-hidden px-4 py-5">{preview}</div>
         )}

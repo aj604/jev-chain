@@ -1,5 +1,4 @@
 import { toneIssue } from "../deadpan";
-import { TIERS, type Tier } from "../tiers";
 import {
   CAPS,
   KEY_PATTERN,
@@ -10,8 +9,8 @@ import {
   type RecipeGate,
   type RecipeNode,
   type RecipeRate,
+  type RecipeOutcome,
   type RecipeRoute,
-  type RecipeVerdict,
 } from "./types";
 
 export type RecipeCheck = { ok: true; recipe: Recipe } | { ok: false; message: string };
@@ -66,12 +65,15 @@ const range = ({ min, max }: { min: number; max: number }) => `${min} to ${max}`
 
 function checkRecipe(raw: unknown): Recipe {
   if (!isObject(raw)) fail("recipe", "must be an object");
-  if (raw.v !== 1) fail("recipe.v", "must be 1");
+  if (raw.v !== 2) fail("recipe.v", "must be 2");
   const title = text(raw.title, "recipe.title", CAPS.title);
   const thing = text(raw.thing, "recipe.thing", CAPS.thing);
   const root = new Walk().node(raw.root, "root", 0);
-  return { v: 1, title, thing, root };
+  return { v: 2, title, thing, root };
 }
+
+/** An optional field: absent when undefined or null. */
+const absent = (value: unknown) => value === undefined || value === null;
 
 /** Tree-wide state: keys seen so far and running totals. */
 class Walk {
@@ -79,15 +81,19 @@ class Walk {
   private nodes = 0;
   private questions = 0;
 
-  /** `depth` is the number of decisions above this node. */
+  /**
+   * `depth` is the number of decisions above this node. Escape hatches
+   * (`unsure`, `lowConfidence`) are children like any other. A rate's band
+   * outcomes are part of the rate, not nodes of their own.
+   */
   node(raw: unknown, path: string, depth: number): RecipeNode {
     if (!isObject(raw)) fail(path, "must be an object");
     const kind = raw.kind;
-    if (kind !== "gate" && kind !== "route" && kind !== "rate" && kind !== "verdict") {
-      fail(`${path}.kind`, 'must be "gate", "route", "rate" or "verdict"');
+    if (kind !== "gate" && kind !== "route" && kind !== "rate" && kind !== "outcome") {
+      fail(`${path}.kind`, 'must be "gate", "route", "rate" or "outcome"');
     }
     if (++this.nodes > LIMITS.nodes) fail("root", `too many nodes. the limit is ${LIMITS.nodes}`);
-    if (kind === "verdict") return this.verdict(raw, path);
+    if (kind === "outcome") return this.outcome(raw, path);
     if (kind === "rate") return this.rate(raw, path);
     if (depth + 1 > LIMITS.depth) {
       fail(path, `too deep. the limit is ${LIMITS.depth} decisions on any path`);
@@ -98,23 +104,40 @@ class Walk {
   private gate(raw: Obj, path: string, depth: number): RecipeGate {
     const key = this.key(raw.key, `${path}.key`);
     this.ask(1);
+    const title = text(raw.title, `${path}.title`, CAPS.nodeTitle);
     const question = text(raw.question, `${path}.question`, CAPS.question);
-    const pass = raw.pass;
-    if (pass !== "yes" && pass !== "no") fail(`${path}.pass`, 'must be "yes" or "no"');
-    // A missing child would halt the jevchain run, so both are required.
-    for (const side of ["then", "otherwise"] as const) {
-      if (raw[side] === undefined || raw[side] === null) {
-        fail(`${path}.${side}`, "missing. a gate needs both then and otherwise");
-      }
+    let means: RecipeGate["means"];
+    if (!absent(raw.means)) {
+      const rawMeans = raw.means;
+      if (!isObject(rawMeans)) fail(`${path}.means`, "must be an object with yes and no");
+      means = {
+        yes: text(rawMeans.yes, `${path}.means.yes`, CAPS.means),
+        no: text(rawMeans.no, `${path}.means.no`, CAPS.means),
+      };
     }
-    const then = this.node(raw.then, `${path}.then`, depth);
-    const otherwise = this.node(raw.otherwise, `${path}.otherwise`, depth);
-    return { kind: "gate", key, question, pass, then, otherwise };
+    // A missing child would halt the jevchain run, so both are required.
+    for (const side of ["yes", "no"] as const) {
+      if (absent(raw[side])) fail(`${path}.${side}`, "missing. a gate needs both yes and no");
+    }
+    const yes = this.node(raw.yes, `${path}.yes`, depth);
+    const no = this.node(raw.no, `${path}.no`, depth);
+    const unsure = absent(raw.unsure) ? undefined : this.node(raw.unsure, `${path}.unsure`, depth);
+    return {
+      kind: "gate",
+      key,
+      title,
+      question,
+      ...(means ? { means } : {}),
+      yes,
+      no,
+      ...(unsure ? { unsure } : {}),
+    };
   }
 
   private route(raw: Obj, path: string, depth: number): RecipeRoute {
     const key = this.key(raw.key, `${path}.key`);
     this.ask(1);
+    const title = text(raw.title, `${path}.title`, CAPS.nodeTitle);
     const question = text(raw.question, `${path}.question`, CAPS.question);
     const labels = this.labels(raw.labels, `${path}.labels`);
     const rawBranches = raw.branches;
@@ -129,11 +152,15 @@ class Walk {
     for (const label of Object.keys(labels)) {
       branches[label] = this.node(rawBranches[label], `${path}.branches.${label}`, depth);
     }
-    return { kind: "route", key, question, labels, branches };
+    const lowConfidence = absent(raw.lowConfidence)
+      ? undefined
+      : this.node(raw.lowConfidence, `${path}.lowConfidence`, depth);
+    return { kind: "route", key, title, question, labels, branches, ...(lowConfidence ? { lowConfidence } : {}) };
   }
 
   private rate(raw: Obj, path: string): RecipeRate {
     const key = this.key(raw.key, `${path}.key`);
+    const title = text(raw.title, `${path}.title`, CAPS.nodeTitle);
     const rawQuestions = raw.questions;
     if (!Array.isArray(rawQuestions)) fail(`${path}.questions`, "must be a list");
     const { min, max } = CAPS.rateQuestions;
@@ -143,20 +170,46 @@ class Walk {
     this.ask(rawQuestions.length);
     // Array.from visits holes, which map would skip.
     const questions = Array.from(rawQuestions, (q, i) => this.rated(q, `${path}.questions[${i}]`));
-    const rawVerdicts = raw.verdicts;
-    if (!isObject(rawVerdicts)) fail(`${path}.verdicts`, "must be an object");
-    const verdicts = {} as Record<Tier, string>;
-    for (const tier of TIERS) {
-      verdicts[tier] = text(rawVerdicts[tier], `${path}.verdicts.${tier}`, CAPS.line);
-    }
-    return { kind: "rate", key, questions, verdicts };
+    const bands = this.bands(raw.bands, `${path}.bands`);
+    return { kind: "rate", key, title, questions, bands };
   }
 
-  private verdict(raw: Obj, path: string): RecipeVerdict {
-    const tier = raw.tier;
-    if (!TIERS.includes(tier as Tier)) fail(`${path}.tier`, `must be one of ${TIERS.join(", ")}`);
+  /**
+   * Highest first, strictly descending, each `atLeast` from 0 to 1, and the
+   * last exactly 0, so every score lands in one band.
+   */
+  private bands(raw: unknown, path: string): RecipeRate["bands"] {
+    if (!Array.isArray(raw)) fail(path, "must be a list");
+    const { min, max } = CAPS.bands;
+    if (raw.length < min || raw.length > max) fail(path, `needs ${range(CAPS.bands)} bands`);
+    const bands: RecipeRate["bands"] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const band: unknown = raw[i];
+      const at = `${path}[${i}]`;
+      if (!isObject(band)) fail(at, "must be an object");
+      const atLeast = band.atLeast;
+      if (typeof atLeast !== "number" || !Number.isFinite(atLeast) || atLeast < 0 || atLeast > 1) {
+        fail(`${at}.atLeast`, "must be a number from 0 to 1");
+      }
+      const previous = bands[i - 1];
+      if (previous && atLeast >= previous.atLeast) {
+        fail(`${at}.atLeast`, "must be lower than the band before it. bands go highest first");
+      }
+      if (i === raw.length - 1 && atLeast !== 0) fail(`${at}.atLeast`, "must be 0 on the last band");
+      const rawOutcome = band.outcome;
+      if (!isObject(rawOutcome) || rawOutcome.kind !== "outcome") {
+        fail(`${at}.outcome`, 'must be an object with kind "outcome"');
+      }
+      bands.push({ atLeast, outcome: this.outcome(rawOutcome, `${at}.outcome`) });
+    }
+    return bands;
+  }
+
+  private outcome(raw: Obj, path: string): RecipeOutcome {
+    const key = this.key(raw.key, `${path}.key`);
+    const stamp = text(raw.stamp, `${path}.stamp`, CAPS.stamp);
     const line = text(raw.line, `${path}.line`, CAPS.line);
-    return { kind: "verdict", tier: tier as Tier, line };
+    return { kind: "outcome", key, stamp, line };
   }
 
   private rated(raw: unknown, path: string): RatedQuestion {
@@ -223,7 +276,7 @@ class Walk {
     return labels;
   }
 
-  /** Node keys and rated question keys share one namespace. */
+  /** Node keys, outcome keys and rated question keys share one namespace. */
   private key(raw: unknown, path: string): string {
     if (typeof raw !== "string") fail(path, "must be a string");
     const key = raw.trim();

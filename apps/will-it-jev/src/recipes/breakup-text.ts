@@ -1,52 +1,98 @@
-import { gate, rate, recipe, scale, verdict, yesNo } from "@/lib/recipe/build";
+import { gate, outcome, recipe, route } from "@/lib/recipe/build";
 import type { CuratedRecipe } from ".";
 
+/** A department per kind of breakup, and a second desk for dividing the assets. */
 export const breakup: CuratedRecipe = {
   slug: "breakup-text",
   recipe: recipe(
-    "Will your breakup text jev?",
+    "The Breakup Text Dispatch Desk",
     "your breakup text",
-    gate(
-      "lawyer",
-      "Does the text mention a lawyer, a court, or legal action?",
-      "no",
-      gate(
-        "still-friends",
-        'Does the text say some version of "we can still be friends"?',
-        "no",
-        rate(
-          "breakup-rating",
-          [
-            scale(
-              "clarity",
-              "How clearly does the text say the relationship is over?",
-              3,
-              ["It does not say that", "It implies it", "It says it", "It says it once, clearly"],
-              "high",
-            ),
-            scale(
-              "blame",
-              "How much of the text assigns blame to the other person?",
-              2,
-              ["None", "A little", "Most of it", "All of it, with examples"],
-              "low",
-            ),
-            yesNo("long", "Is the text longer than a few sentences?", 1, false),
-          ],
+    route(
+      "breakup-desk",
+      "Which department?",
+      "Which department should process this breakup text?",
+      {
+        "clean-break": "Says it is over, clearly and kindly, once. Does not negotiate or leave a door open.",
+        "door-ajar": "Ends things but leaves a door open: staying friends, needing space, maybe someday.",
+        "asset-division": "Mostly concerned with who keeps what: furniture, a pet, a shared account, the friends.",
+        "legal-notice": "Reads as if drafted by a lawyer, or mentions a lawyer, a court or a formal notice.",
+      },
+      {
+        "clean-break": outcome(
+          "courier-dispatched",
+          "Courier dispatched",
+          "Delivered. A courier has been dispatched to collect one (1) toothbrush and a hoodie of disputed ownership.",
+        ),
+        "door-ajar": gate(
+          "still-friends",
+          "Friendship offered?",
+          'Does the text offer to "still be friends", or something close to it?',
           {
-            jevs: "It jevs. Send it and put the phone in another room.",
-            kinda: "It sort of jevs. Remove the second paragraph.",
-            nope: "It does not jev. This is a first draft of a much worse text.",
+            means: {
+              yes: "Friendship is offered outright, as a consolation prize",
+              no: "The door is left open some other way: space, timing, maybe someday",
+            },
+            yes: outcome(
+              "friendship-filed",
+              "Friendship application filed",
+              "Friendship application received. Current processing time: eleven to fourteen years.",
+            ),
+            no: outcome(
+              "door-wedged",
+              "Door wedged open",
+              "A door has been left ajar. Facilities will check on it at 2am, nightly, for six weeks.",
+            ),
           },
         ),
-        verdict("kinda", "It sort of jevs. You will not still be friends."),
+        "asset-division": route(
+          "contested-asset",
+          "Contested asset",
+          "What is the main thing being divided in this breakup text?",
+          {
+            furniture: "A couch, a bed, a lamp, or another piece of furniture.",
+            pet: "An animal who did not agree to any of this.",
+            subscription: "A streaming account, a phone plan, a gym membership or a shared password.",
+            friends: "The friend group, a group chat, or a standing Thursday dinner.",
+          },
+          {
+            furniture: outcome(
+              "couch-escrow",
+              "Couch placed in escrow",
+              "The couch has been placed in escrow. Neither party may sit on it until a ruling is issued.",
+            ),
+            pet: outcome(
+              "custody-hearing",
+              "Custody hearing scheduled",
+              "Custody hearing scheduled for Tuesday, 9am. The animal will be represented by independent counsel.",
+            ),
+            subscription: outcome(
+              "access-revoked",
+              "Streaming access revoked",
+              "Access revoked, effective Sunday at 11:59pm. They may finish the current season.",
+            ),
+            friends: outcome(
+              "friends-partitioned",
+              "Friend group partitioned",
+              "The friend group has been partitioned. Priya was not consulted and now appears in both halves.",
+            ),
+          },
+        ),
+        "legal-notice": outcome(
+          "counsel-copied",
+          "Forwarded to counsel",
+          "Forwarded to counsel. Counsel would like to know why they have been copied on a text message.",
+        ),
+      },
+      outcome(
+        "linda-reads-it",
+        "Referred to Linda",
+        "Unclear whether this is a breakup. Referred to Linda in Relationships, who is reading it aloud to the office.",
       ),
-      verdict("nope", "It does not jev. This is a letter from counsel."),
     ),
   ),
   samples: [
     {
-      label: "Clean",
+      label: "Clean break",
       input:
         "Hey. I've thought about this a lot and I don't want to keep seeing each other. I'm sorry. I wish you well.",
     },
@@ -55,6 +101,10 @@ export const breakup: CuratedRecipe = {
       input:
         "I think we should break up but honestly I really hope we can still be friends, you mean so much to me and I don't want to lose you completely.",
     },
-    { label: "Lawyer", input: "We're done. My lawyer will be in touch about the couch." },
+    {
+      label: "The couch",
+      input:
+        "We're done. For the record, the couch is mine, I paid for it, and I'm collecting it Saturday. Your lamp is by the door.",
+    },
   ],
 };

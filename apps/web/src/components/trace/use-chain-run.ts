@@ -17,9 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createJev, createJevClient, reduceTrace, type AnyNode, type Json, type Trace } from "jevchain";
 import { BYOK_HEADER, getByok } from "@/lib/byok";
 import { configIssues } from "@/lib/trace/chain-source";
-import { rehearsalClient } from "@/lib/trace/rehearsal";
-import { whatIfClient, type Fork } from "@/lib/trace/what-if";
-import { traceIssue, type RunIssue } from "@/lib/trace/run-error";
+import { rehearsalClient, whatIfClient, type Fork, traceIssue, type RunIssue } from "jevchain-trace-ui/helpers";
 
 export type RunPhase = "idle" | "running" | "done";
 
@@ -33,9 +31,9 @@ export interface ChainRunState {
 }
 
 export interface StartOptions {
-  /** Answer from the local rehearsal client instead of calling Jev. See `lib/trace/rehearsal`. */
+  /** Answer from the local rehearsal client instead of calling Jev. See `jevchain-trace-ui` (rehearsal). */
   rehearse?: boolean;
-  /** Replay `trace` and force the decision at `fork.path` down `fork.edge`. See `lib/trace/what-if`. */
+  /** Replay `trace` and force the decision at `fork.path` down `fork.edge`. See `jevchain-trace-ui` (what-if). */
   whatIf?: { trace: Trace; fork: Fork };
 }
 

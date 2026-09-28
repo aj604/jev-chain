@@ -6,8 +6,9 @@ export type RecipeRequestCheck = { ok: true } | { ok: false; message: string };
 /**
  * The proxy's second check, after the studio's `validateJevRequest`: accept
  * only a body a compiled recipe could send. A gate or route asks one
- * question, a rate leaf asks up to `CAPS.rateQuestions.max`, and every string
- * is one `validateRecipe` already capped, so the key can't be borrowed for
+ * question, a rate leaf asks up to `CAPS.rateQuestions.max`, a gate's noul
+ * may describe its two answers, and every string is one `validateRecipe`
+ * already capped, so the key can't be borrowed for
  * anything bigger.
  *
  * The message names the first problem, for tests and logs. Visitors see
@@ -57,8 +58,20 @@ function questionProblem(q: JevRequestBody["questions"][string]): string | undef
   }
 
   switch (q.type) {
-    case "noul":
-      return Object.hasOwn(q, "criteria") ? "a noul carries no criteria" : undefined;
+    case "noul": {
+      // A gate with `means` sends `{ true, false }`. A rated noul sends none.
+      if (!Object.hasOwn(q, "criteria")) return undefined;
+      const criteria = q.criteria;
+      if (!isObject(criteria)) return "a noul's criteria must be an object with true and false";
+      const keys = Object.keys(criteria);
+      if (keys.length !== 2 || !Object.hasOwn(criteria, "true") || !Object.hasOwn(criteria, "false")) {
+        return "a noul's criteria has exactly true and false";
+      }
+      if (!fits(criteria.true, CAPS.means) || !fits(criteria.false, CAPS.means)) {
+        return `a noul's true and false must be text up to ${CAPS.means} characters`;
+      }
+      return undefined;
+    }
 
     case "choice": {
       const criteria = q.criteria;

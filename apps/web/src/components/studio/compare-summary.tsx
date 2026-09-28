@@ -3,15 +3,12 @@
 import { decisions, type Decision, type Trace } from "jevchain";
 import { ChainLinks } from "@/components/brand/chain-links";
 import { cn } from "@/lib/cn";
-import { fmtMetric, fmtMs, fmtUsd, previewJson } from "@/lib/trace/format";
-import type { RunIssue } from "@/lib/trace/run-error";
-import { hasReasks, splitHeadline, splitText, type Split, type SplitVerdict } from "@/lib/trace/split";
-import { edgeName, forksOf } from "@/lib/trace/what-if";
-import { ForkList } from "@/components/trace/fork-list";
+import { fmtMetric, fmtMs, fmtUsd, previewJson, type RunIssue, hasReasks, splitHeadline, splitText, type Split, type SplitVerdict, edgeName, forksOf } from "jevchain-trace-ui/helpers";
+import { ForkList } from "jevchain-trace-ui";
 
 /**
  * "Ask both again": send a's input and b's input to Jev a few more times
- * each, and read every decision across both (see `lib/trace/split`).
+ * each, and read every decision across both (see `jevchain-trace-ui` (split)).
  */
 export interface CompareAskControl {
   /** Why the two inputs can't be asked again (a rehearsal, a what-if, the same input twice…), or null. */

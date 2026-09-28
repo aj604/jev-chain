@@ -4,7 +4,7 @@ import type { Trace } from "jevchain";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { COPY } from "@/lib/copy";
 import type { Recipe } from "@/lib/recipe/types";
-import type { Verdict } from "@/lib/recipe/verdict";
+import type { Result } from "@/lib/recipe/result";
 import { buildShareLinks, copyText, recipeCode, type ShareLinks } from "./share-actions";
 
 /** How long "Copied." shows before the button reads "Copy link" again. */
@@ -14,7 +14,7 @@ export interface ShareBarProps {
   recipe: Recipe;
   input: string;
   trace: Trace;
-  verdict: Verdict;
+  result: Result;
   /** A curated recipe's slug for the link's query, or null. */
   slug: string | null;
   /** The input was cut for a share link: the studio button says so. */
@@ -26,8 +26,8 @@ export interface ShareBarProps {
  * build, so they are built as soon as the run is here and the click is
  * instant. Until they are ready the two link controls are inert.
  */
-export function ShareBar({ recipe, input, trace, verdict, slug, trimmedInput }: ShareBarProps) {
-  const links = useShareLinks(recipe, input, trace, verdict, slug);
+export function ShareBar({ recipe, input, trace, result, slug, trimmedInput }: ShareBarProps) {
+  const links = useShareLinks(recipe, input, trace, result, slug);
   const [copied, setCopied] = useState(false);
   const [showCode, setShowCode] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -49,7 +49,7 @@ export function ShareBar({ recipe, input, trace, verdict, slug, trimmedInput }: 
   };
 
   const button =
-    "rounded-md border border-rule px-3 py-2 text-sm text-ink hover:border-ink-3 disabled:text-ink-3 aria-disabled:text-ink-3";
+    "border-soft bg-surface px-3 py-2 text-sm text-ink hover:border-ink-3 disabled:text-ink-3 aria-disabled:text-ink-3";
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
@@ -81,7 +81,7 @@ export function ShareBar({ recipe, input, trace, verdict, slug, trimmedInput }: 
           <>
             <pre
               tabIndex={0}
-              className="max-h-96 overflow-auto rounded-md border border-rule p-3 font-mono text-xs leading-relaxed text-ink select-all"
+              className="max-h-96 overflow-auto border-soft bg-surface-2 p-3 font-mono text-xs leading-relaxed text-ink select-all"
             >
               <code>{code}</code>
             </pre>
@@ -102,24 +102,24 @@ function useShareLinks(
   recipe: Recipe,
   input: string,
   trace: Trace,
-  verdict: Verdict,
+  result: Result,
   slug: string | null,
 ): ShareLinks | null {
   const [built, setBuilt] = useState<{ key: readonly unknown[]; links: ShareLinks } | null>(null);
-  const key = [recipe, input, trace, verdict, slug] as const;
+  const key = [recipe, input, trace, result, slug] as const;
 
   useEffect(() => {
     let live = true;
-    buildShareLinks({ recipe, input, trace, verdict, slug }, window.location.origin).then(
+    buildShareLinks({ recipe, input, trace, result, slug }, window.location.origin).then(
       (links) => {
-        if (live) setBuilt({ key: [recipe, input, trace, verdict, slug], links });
+        if (live) setBuilt({ key: [recipe, input, trace, result, slug], links });
       },
       () => {},
     );
     return () => {
       live = false;
     };
-  }, [recipe, input, trace, verdict, slug]);
+  }, [recipe, input, trace, result, slug]);
 
   return built && built.key.every((part, i) => part === key[i]) ? built.links : null;
 }

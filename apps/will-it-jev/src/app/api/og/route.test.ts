@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
+
+vi.mock("@/recipes", async () => (await import("@/test/curated")).curatedModule);
 
 async function get(query: string) {
   const res = await GET(new Request(`http://localhost/api/og${query}`));
@@ -14,7 +16,7 @@ function pngSize(bytes: Uint8Array): { width: number; height: number } {
 
 describe("GET /api/og", () => {
   it("renders a 1200 by 630 PNG with a long public cache", async () => {
-    const { res, bytes } = await get("?t=nope&g=3&d=3&r=tonight");
+    const { res, bytes } = await get("?g=2&d=2&r=desk&o=exorcist");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
     expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
@@ -24,9 +26,28 @@ describe("GET /api/og", () => {
 
   it("renders the plain card for bad or missing values", async () => {
     const plain = (await get("")).bytes;
-    for (const query of ["?t=great&g=99", "?t=nope&g=3", "?t=nope&g=3&d=3&r=nosuch", "?t=nope&g=3&d=3&r=tonight&r=tonight"]) {
+    for (const query of [
+      "?t=jevs",
+      "?g=99&d=3",
+      "?g=3",
+      "?g=3&d=3&r=nosuch&o=exorcist",
+      "?g=3&d=3&r=desk",
+      "?g=3&d=3&o=exorcist",
+      "?g=3&d=3&r=desk&o=nosuch",
+      "?g=3&d=3&r=desk&r=desk&o=exorcist",
+    ]) {
       expect((await get(query)).bytes, query).toEqual(plain);
     }
-    expect((await get("?t=nope&g=3&d=3&r=tonight")).bytes).not.toEqual(plain);
+  });
+
+  it("draws a curated outcome, and It jevs. for a generated recipe, differently from the plain card", async () => {
+    const plain = (await get("")).bytes;
+    const curated = (await get("?g=2&d=2&r=desk&o=exorcist")).bytes;
+    const other = (await get("?g=2&d=2&r=desk&o=evacuate")).bytes;
+    const generated = (await get("?g=2&d=2")).bytes;
+    expect(curated).not.toEqual(plain);
+    expect(generated).not.toEqual(plain);
+    expect(curated).not.toEqual(generated);
+    expect(curated).not.toEqual(other);
   });
 });
