@@ -5,29 +5,32 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { COPY } from "@/lib/copy";
 import { compileRecipe } from "@/lib/recipe/compile";
 import type { Recipe } from "@/lib/recipe/types";
-import { verdictOf } from "@/lib/recipe/verdict";
+import { resultOf } from "@/lib/recipe/result";
 import { readVerdictPayload } from "@/lib/share";
-import { tonight } from "@/recipes";
+import { TEST_CURATED } from "@/test/curated";
 import { fakeJev } from "@/test/fake-jev";
 import { buildShareLinks, copyText, recipeCode } from "./share-actions";
 import { ShareBar, type ShareBarProps } from "./share-bar";
+
+vi.mock("@/recipes", async () => (await import("@/test/curated")).curatedModule);
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const INPUT = tonight.samples[0].input;
+const DESK = TEST_CURATED[0]!;
+const INPUT = DESK.samples[0]!.input;
 
-async function props(recipe: Recipe = tonight.recipe, input = INPUT): Promise<ShareBarProps> {
+async function props(recipe: Recipe = DESK.recipe, input = INPUT): Promise<ShareBarProps> {
   const { client } = fakeJev();
-  const result = await run(compileRecipe(recipe), input, { jev: client });
-  const verdict = verdictOf(recipe, {
-    status: result.status,
-    output: result.status === "ok" ? result.output : undefined,
-    trace: result.trace,
+  const ran = await run(compileRecipe(recipe), input, { jev: client });
+  const result = resultOf(recipe, {
+    status: ran.status,
+    output: ran.status === "ok" ? ran.output : undefined,
+    trace: ran.trace,
   });
-  if (!verdict) throw new Error("the run has no verdict");
-  return { recipe, input, trace: result.trace, verdict, slug: "tonight" };
+  if (!result) throw new Error("the run has no result");
+  return { recipe, input, trace: ran.trace, result, slug: DESK.slug };
 }
 
 const render = (p: ShareBarProps) => renderToStaticMarkup(createElement(ShareBar, p));
@@ -61,10 +64,10 @@ describe("ShareBar", () => {
 });
 
 describe("buildShareLinks", () => {
-  it("builds an absolute verdict link and a studio link for the run", async () => {
+  it("builds an absolute result link and a studio link for the run", async () => {
     const p = await props();
     const links = await buildShareLinks(p, "https://will-it-jev.test");
-    expect(links.share).toMatch(/^https:\/\/will-it-jev\.test\/v\?t=\w+&g=\d+&d=\d+&r=tonight#[\w-]+$/);
+    expect(links.share).toMatch(/^https:\/\/will-it-jev\.test\/v\?g=2&d=2&r=desk&o=exorcist#[\w-]+$/);
     expect(links.studio).toMatch(/\/studio\/share#[\w-]+$/);
 
     const decoded = await readVerdictPayload(new URL(links.share).hash);
@@ -75,13 +78,17 @@ describe("buildShareLinks", () => {
   it("drops a slug that is not curated", async () => {
     const links = await buildShareLinks({ ...(await props()), slug: "nope" }, "https://will-it-jev.test");
     expect(links.share).not.toContain("r=");
+    expect(links.share).not.toContain("o=");
   });
 });
 
 describe("recipeCode", () => {
   it("is the circuit as jevchain TypeScript", () => {
-    const code = recipeCode(tonight.recipe);
+    const code = recipeCode(DESK.recipe);
     expect(code).toContain("gate(");
+    expect(code).toContain("route(");
+    expect(code).toContain("unsure");
+    expect(code).toContain("lowConfidence");
     expect(code).toContain("noul(");
     expect(code).toContain('from "jevchain"');
   });

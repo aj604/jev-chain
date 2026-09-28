@@ -1,6 +1,9 @@
 import type { Recipe } from "@/lib/recipe/types";
 import { breakup } from "./breakup-text";
 import { excuse } from "./excuse";
+import { houseplantInquest } from "./houseplant-inquest";
+import { linkedin } from "./linkedin-post";
+import { petAuthorship } from "./pet-authorship";
 import { pullRequest } from "./pull-request";
 import { slack } from "./slack-message";
 import { startup } from "./startup";
@@ -16,22 +19,40 @@ export interface CuratedRecipe {
   /** Names the recipe in share links as `r=`. */
   slug: string;
   recipe: Recipe;
-  /** Two or three. The first fills the box when the example is picked. */
+  /** Two or three, each written to land on a different outcome. The first fills the box when the example is picked. */
   samples: { label: string; input: string }[];
 }
 
-export { breakup, excuse, pullRequest, slack, startup, tonight, tweet, weddingSpeech };
-
-/** In display order: the four shallow recipes, then the four deep ones. */
-export const CURATED: CuratedRecipe[] = [
+export {
   breakup,
-  tweet,
   excuse,
+  houseplantInquest,
+  linkedin,
+  petAuthorship,
+  pullRequest,
   slack,
   startup,
-  pullRequest,
   tonight,
+  tweet,
   weddingSpeech,
+};
+
+/**
+ * In display order. The two desks that take any text at all come first,
+ * then the ones almost everyone has written, then the specialist ones.
+ */
+export const CURATED: CuratedRecipe[] = [
+  petAuthorship,
+  houseplantInquest,
+  excuse,
+  breakup,
+  tonight,
+  linkedin,
+  slack,
+  tweet,
+  weddingSpeech,
+  startup,
+  pullRequest,
 ];
 
 /** The curated recipe with this slug, if there is one. */

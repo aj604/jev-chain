@@ -1,116 +1,128 @@
-import { gate, rate, recipe, route, scale, verdict, yesNo } from "@/lib/recipe/build";
+import { gate, outcome, recipe, route } from "@/lib/recipe/build";
 import type { CuratedRecipe } from ".";
 
+/**
+ * Speeches are routed by who is giving them. The best man's desk is the
+ * deepest, because it has to be.
+ */
 export const weddingSpeech: CuratedRecipe = {
   slug: "wedding-speech",
   recipe: recipe(
-    "Will your wedding speech jev?",
+    "The Wedding Speech Clearance Board",
     "your wedding speech",
     route(
-      "role",
-      "Who is giving the speech?",
+      "speaker",
+      "Who is speaking?",
+      "Who is giving this wedding speech?",
       {
-        best: "The best man or best woman",
-        honour: "The maid or man of honour",
-        parent: "A parent of one of the couple",
-        other: "Someone else, and it is not clear why",
+        "best-man": "The best man or best woman, who has known one of the couple for a worrying length of time.",
+        honour: "The maid or man of honour.",
+        parent: "A parent of one of the couple.",
+        stranger: "Someone else, and it is not clear why they were asked.",
       },
       {
-        // A ladder: each gate ends at its verdict or goes on to the next.
-        best: gate(
-          "ex",
-          "Does the speech mention anyone's ex?",
-          "no",
-          gate(
-            "stag",
-            "Does it tell a story from the stag or hen weekend?",
-            "no",
-            gate(
-              "long",
-              "Would it take more than five minutes to read aloud?",
-              "no",
-              gate(
-                "toast",
-                "Does it end with a toast?",
-                "yes",
-                rate(
-                  "best-rating",
-                  [
-                    scale(
-                      "context",
-                      "How many of the jokes need context only a few guests have?",
-                      2,
-                      ["None", "One or two", "Most", "All of them"],
-                      "low",
-                    ),
-                    yesNo("sincere", "Is there at least one sincere moment about the couple?", 3, true),
-                  ],
-                  {
-                    jevs: "It jevs. Do not add anything tonight.",
-                    kinda: "It sort of jevs. Cut the second joke.",
-                    nope: "It does not jev. Say something kind and sit down.",
-                  },
-                ),
-                verdict("kinda", "It sort of jevs. End with a toast. People need to know when to clap."),
-              ),
-              verdict("kinda", "It sort of jevs. Nobody has ever wished a speech were longer."),
-            ),
-            verdict("nope", "It does not jev. The stag weekend is not a speech."),
+        "best-man": gate("mentions-ex", "Ex mentioned?", "Does the speech mention anyone's ex?", {
+          yes: outcome(
+            "mic-confiscated",
+            "Microphone confiscated",
+            "The microphone has been confiscated. A string quartet will play over the remainder of the speech.",
           ),
-          verdict("nope", "It does not jev. Remove the ex."),
-        ),
-        honour: gate(
-          "honour-ex",
-          "Does the speech mention anyone's ex?",
-          "no",
-          gate(
-            "honour-tears",
-            "Is the speech likely to make the couple cry in a good way?",
-            "yes",
-            verdict("jevs", "It jevs. Bring tissues. Not for you."),
-            rate(
-              "honour-rating",
-              [
-                yesNo("inside-jokes", "Does it rely on inside jokes?", 2, false),
-                scale(
-                  "warmth",
-                  "How warm is it toward both people in the couple?",
-                  3,
-                  ["Cold", "Polite", "Warm", "Warm to both, equally"],
-                  "high",
-                ),
-              ],
+          no: gate("stag-story", "Stag story?", "Does it tell a story from the stag or hen weekend?", {
+            yes: gate(
+              "police-involved",
+              "Police involved?",
+              "Does the story involve the police, a hospital, or a country someone has been asked not to return to?",
               {
-                jevs: "It jevs. Read it slowly.",
-                kinda: "It sort of jevs. Mention the other one more.",
-                nope: "It does not jev. The couple is two people.",
+                yes: outcome(
+                  "redacted-by-solicitor",
+                  "Redacted by solicitor",
+                  "Redacted by the couple's solicitor. The weekend now reads, in full: a lovely time was had.",
+                ),
+                no: outcome(
+                  "story-sealed",
+                  "Sealed for thirty years",
+                  "The stag story has been sealed for thirty (30) years, as agreed by all parties present.",
+                ),
               },
             ),
-          ),
-          verdict("nope", "It does not jev. Some of the guests remember the ex."),
+            no: gate("ends-toast", "Ends with a toast?", "Does the speech end with a toast?", {
+              yes: outcome(
+                "glasses-charged",
+                "Glasses pre-charged",
+                "Cleared for delivery. Glasses will be pre-charged and the DJ is standing by.",
+              ),
+              no: outcome(
+                "clap-cue",
+                "Clap cue installed",
+                'No toast found. An usher will raise a sign reading "clap now" at the end.',
+              ),
+            }),
+          }),
+        }),
+        honour: gate(
+          "both-mentioned",
+          "Both of the couple?",
+          "Does the speech talk about both people in the couple, not just one of them?",
+          {
+            yes: outcome(
+              "tissues-distributed",
+              "Tissues distributed",
+              "Tissue rations have been distributed to the first four rows. The groom has been given a second packet.",
+            ),
+            no: outcome(
+              "spouse-search",
+              "Search launched for spouse",
+              "A search has been launched for the other spouse, who has not been mentioned since the first line.",
+            ),
+          },
         ),
         parent: gate(
           "baby-story",
-          "Does the speech include a story from when one of the couple was a baby?",
-          "yes",
-          gate(
-            "parent-long",
-            "Would it take more than five minutes to read aloud?",
-            "no",
-            verdict("jevs", "It jevs. This is what parents are for."),
-            verdict("kinda", "It sort of jevs. The baby story can be shorter."),
-          ),
-          verdict("kinda", "It sort of jevs. Everyone was expecting a baby story."),
+          "Baby story?",
+          "Does the speech include a story from when one of the couple was a baby or a small child?",
+          {
+            yes: outcome(
+              "baby-photos",
+              "Baby photos cleared",
+              "Baby photos have been cleared for projection onto the marquee wall. Nobody may leave.",
+            ),
+            no: outcome(
+              "aunt-requisitioned",
+              "Aunt requisitioned",
+              "A baby story has been requisitioned from an aunt and will be read out after the cake.",
+            ),
+          },
         ),
-        other: verdict("nope", "It does not jev. Check you are on the list."),
+        stranger: gate(
+          "says-how",
+          "Says how they know them?",
+          "Does the speaker say how they know the couple?",
+          {
+            yes: outcome(
+              "table-fourteen",
+              "Located at table 14",
+              "Speaker located on the seating plan at table 14, by the kitchen doors. Speech permitted.",
+            ),
+            no: outcome(
+              "security-alerted",
+              "Security alerted",
+              "Security has been alerted, and has also been asked to say a few words.",
+            ),
+          },
+        ),
       },
+      outcome(
+        "handed-to-dj",
+        "Handed to the DJ",
+        "Speaker unclear. Referred to the DJ, who will play Come On Eileen until this is resolved.",
+      ),
     ),
   ),
   samples: [
     {
       label: "Best man",
       input:
-        "For those who don't know me, I'm Tom, the best man. I've known Dan since we were eleven. There was the time in Magaluf, which I promised not to talk about, so I'll just say the police were very understanding. Priya, you are the best thing that has happened to him. To Dan and Priya.",
+        "For those who don't know me, I'm Tom, the best man. I've known Dan since we were eleven. There was the stag in Magaluf, which I promised not to talk about, so I'll just say the police were very understanding. Priya, you are the best thing that has happened to him. To Dan and Priya.",
     },
     {
       label: "Mother of the bride",

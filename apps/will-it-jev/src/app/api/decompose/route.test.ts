@@ -2,15 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { COPY } from "@/lib/copy";
 import { FIRST_ATTEMPT_MS, MAX_THING, MIN_THING, TOTAL_MS } from "@/lib/decompose/decompose";
 import { MAX_BODY_BYTES } from "@/lib/jev-request";
-import { breakup } from "@/recipes";
+import { desk } from "@/test/fixtures";
+
+// The real prompt shows curated recipes, which this test doesn't depend on.
+vi.mock("@/lib/decompose/prompt", () => ({ SYSTEM_PROMPT: "You turn a thing someone wrote into a recipe." }));
 
 type Route = typeof import("./route");
 
 const COMPLETIONS = "https://llm.test/v1/chat/completions";
 const THING = "Hey. I don't want to keep seeing each other. I wish you well.";
-const GOOD = JSON.stringify(breakup.recipe);
+const DESK = desk();
+const GOOD = JSON.stringify(DESK);
 /** Valid JSON, but the title breaks the tone rule, so the validator's message quotes the reply. */
-const LOUD = GOOD.replace("Will your breakup text jev?", "Will your breakup text jev!");
+const LOUD = GOOD.replace("The Appliance Dispatch Desk", "The Appliance Dispatch Desk!");
 
 /** An OpenAI-style chat completion whose first choice says `content`. */
 const completion = (content: string) =>
@@ -100,14 +104,14 @@ describe("GET /api/decompose", () => {
 });
 
 describe("POST /api/decompose", () => {
-  it("returns exactly { recipe }, the curated breakup recipe, for a good model reply", async () => {
+  it("returns exactly { recipe }, the validated recipe, for a good model reply", async () => {
     const res = await post({ thing: `  ${THING}\n` });
 
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("x-ratelimit-limit")).toBe("20");
     expect(res.headers.get("x-ratelimit-remaining")).toBe("19");
-    expect(await res.json()).toStrictEqual({ recipe: breakup.recipe });
+    expect(await res.json()).toStrictEqual({ recipe: DESK });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0];

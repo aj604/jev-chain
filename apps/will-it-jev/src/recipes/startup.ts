@@ -1,78 +1,118 @@
-import { gate, rate, recipe, scale, verdict, yesNo } from "@/lib/recipe/build";
+import { gate, outcome, recipe } from "@/lib/recipe/build";
 import type { CuratedRecipe } from ".";
 
-/** A ladder of eight gates. Each ends at its verdict or goes on to the next. */
+/**
+ * A ladder of nine checkpoints. "No" at a checkpoint means it found nothing
+ * to process, and the idea goes on to the next one. The few ideas that clear
+ * all nine are the only ones anybody has to deal with in person.
+ */
 export const startup: CuratedRecipe = {
   slug: "startup",
   recipe: recipe(
-    "Will your startup idea jev?",
+    "The Venture Intake and Quarantine Office",
     "your startup idea",
-    gate(
-      "uber-for",
-      'Is the idea described as "Uber for" something?',
-      "no",
-      gate(
-        "who-pays",
-        "Is it clear who pays for this?",
-        "yes",
-        gate(
-          "why-now",
-          "Is there a reason this could work now and could not have worked five years ago?",
-          "yes",
-          gate(
-            "blockchain",
-            "Does the idea require a blockchain?",
-            "no",
-            gate(
+    gate("uber-for", '"Uber for" invoked?', 'Is the idea described as "Uber for" something?', {
+      yes: outcome(
+        "forwarded-to-uber",
+        "Forwarded to Uber",
+        "Forwarded to Uber for comment. Uber says it is already Uber for most things and wishes you well.",
+      ),
+      no: gate("blockchain", "Blockchain required?", "Does the idea require a blockchain?", {
+        yes: outcome(
+          "appraised-database",
+          "Appraised as a database",
+          "Appraised as a database with extra steps. The steps have been recorded permanently, as requested.",
+        ),
+        no: gate("who-pays", "Payer identified?", "Does the idea say who pays for it?", {
+          means: {
+            yes: "Names who hands over money, and roughly for what",
+            no: "Money is expected to arrive from somewhere, eventually",
+          },
+          yes: gate("with-ai", '"But with AI"?', "Is the idea an existing product, but with AI added?", {
+            yes: outcome(
+              "ai-sticker",
+              "AI sticker applied",
+              "An AI sticker has been applied to the product. Valuation adjusted upward by one (1) sticker.",
+            ),
+            no: gate(
               "regulated",
-              "Does it operate in a heavily regulated industry, such as health, finance, or aviation?",
-              "no",
-              gate(
-                "two-sided",
-                "Does it need two groups of users to show up at the same time before it works?",
-                "no",
-                gate(
-                  "moat",
-                  "Is there anything stopping a large company from copying it within a quarter?",
-                  "yes",
-                  gate(
-                    "done-before",
-                    "Does the founder describe having done something like this before?",
-                    "yes",
-                    verdict("jevs", "It jevs. Raise a small amount of money and tell no one."),
-                    rate(
-                      "first-timer",
-                      [
-                        scale(
-                          "focus",
-                          "How narrow is the first version?",
-                          2,
-                          ["Everything for everyone", "A few things", "One thing for one group"],
-                          "high",
-                        ),
-                        yesNo("customers", "Does the pitch mention talking to real customers?", 3, true),
-                      ],
+              "Heavily regulated?",
+              "Does it operate in a heavily regulated industry, such as human healthcare, banking or aviation?",
+              {
+                yes: outcome(
+                  "lawyers-retained",
+                  "Seven lawyers retained",
+                  "Seven (7) lawyers have been retained. They have billed you for reading this sentence.",
+                ),
+                no: gate(
+                  "two-sided",
+                  "Needs two crowds at once?",
+                  "Does it need two different groups of users to show up at the same time before it works?",
+                  {
+                    yes: outcome(
+                      "chicken-and-egg",
+                      "Chicken and egg ordered",
+                      "One (1) chicken and one (1) egg have been ordered. Delivery order to be determined.",
+                    ),
+                    no: gate(
+                      "moat",
+                      "Reason it cannot be copied?",
+                      "Does the pitch give a reason a large company could not simply copy it?",
                       {
-                        jevs: "It jevs. You will learn the rest.",
-                        kinda: "It sort of jevs. Talk to ten customers first.",
-                        nope: "It does not jev. Keep your job for now.",
+                        yes: gate(
+                          "done-before",
+                          "Done this before?",
+                          "Does the founder describe having worked in this industry or built something like this before?",
+                          {
+                            yes: outcome(
+                              "term-sheet-printed",
+                              "Term sheet printed",
+                              "A term sheet has been printed in 11pt Garamond. Please raise a small amount and tell no one.",
+                            ),
+                            no: gate(
+                              "customers",
+                              "Spoken to customers?",
+                              "Does the pitch mention talking to real customers?",
+                              {
+                                yes: outcome(
+                                  "garage-leased",
+                                  "Garage leased",
+                                  "A garage has been leased in your name. The founding myth begins Monday at 9am.",
+                                ),
+                                no: outcome(
+                                  "customers-summoned",
+                                  "Ten customers summoned",
+                                  "Ten (10) customers have been summoned for interview. Attendance is voluntary but strongly implied.",
+                                ),
+                              },
+                            ),
+                          },
+                        ),
+                        no: outcome(
+                          "google-notified",
+                          "Google notified",
+                          "Google has been notified as a courtesy. They have pencilled it in for next quarter.",
+                        ),
                       },
                     ),
-                  ),
-                  verdict("kinda", "It sort of jevs. Until someone larger notices."),
+                  },
                 ),
-                verdict("kinda", "It sort of jevs. You now have two startups to build."),
-              ),
-              verdict("kinda", "It sort of jevs. Budget for lawyers."),
+              },
             ),
-            verdict("nope", "It does not jev. It is a database with extra steps."),
+          }),
+          no: outcome(
+            "invoice-issued",
+            "Invoice issued to the market",
+            'An invoice has been issued to "the market". The market has not replied.',
           ),
-          verdict("nope", "It does not jev. It did not work five years ago either."),
-        ),
-        verdict("nope", "It does not jev. Someone has to pay."),
-      ),
-      verdict("nope", "It does not jev. Uber is already Uber for things."),
-    ),
+          unsure: outcome(
+            "chad-knows-angels",
+            "Referred to Chad",
+            "Revenue model unclear. Referred to Chad, who says he knows some angel investors. He does not.",
+          ),
+        }),
+      }),
+    }),
   ),
   samples: [
     { label: "Uber for dogs", input: "Uber for dog walking. You tap a button and a dog walker shows up." },
@@ -84,7 +124,7 @@ export const startup: CuratedRecipe = {
     {
       label: "Vet software",
       input:
-        "Scheduling software for independent veterinary clinics. I ran operations at a vet group for six years. Clinics pay monthly per location. Cheap cloud hosting and clinics finally moving off paper make it possible now. I've interviewed 40 clinic managers.",
+        "Scheduling software for independent veterinary clinics. I ran operations at a vet group for six years. Clinics pay monthly per location. The big players ignore independents because each one is too small to sell to, and we already have the integrations they would need a year to build.",
     },
   ],
 };

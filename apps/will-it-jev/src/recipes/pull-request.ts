@@ -1,104 +1,134 @@
-import { gate, rate, recipe, route, scale, verdict, yesNo } from "@/lib/recipe/build";
+import { gate, outcome, recipe, route } from "@/lib/recipe/build";
 import type { CuratedRecipe } from ".";
 
+/**
+ * Changes are routed by kind. Migrations go down a ladder of checkpoints,
+ * including one sensible one (a rollback plan) and one that needs a seance.
+ */
 export const pullRequest: CuratedRecipe = {
   slug: "pull-request",
   recipe: recipe(
-    "Will your PR jev?",
+    "The Pull Request Customs and Excise Office",
     "your pull request",
     route(
-      "kind",
-      "What kind of change is this?",
+      "change-kind",
+      "Kind of change",
+      "What kind of change does this pull request make?",
       {
-        typo: "Docs, copy, or a one-line fix",
-        feature: "New user-facing functionality",
-        refactor: "Restructuring code without changing behaviour",
-        migration: "Database, infrastructure, or dependency changes",
+        typo: "Docs, copy, or a one-line fix.",
+        feature: "New functionality a user will see or touch.",
+        refactor: "Restructuring code without changing behaviour, supposedly.",
+        migration: "Database, infrastructure or dependency changes.",
       },
       {
-        typo: gate(
-          "typo-scope",
-          "Does the fix change more than one file?",
-          "no",
-          verdict("jevs", "It jevs. Merge it."),
-          verdict("kinda", "It sort of jevs. That is not a typo fix."),
-        ),
-        feature: gate(
-          "feature-tests",
-          "Does the PR add or update tests?",
-          "yes",
-          gate(
-            "feature-flag",
-            "Is the feature behind a flag?",
-            "yes",
-            verdict("jevs", "It jevs. Ship it on a Tuesday."),
-            rate(
-              "feature-rating",
-              [
-                scale(
-                  "description",
-                  "How clearly does the description explain what changed and why?",
-                  2,
-                  ["No description", "Vague", "Clear", "Clear, with screenshots"],
-                  "high",
-                ),
-                yesNo("rushed", "Does the description suggest it was rushed?", 2, false),
-              ],
-              {
-                jevs: "It jevs. Ship it.",
-                kinda: "It sort of jevs. Add a flag.",
-                nope: "It does not jev. Add a flag and a description.",
-              },
+        typo: gate("typo-files", "More than one file?", "Does the fix change more than one file?", {
+          yes: outcome(
+            "auditor-sent",
+            "Auditor sent to count files",
+            "A typo fix touching several files has been flagged. An auditor has been sent to count them.",
+          ),
+          no: outcome(
+            "merged-by-acclamation",
+            "Merged by acclamation",
+            "Merged by acclamation. The misspelled word has been escorted from the building.",
+          ),
+        }),
+        feature: gate("feature-flag", "Behind a flag?", "Is the feature behind a feature flag?", {
+          yes: outcome(
+            "flag-planted",
+            "Flag planted",
+            "Shipped behind a flag. The flag will be removed in two weeks, per tradition, in four years.",
+          ),
+          no: gate("feature-tests", "Tests included?", "Does the pull request add or update tests?", {
+            yes: outcome(
+              "tuesday-booked",
+              "Scheduled for Tuesday",
+              "Scheduled for the Tuesday release. Tuesday has been informed and is ready.",
             ),
-          ),
-          verdict("nope", "It does not jev. Write one test. Any test."),
-        ),
+            no: outcome(
+              "test-appointed",
+              "Test appointed by the state",
+              "No tests found. A test asserting that true equals true has been appointed to your case by the state.",
+            ),
+          }),
+        }),
         refactor: gate(
-          "behaviour-change",
+          "admits-behaviour",
+          "Admits a behaviour change?",
           "Does the description admit to any change in behaviour?",
-          "no",
-          gate(
-            "refactor-size",
-            "Does it touch more than twenty files?",
-            "no",
-            verdict("jevs", "It jevs. Nobody will notice, which is the point."),
-            verdict("kinda", "It sort of jevs. Split it into three."),
-          ),
-          verdict("nope", "It does not jev. That is a feature."),
+          {
+            yes: outcome(
+              "reclassified-feature",
+              "Reclassified as a feature",
+              "Reclassified as a feature. The paperwork has been backdated to Monday.",
+            ),
+            no: gate("refactor-size", "More than twenty files?", "Does it touch more than twenty files?", {
+              yes: outcome(
+                "split-by-order",
+                "Split by order of the board",
+                "Divided into three (3) smaller pull requests by order of the review board. Reviewers have been given the afternoon off.",
+              ),
+              no: outcome(
+                "recorded-invisible",
+                "Recorded as invisible",
+                "Refactor accepted. Nobody will notice, and this has been recorded as the point.",
+              ),
+            }),
+          },
         ),
-        // A ladder: each gate ends at its verdict or goes on to the next.
         migration: gate(
           "friday",
-          "Does it mention deploying on a Friday or before a holiday?",
-          "no",
-          gate(
-            "rollback",
-            "Does it describe how to roll back?",
-            "yes",
-            gate(
-              "column-in-use",
-              "Does it drop or rename a column that is still in use?",
-              "no",
-              gate(
-                "auth",
-                "Does it touch authentication or permissions?",
-                "no",
-                gate(
-                  "should-be-fine",
-                  'Does the description say "should be fine" or something similar?',
-                  "no",
-                  verdict("jevs", "It jevs. Run it with someone watching."),
-                  verdict("kinda", "It sort of jevs. It should be fine."),
-                ),
-                verdict("kinda", "It sort of jevs. Get a second reviewer from security."),
-              ),
-              verdict("nope", "It does not jev. Something still reads that column."),
+          "Friday deploy?",
+          "Does it mention deploying on a Friday, or just before a holiday?",
+          {
+            yes: outcome(
+              "weekend-cancelled",
+              "Weekend cancelled",
+              "Deploy blocked. The on-call engineer's weekend has been cancelled anyway, as a precaution.",
             ),
-            verdict("nope", "It does not jev. Write the rollback first."),
-          ),
-          verdict("nope", "It does not jev. It is Friday."),
+            no: gate("rollback", "Rollback plan?", "Does it describe how to roll the change back?", {
+              means: {
+                yes: "Gives actual steps for undoing the change",
+                no: "Undoing it is left as an exercise for the future",
+              },
+              yes: gate("drops-column", "Column dropped?", "Does it drop or rename a database column?", {
+                yes: outcome(
+                  "seance-booked",
+                  "Seance booked for column",
+                  "A seance has been booked to ask the column whether anything still reads from it.",
+                ),
+                no: gate(
+                  "should-be-fine",
+                  '"Should be fine"?',
+                  'Does the description say "should be fine", or something similar?',
+                  {
+                    yes: outcome(
+                      "candle-lit",
+                      "Candle lit in server room",
+                      "A candle has been lit in the server room. It should be fine.",
+                    ),
+                    no: outcome(
+                      "witness-assigned",
+                      "Witness assigned",
+                      "Cleared to run at 10am on a Tuesday, with one (1) witness and a fire extinguisher.",
+                    ),
+                  },
+                ),
+              }),
+              no: outcome(
+                "deploy-held",
+                "Deploy held at the border",
+                'Held until a rollback plan is written. A sticky note that says "undo" does not count.',
+              ),
+            }),
+          },
         ),
       },
+      outcome(
+        "mark-paged",
+        "Paged: Mark (left in 2016)",
+        "Change unclear. Mark, who wrote this module in 2014, has been paged. Mark left in 2016. His comments remain.",
+      ),
     ),
   ),
   samples: [
@@ -108,7 +138,7 @@ export const pullRequest: CuratedRecipe = {
       input: "Drop legacy_email column from users. Should be fine. Deploying Friday evening so it's quiet.",
     },
     {
-      label: "Good feature",
+      label: "Flagged feature",
       input:
         "Add CSV export to reports. Streams rows so large reports don't time out. Unit tests for the serializer, an e2e test for the download. Behind the csv_export flag.",
     },

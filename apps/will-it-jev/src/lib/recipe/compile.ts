@@ -1,61 +1,71 @@
 import { ask, choice, emit, gate, noul, score, type AnyNode, type Question, type RouteNode } from "jevchain";
-import type { RatedQuestion, Recipe, RecipeNode } from "./types";
+import { ESCAPE, type RatedQuestion, type Recipe, type RecipeGate, type RecipeNode } from "./types";
 
 /**
  * Turns a recipe into a jevchain chain, one node per recipe node. It adds no
  * step nodes and no handlers, so the result serializes with empty `refs`,
  * loads back with `fromJSON` and prints with `toTypeScript`.
  *
- * - A gate asks `noul(question)`. Yes passes at `{ min: 0.5 }` and no at
- *   `{ max: 0.5 }`. The bar is inclusive, so exactly 0.5 takes the passing
- *   side. There is no `unsure` branch, so a run never halts at a gate.
- * - A route asks `choice(question, labels)` with one branch per label.
- * - A rate is one ask titled "Rating", its questions keyed by their keys.
- * - A verdict emits `{ tier, line }`, titled with the line.
+ * - A gate asks `noul(question, { true: means.yes, false: means.no })` (no
+ *   criteria without `means`). Yes passes at `{ min: 0.5 }` to `yes`, and
+ *   anything under goes to `no`. The bar is inclusive, so exactly 0.5 is
+ *   yes. With `unsure`, an answer within `ESCAPE.unsureMargin` of 0.5 goes
+ *   there instead. There is always a `no` branch, so a run never halts.
+ * - A route asks `choice(question, labels)` with one branch per label. With
+ *   `lowConfidence`, a confidence under `ESCAPE.lowConfidenceBelow` goes there.
+ * - A rate is one ask, titled with its title, its questions keyed by their
+ *   keys. The band is picked after the run, from the answers.
+ * - An outcome emits `{ key, stamp, line }`, titled with its stamp.
  *
- * Gates, routes and rates keep their recipe keys as ids. A verdict's id is
- * `<gate>-then` or `<gate>-otherwise` under a gate, `<route>-<label>` under a
- * route, and `verdict` when the whole recipe is one verdict. When that id is
- * also a recipe key or another verdict's id, `verdictIds` resolves the clash.
+ * Every node keeps its recipe key as its id. Keys are unique across the
+ * tree, so ids are too.
  *
- * Expects a recipe that passed `validateRecipe`, so keys are unique.
+ * Expects a recipe that passed `validateRecipe`.
  */
 export function compileRecipe(recipe: Recipe): AnyNode {
-  const claim = verdictIds(recipe.root);
-  const compile = (node: RecipeNode, id: string): AnyNode => {
-    switch (node.kind) {
-      case "verdict":
-        return emit({ tier: node.tier, line: node.line }, { id: claim(id), title: node.line });
-      case "gate":
-        return gate(node.key, {
-          title: node.question,
-          ask: noul(node.question),
-          pass: node.pass === "yes" ? { min: 0.5 } : { max: 0.5 },
-          then: compile(node.then, `${node.key}-then`),
-          otherwise: compile(node.otherwise, `${node.key}-otherwise`),
-        });
-      case "route": {
-        // Built by hand: `route()` checks branches against literal label
-        // types, and these labels are only known at run time.
-        const routeNode: RouteNode = {
-          kind: "route",
-          id: node.key,
-          title: node.question,
-          ask: choice(node.question, node.labels),
-          branches: Object.fromEntries(
-            Object.entries(node.branches).map(([label, child]) => [label, compile(child, `${node.key}-${label}`)]),
-          ),
-        };
-        return routeNode;
-      }
-      case "rate":
-        return ask(node.key, {
-          title: "Rating",
-          questions: Object.fromEntries(node.questions.map((q) => [q.key, ratedQuestion(q)])),
-        });
+  return compileNode(recipe.root);
+}
+
+function compileNode(node: RecipeNode): AnyNode {
+  switch (node.kind) {
+    case "outcome":
+      return emit({ key: node.key, stamp: node.stamp, line: node.line }, { id: node.key, title: node.stamp });
+    case "gate":
+      return gate(node.key, {
+        title: node.title,
+        ask: gateQuestion(node),
+        pass: { min: 0.5 },
+        then: compileNode(node.yes),
+        otherwise: compileNode(node.no),
+        ...(node.unsure ? { unsure: { margin: ESCAPE.unsureMargin, then: compileNode(node.unsure) } } : {}),
+      });
+    case "route": {
+      // Built by hand: `route()` checks branches against literal label
+      // types, and these labels are only known at run time.
+      const routeNode: RouteNode = {
+        kind: "route",
+        id: node.key,
+        title: node.title,
+        ask: choice(node.question, node.labels),
+        branches: Object.fromEntries(
+          Object.entries(node.branches).map(([label, child]) => [label, compileNode(child)]),
+        ),
+        ...(node.lowConfidence
+          ? { lowConfidence: { below: ESCAPE.lowConfidenceBelow, then: compileNode(node.lowConfidence) } }
+          : {}),
+      };
+      return routeNode;
     }
-  };
-  return compile(recipe.root, "verdict");
+    case "rate":
+      return ask(node.key, {
+        title: node.title,
+        questions: Object.fromEntries(node.questions.map((q) => [q.key, ratedQuestion(q)])),
+      });
+  }
+}
+
+function gateQuestion(node: RecipeGate): Question {
+  return node.means ? noul(node.question, { true: node.means.yes, false: node.means.no }) : noul(node.question);
 }
 
 function ratedQuestion(q: RatedQuestion): Question {
@@ -68,40 +78,4 @@ function ratedQuestion(q: RatedQuestion): Question {
     case "choice":
       return choice(q.question, q.labels);
   }
-}
-
-/**
- * Hands out verdict ids. Call it with each verdict's spec'd id in document
- * order, the order `compileRecipe` walks in.
- *
- * Recipe keys are ids already, so they are never renamed. A verdict keeps its
- * spec'd id unless a recipe key or an earlier verdict has it. Then it gets
- * the lowest free `-2`, `-3`, ... suffix. Suffixes skip every spec'd id, so
- * a clash never renames a verdict that had none.
- */
-function verdictIds(root: RecipeNode): (id: string) => string {
-  const keys = new Set<string>();
-  const wanted = new Set<string>();
-  const visit = (node: RecipeNode, id: string) => {
-    if (node.kind === "verdict") {
-      wanted.add(id);
-      return;
-    }
-    keys.add(node.key);
-    if (node.kind === "gate") {
-      visit(node.then, `${node.key}-then`);
-      visit(node.otherwise, `${node.key}-otherwise`);
-    } else if (node.kind === "route") {
-      for (const [label, child] of Object.entries(node.branches)) visit(child, `${node.key}-${label}`);
-    }
-  };
-  visit(root, "verdict");
-
-  const taken = keys;
-  return (id) => {
-    let free = id;
-    for (let n = 2; taken.has(free) || (free !== id && wanted.has(free)); n++) free = `${id}-${n}`;
-    taken.add(free);
-    return free;
-  };
 }

@@ -1,16 +1,15 @@
 import type { Answer, Trace } from "jevchain";
-import { TIERS, type Tier } from "../tiers";
-import { findRecipeNode } from "./tree";
-import type { RatedQuestion, Recipe, RecipeNode, RecipeRate } from "./types";
+import { findOutcome, findRecipeNode } from "./tree";
+import type { RatedQuestion, Recipe, RecipeRate } from "./types";
 
 /**
- * Verdicts are worked out after the run, from the recipe and the trace. The
+ * Results are worked out after the run, from the recipe and the trace. The
  * chain itself only asks Jev and emits. Everything here reads untrusted
  * input (a decoded share link rebuilds the result from a trace), so a bad
  * run gives null or zeros and never throws.
  */
 
-/** Numbers read off the trace for the verdict card. */
+/** Numbers read off the trace for the result card. */
 export interface TraceStats {
   /** Questions Jev answered, over every call: one per gate, route and rated question. */
   gates: number;
@@ -21,18 +20,12 @@ export interface TraceStats {
   requests: number;
 }
 
-export interface Verdict extends TraceStats {
-  tier: Tier;
-  line: string;
-  /** The rate leaf's weighted score, or null for a verdict leaf. */
+/** Where a run ended up. Any result at all means it jevs. */
+export interface Result extends TraceStats {
+  outcome: { key: string; stamp: string; line: string };
+  /** The rate leaf's weighted score, or null when the run ended at an outcome leaf. */
   score: number | null;
 }
-
-/** At or above each bar, best first. Anything under the last is `nope`. */
-const BARS: readonly [Tier, number][] = [
-  ["jevs", 0.66],
-  ["kinda", 0.4],
-];
 
 /**
  * How far one answer goes in the thing's favour, from 0 to 1.
@@ -88,14 +81,17 @@ export function scoreRate(rate: RecipeRate, answers: Record<string, Answer>): nu
   return Math.round((total / weights) * 100) / 100;
 }
 
-/** 0.66 and up jevs, 0.4 and up kinda, anything lower nope. */
-export function tierOf(score: number): Tier {
-  for (const [tier, bar] of BARS) if (score >= bar) return tier;
-  return "nope";
+/**
+ * The first band `score` reaches. Bands are highest first and the last is
+ * `atLeast: 0`, so a validated rate always has one; a NaN score takes the last.
+ */
+export function bandOf(rate: RecipeRate, score: number): RecipeRate["bands"][number]["outcome"] {
+  const band = rate.bands.find((b) => score >= b.atLeast) ?? rate.bands[rate.bands.length - 1]!;
+  return band.outcome;
 }
 
 /**
- * Stats for the verdict card. Missing or malformed fields count as zero, so
+ * Stats for the result card. Missing or malformed fields count as zero, so
  * a decoded trace never throws here.
  */
 export function traceStats(trace: Trace): TraceStats {
@@ -120,52 +116,42 @@ export function traceStats(trace: Trace): TraceStats {
 }
 
 /**
- * The verdict for one run of `recipe`, or null when there isn't one.
+ * The result of one run of `recipe`, or null when there isn't one.
  *
- * An emitted `{ tier, line }` that is one of the recipe's verdict leaves
- * gives that tier and line, with a null score. Otherwise the last ask span
- * must be one of the recipe's rate leaves. Its answers are scored and the
- * tier's line comes from the leaf.
+ * An emitted `{ key, stamp, line }` that is exactly one of the recipe's
+ * outcome leaves gives that outcome, with a null score. Otherwise the last
+ * ask span must be one of the recipe's rate leaves. Its answers are scored
+ * and the band the score reaches gives the outcome.
  *
  * Null when the run did not finish `"ok"`, or its output and last ask match
  * nothing in the recipe. Works on a result rebuilt from a decoded trace:
  * `{ status: trace.status, output: trace.output, trace }`.
  */
-export function verdictOf(
+export function resultOf(
   recipe: Recipe,
-  result: { status: string; output?: unknown; trace: Trace },
-): Verdict | null {
-  if (!isRecord(result) || result.status !== "ok") return null;
-  const trace = result.trace;
+  run: { status: string; output?: unknown; trace: Trace },
+): Result | null {
+  if (!isRecord(run) || run.status !== "ok") return null;
+  const trace = run.trace;
 
-  const leaf = verdictLeaf(recipe, result.output);
-  if (leaf) return { tier: leaf.tier, line: leaf.line, score: null, ...traceStats(trace) };
+  const leaf = outcomeLeaf(recipe, run.output);
+  if (leaf) return { outcome: leaf, score: null, ...traceStats(trace) };
 
   const rated = lastRate(recipe, trace);
   if (!rated) return null;
   const score = scoreRate(rated.rate, rated.answers);
-  const tier = tierOf(score);
-  return { tier, line: rated.rate.verdicts[tier], score, ...traceStats(trace) };
+  const { key, stamp, line } = bandOf(rated.rate, score);
+  return { outcome: { key, stamp, line }, score, ...traceStats(trace) };
 }
 
-/** The recipe's verdict leaf with exactly this tier and line, if `output` is one. */
-function verdictLeaf(recipe: Recipe, output: unknown): { tier: Tier; line: string } | undefined {
+/** The recipe's outcome leaf with exactly this key, stamp and line, if `output` is one. */
+function outcomeLeaf(recipe: Recipe, output: unknown): Result["outcome"] | undefined {
   if (!isRecord(output)) return undefined;
-  const { tier, line } = output;
-  if (typeof line !== "string" || !(TIERS as readonly unknown[]).includes(tier)) return undefined;
-  const has = (node: RecipeNode): boolean => {
-    switch (node.kind) {
-      case "verdict":
-        return node.tier === tier && node.line === line;
-      case "rate":
-        return false;
-      case "gate":
-        return has(node.then) || has(node.otherwise);
-      case "route":
-        return Object.values(node.branches).some(has);
-    }
-  };
-  return has(recipe.root) ? { tier: tier as Tier, line } : undefined;
+  const { key, stamp, line } = output;
+  if (typeof key !== "string" || typeof stamp !== "string" || typeof line !== "string") return undefined;
+  const found = findOutcome(recipe, key, "leaf");
+  if (!found || found.stamp !== stamp || found.line !== line) return undefined;
+  return { key, stamp, line };
 }
 
 /** The rate leaf the last ask span ran, with its answers merged over its calls. */

@@ -1,10 +1,10 @@
 import { run } from "jevchain";
 import { describe, expect, it } from "vitest";
+import { gate, outcome, pick, rate, recipe, route, scale, yesNo } from "@/test/build";
 import { fakeJev } from "@/test/fake-jev";
 import { COPY } from "./copy";
 import { MAX_BODY_BYTES, validateJevRequest, type JevRequestBody } from "./jev-request";
 import { validateRecipeRequest } from "./recipe-request";
-import { gate, pick, rate, recipe, route, scale, verdict, yesNo } from "./recipe/build";
 import { compileRecipe } from "./recipe/compile";
 import { CAPS } from "./recipe/types";
 import { validateRecipe } from "./recipe/validate";
@@ -25,6 +25,7 @@ const ok: JevRequestBody = {
   model: "jev-latest",
   questions: {
     decision: { type: "noul", instructions: "Is it kind?" },
+    means: { type: "noul", instructions: "Is it kind?", criteria: { true: "warm", false: "cold" } },
     which: { type: "choice", instructions: "Which?", criteria: { calm: "Quiet.", loud: "Not quiet." } },
     how: { type: "score", instructions: "How much?", criteria: ["low", "high"] },
   },
@@ -36,7 +37,7 @@ type Question = JevRequestBody["questions"][string];
 const withQuestion = (q: Question): JevRequestBody => ({ ...ok, questions: { q } });
 
 describe("validateRecipeRequest", () => {
-  it("accepts a noul, a choice and a score", () => {
+  it("accepts a noul with and without criteria, a choice and a score", () => {
     expect(validateRecipeRequest(ok)).toEqual({ ok: true });
   });
 
@@ -82,8 +83,12 @@ describe("validateRecipeRequest", () => {
     ["object instructions", withQuestion(noul({ text: "Is it?" })), /instructions/],
     ["instructions over 200", withQuestion(noul("x".repeat(CAPS.question + 1))), /instructions.*200/],
     ["an extra question field", withQuestion({ type: "noul", instructions: "Is it?", model: "x" }), /model/],
-    ["a noul with criteria", withQuestion({ type: "noul", instructions: "Is it?", criteria: { true: "yes" } }), /no criteria/],
-    ["a noul with null criteria", withQuestion({ type: "noul", instructions: "Is it?", criteria: null }), /no criteria/],
+    ["a noul with only true", withQuestion({ type: "noul", instructions: "Is it?", criteria: { true: "yes" } }), /exactly true and false/],
+    ["a noul with an extra criterion", withQuestion({ type: "noul", instructions: "Is it?", criteria: { true: "y", false: "n", maybe: "m" } }), /exactly true and false/],
+    ["a noul with null criteria", withQuestion({ type: "noul", instructions: "Is it?", criteria: null }), /object with true and false/],
+    ["a noul with list criteria", withQuestion({ type: "noul", instructions: "Is it?", criteria: ["y", "n"] }), /object with true and false/],
+    ["a noul with an empty false", withQuestion({ type: "noul", instructions: "Is it?", criteria: { true: "y", false: " " } }), /up to 120/],
+    ["a noul with a true over 120", withQuestion({ type: "noul", instructions: "Is it?", criteria: { true: "x".repeat(CAPS.means + 1), false: "n" } }), /up to 120/],
     ["a choice with a list", withQuestion(choice(["a", "b"])), /criteria/],
     ["a choice with 1 label", withQuestion(choice({ a: "A." })), /2 to 6 labels/],
     ["a choice with 7 labels", withQuestion(choice({ a: "A", b: "B", c: "C", d: "D", e: "E", f: "F", g: "G" })), /2 to 6 labels/],
@@ -114,9 +119,9 @@ describe("validateRecipeRequest", () => {
 function recipeAtCaps() {
   const key = (seed: string) => at(CAPS.key, `${seed}-`);
   const question = (seed: string) => at(CAPS.question, `${seed}? `);
-  const line = (seed: string) => at(CAPS.line, `${seed}. `);
+  const end = (seed: string) => outcome(key(seed), at(CAPS.stamp, `${seed} `), at(CAPS.line, `${seed}. `));
   const levels = (seed: string) => Array.from({ length: CAPS.levels.max }, (_, i) => at(CAPS.level, `${seed} ${i} `));
-  const verdicts = { jevs: line("It jevs"), kinda: line("It sort of jevs"), nope: line("It does not jev") };
+  const means = (seed: string) => ({ yes: at(CAPS.means, `${seed} yes `), no: at(CAPS.means, `${seed} no `) });
   const choiceLabels = labelsAtCap("pick");
 
   const leaf = rate(
@@ -129,20 +134,37 @@ function recipeAtCaps() {
       scale(key("score-b"), question("Score b"), 1, levels("score b"), "low"),
       pick(key("choice-b"), question("Choice b"), 1, labelsAtCap("other"), [at(CAPS.label, "other-5-")]),
     ],
-    verdicts,
+    [
+      [0.75, end("band-a")],
+      [0.5, end("band-b")],
+      [0.25, end("band-c")],
+      [0, end("band-d")],
+    ],
+    { title: at(CAPS.nodeTitle, "Rating ") },
   );
-  // The fake says 0.1 to every noul, so "no" gates pass on to `then`.
+  // The fake says 0.1 to every noul, so gates go on to `no`.
   const gates = gate(
     key("gate-a"),
     question("Gate a"),
-    "no",
-    gate(key("gate-b"), question("Gate b"), "no", leaf, verdict("nope", line("Stopped at b"))),
-    verdict("nope", line("Stopped at a")),
+    end("stopped-at-a"),
+    gate(key("gate-b"), question("Gate b"), end("stopped-at-b"), leaf, {
+      title: at(CAPS.nodeTitle, "Gate b "),
+      means: means("b"),
+      unsure: end("unsure-at-b"),
+    }),
+    { title: at(CAPS.nodeTitle, "Gate a "), means: means("a") },
   );
   const routeLabels = labelsAtCap("route");
   const [first, ...rest] = Object.keys(routeLabels);
-  const branches = { [first]: gates, ...Object.fromEntries(rest.map((l) => [l, verdict("kinda", line(l))])) };
-  return recipe(at(CAPS.title, "Will it jev "), at(CAPS.thing, "the thing "), route(key("route"), question("Route"), routeLabels, branches));
+  const branches = { [first]: gates, ...Object.fromEntries(rest.map((l, i) => [l, end(`branch-${i}`)])) };
+  return recipe(
+    at(CAPS.title, "The Desk "),
+    at(CAPS.thing, "the thing "),
+    route(key("route"), question("Route"), routeLabels, branches, {
+      title: at(CAPS.nodeTitle, "Route "),
+      lowConfidence: end("low"),
+    }),
+  );
 }
 
 describe("a compiled recipe's own requests", () => {
@@ -166,6 +188,8 @@ describe("a compiled recipe's own requests", () => {
     const all = requests.flatMap((r) => Object.values(r.questions));
     expect(Math.max(...all.map((q) => String(q.instructions).length))).toBe(CAPS.question);
     expect(Math.max(...all.map((q) => (Array.isArray(q.criteria) ? q.criteria.length : 0)))).toBe(CAPS.levels.max);
+    const means = all.flatMap((q) => (q.type === "noul" && q.criteria ? [String((q.criteria as { true: string }).true)] : []));
+    expect(means.map((m) => m.length)).toEqual([CAPS.means, CAPS.means]);
 
     for (const { state, questions } of requests) {
       expect(state).toBe(input);

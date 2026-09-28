@@ -2,7 +2,7 @@
 
 **Every computer is AND gates. Every decision is jev gates.**
 
-Paste a text, a pitch or a plan, and the site breaks it into a small tree of nested yes/no gates, routes and ratings, then runs that tree against [Jev](https://docs.typesafe.ai) live and reads a verdict off the path it took. Every run can be shared as a link that replays the whole circuit and verdict, with nothing stored on the server.
+Paste anything and Jev routes it through a small, serious bureaucracy: a desk of yes/no gates, routes and ratings that ends at one specific outcome ("Couch placed in escrow"). The desk is drawn with the studio's own trace graph, the run lights its path live against [Jev](https://docs.typesafe.ai), and the why panel and inspector show every decision with its real numbers. A run that reaches an outcome is stamped *It jevs.*: the text became gates and Jev decided every one. Every run can be shared as a link that replays it, with nothing stored on the server.
 
 ## Run it
 
@@ -42,12 +42,13 @@ The two `NEXT_PUBLIC_` values are built into the browser bundle, so they never h
 
 ## How it works
 
-- **Recipe.** Every jevvable thing is a recipe: a small JSON decision tree of gates (yes/no), routes (pick one label) and leaves. A leaf is either a fixed verdict or a rating of a few weighted questions. Curated recipes, model output and share links all use this one shape.
-- **Compiler.** `compileRecipe` turns a recipe into a plain jevchain chain: a gate asks a noul, a route asks a choice, a rating is one ask, a verdict emits its tier and line. The browser runs it through the same-origin `/api/jev` proxy, which adds the key and forwards only requests a compiled recipe could make. The verdict and stats are worked out afterwards from the recipe and the trace.
-- **Curated recipes.** Eight hand-written recipes in `src/recipes`, each with sample inputs. They run without the decomposer and pass the same validator as model output.
+- **Recipe (a desk).** Every jevvable thing is a recipe (`src/lib/recipe/types.ts`, `v: 2`): a small JSON decision tree of gates (yes/no, with optional descriptions of what each answer means), routes (pick one label) and leaves. A leaf is an outcome (`{ key, stamp, line }`) or a rating of a few weighted questions whose score picks one of its outcome bands. Gates can have an `unsure` branch and routes a `lowConfidence` one, for when Jev can't call it. There is no pass or fail. Curated recipes, model output and share links all use this one shape.
+- **Compiler.** `compileRecipe` turns a recipe into a plain jevchain chain: a gate is a `gate` asking a noul, a route is a `route` asking a choice, a rating is one ask, an outcome emits itself. The browser runs it through the same-origin `/api/jev` proxy, which adds the key and forwards only requests a compiled recipe could make. The result (outcome, score, stats) is worked out afterwards from the recipe and the trace.
+- **The runner.** The page draws the compiled chain with `jevchain-trace-ui` (`packages/trace-ui`), the studio's graph, why panel and inspector, shared by both apps. Spans are paced out one step at a time so a half-second run can be followed.
+- **Curated desks.** Eleven hand-written desks in `src/recipes`, each with sample inputs that land on different outcomes. They run without the decomposer and pass the same validator as model output.
 - **Decomposer.** Free text goes to `/api/decompose`, which asks the configured LLM for a recipe. An invalid reply gets one retry carrying the validator's message.
 - **Validation, including tone.** `validateRecipe` checks every untrusted recipe: shape, sizes, depth, unique keys, and the site's flat tone (no exclamation marks, no emoji, no "lol").
-- **Share links.** `/v?t=jevs&g=10&d=10&r=tonight#<run>`. The hash holds the whole run: the recipe, the input (cut to 500 characters) and a slimmed trace, deflate-compressed, up to 64 KB. The query holds only the tier, the counts and a curated recipe's slug, for link previews, never any text. The verdict page decodes and checks the hash in the browser, recomputes the verdict from it, and makes no requests. Nothing is stored.
+- **Share links.** `/v?g=2&d=2&r=breakup-text&o=couch-escrow#<run>`. The hash holds the whole run: the recipe, the input (cut to 500 characters) and a slimmed trace, deflate-compressed, up to 64 KB. The query holds only the counts and, for a curated desk, its slug and outcome key, for link previews, never any text. The verdict page decodes and checks the hash in the browser, recomputes the result from it, and makes no requests. Nothing is stored.
 
 ## Running it in public
 

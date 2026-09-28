@@ -1,13 +1,13 @@
 import { toJSON, toTypeScript, type Trace } from "jevchain";
 import { compileRecipe } from "@/lib/recipe/compile";
 import type { Recipe } from "@/lib/recipe/types";
-import type { Verdict } from "@/lib/recipe/verdict";
+import type { Result } from "@/lib/recipe/result";
 import { studioHref, verdictHref } from "@/lib/share";
 
 /** The share bar's work, kept out of React so it can be tested in node. */
 
 export interface ShareLinks {
-  /** The verdict page link, absolute. */
+  /** The result page link, absolute. */
   share: string;
   /** "Open in the studio". */
   studio: string;
@@ -18,7 +18,7 @@ export interface ShareLinks {
  * made absolute against `origin` (the page's `window.location.origin`).
  */
 export async function buildShareLinks(
-  p: { recipe: Recipe; input: string; trace: Trace; verdict: Verdict; slug: string | null },
+  p: { recipe: Recipe; input: string; trace: Trace; result: Result; slug: string | null },
   origin: string,
 ): Promise<ShareLinks> {
   const [href, studio] = await Promise.all([

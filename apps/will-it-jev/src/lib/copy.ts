@@ -1,12 +1,4 @@
-import type { Tier } from "./tiers";
-
 /** Every string the site shows lives here, so the tone test can read them all. */
-
-export const TIER_TEXT: Record<Tier, string> = {
-  jevs: "It jevs.",
-  kinda: "It sort of jevs.",
-  nope: "It does not jev.",
-};
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -14,15 +6,27 @@ function gatesAndDepth(gates: number, depth: number): string {
   return `${plural(gates, "gate", "gates")}. ${depth} deep.`;
 }
 
+const score = (n: number) => `Score ${n.toFixed(2)}.`;
+
 export const COPY = {
   siteTitle: "Will it jev?",
-  tagline: "Every computer is AND gates. Every decision is jev gates.",
+  tagline: "Paste anything. Jev routes it through a small, serious bureaucracy, and you watch every decision it makes.",
+  motto: "Every computer is AND gates. Every decision is jev gates.",
+
+  /** The stamp every finished run gets: the thing became gates and Jev decided them all. */
+  jevs: "It jevs.",
 
   prompt: "What do you want to jev?",
   placeholder: "Paste a text, a pitch, a plan. Anything that needs deciding.",
   submit: "Jev it",
-  examplesHeading: "Or jev one of these.",
-  writeYourOwn: "Write your own",
+  desksHeading: "Pick a desk",
+  newDesk: "New desk for anything",
+  newDeskTitle: "A new desk",
+  newDeskNote: "Paste anything and Jev sets up a desk for it: the gates, the departments and where it all ends up.",
+  noDeskYet: "The desk is drawn here once your text is broken down.",
+  samplesLabel: "Sample input",
+  graphHint: "Click any gate to see Jev's numbers.",
+  whyHeading: "Every decision, and why",
   disclosure:
     "Your text goes to an LLM provider to be broken down into gates. This site keeps none of it.",
 
@@ -45,9 +49,8 @@ export const COPY = {
   showCode: "Show the code",
   hideCode: "Hide the code",
   codeNote:
-    "This is the circuit. The site works out the verdict from its answers, so that part is not in the code.",
+    "This is the desk as jevchain code. The site works out a rating's outcome from its answers, so that part is not in the code.",
   again: "Jev something else",
-  rating: "Rating",
 
   badLink: "This link is damaged. Part of it is missing.",
   jevSomething: "Jev something yourself",
@@ -62,17 +65,12 @@ export const COPY = {
   notRecipe: "This site would not make that request.",
 
   gatesAndDepth,
-  stats: (gates: number, depth: number, ms: number) => `${gatesAndDepth(gates, depth)} ${ms}ms.`,
-  score: (n: number) => `Score ${n.toFixed(2)}.`,
-  gateLabel: (n: number) => `Gate ${n}`,
+  /** The result card's numbers. A rating's score goes last. */
+  stats: (gates: number, depth: number, ms: number, n: number | null = null) =>
+    `${gatesAndDepth(gates, depth)} ${ms}ms.${n === null ? "" : ` ${score(n)}`}`,
+  score,
   shape: (decisions: number, maxDepth: number) =>
     decisions === 1
       ? `1 decision. ${maxDepth} deep.`
       : `${decisions} decisions. Up to ${maxDepth} deep.`,
 } as const;
-
-/** A verdict line minus its leading tier sentence. Other lines come back unchanged. */
-export function lineRest(line: string, tier: Tier): string {
-  const head = TIER_TEXT[tier];
-  return line.startsWith(head) ? line.slice(head.length).trimStart() : line;
-}

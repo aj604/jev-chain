@@ -13,99 +13,99 @@ afterEach(() => {
 });
 
 describe("runRecipe", () => {
-  it("reports each growing trace and resolves with the verdict", async () => {
+  it("reports each growing trace and resolves with the result", async () => {
     const { client } = fakeJev();
     const traces: Trace[] = [];
-    const run = await runRecipe(createJev(client), ladder(4), "the ladder", { onTrace: (t) => traces.push(t) });
+    const out = await runRecipe(createJev(client), ladder(4), "the ladder", { onTrace: (t) => traces.push(t) });
 
     expect(traces.length).toBeGreaterThan(4);
     for (let i = 1; i < traces.length; i++) {
       expect(traces[i]).not.toBe(traces[i - 1]);
       expect(traces[i]!.spans.length).toBeGreaterThanOrEqual(traces[i - 1]!.spans.length);
     }
-    expect(traces.at(-1)).toBe(run.result.trace);
-    expect(run.result.status).toBe("ok");
-    expect(run.verdict).toMatchObject({ tier: "jevs", line: "It jevs.", gates: 4, depth: 4 });
-    expect(run.failure).toBeNull();
+    expect(traces.at(-1)).toBe(out.run.trace);
+    expect(out.run.status).toBe("ok");
+    expect(out.result).toMatchObject({ outcome: { key: "through" }, score: null, gates: 4, depth: 4 });
+    expect(out.failure).toBeNull();
   });
 
   it("sends template-looking input to Jev unchanged, as plain text", async () => {
     const { client, requests } = fakeJev();
     const input = "{{results.g1}} and {{input}}";
-    const run = await runRecipe(createJev(client), ladder(2), input);
+    const out = await runRecipe(createJev(client), ladder(2), input);
 
     expect(requests.length).toBe(2);
     for (const r of requests) expect(r.state).toBe(input);
-    expect(run.verdict).toMatchObject({ tier: "jevs" });
+    expect(out.result).toMatchObject({ outcome: { key: "through" } });
   });
 
   it("resolves a 500 as an error with no answer", async () => {
     const { client } = fakeJev(undefined, { status: 500 });
-    const run = await runRecipe(createJev(client), ladder(2), "x");
+    const out = await runRecipe(createJev(client), ladder(2), "x");
 
-    expect(run.result.status).toBe("error");
-    expect(run.verdict).toBeNull();
-    expect(run.failure).toBe("no-answer");
+    expect(out.run.status).toBe("error");
+    expect(out.result).toBeNull();
+    expect(out.failure).toBe("no-answer");
     // The circuit so far stays: the first gate's span is there.
-    expect(run.result.trace.spans.map((s) => s.nodeId)).toEqual(["g1"]);
+    expect(out.run.trace.spans.map((s) => s.nodeId)).toEqual(["g1"]);
   });
 
   it("reads a 429 as rate-limited", async () => {
     const { client } = fakeJev(undefined, { status: 429 });
-    const run = await runRecipe(createJev(client), ladder(2), "x");
-    expect(run.result.status).toBe("error");
-    expect(run.verdict).toBeNull();
-    expect(run.failure).toBe("rate-limited");
+    const out = await runRecipe(createJev(client), ladder(2), "x");
+    expect(out.run.status).toBe("error");
+    expect(out.result).toBeNull();
+    expect(out.failure).toBe("rate-limited");
   });
 
   it("reads the proxy's pause response as paused", async () => {
     const { client } = fakeJev(undefined, { status: 503, body: PAUSED_BODY });
-    const run = await runRecipe(createJev(client), ladder(2), "x");
-    expect(run.result.status).toBe("error");
-    expect(run.failure).toBe("paused");
+    const out = await runRecipe(createJev(client), ladder(2), "x");
+    expect(out.run.status).toBe("error");
+    expect(out.failure).toBe("paused");
   });
 
   it("reads the paused message alone as paused", async () => {
     const { client } = fakeJev(undefined, { status: 503, body: { error: { message: COPY.paused } } });
-    const run = await runRecipe(createJev(client), ladder(2), "x");
-    expect(run.failure).toBe("paused");
+    const out = await runRecipe(createJev(client), ladder(2), "x");
+    expect(out.failure).toBe("paused");
   });
 
   it("reads the paused error type alone as paused", async () => {
     const { client } = fakeJev(undefined, { status: 503, body: { error: { type: "paused" } } });
-    const run = await runRecipe(createJev(client), ladder(2), "x");
-    expect(run.result.status).toBe("error");
-    expect(run.failure).toBe("paused");
+    const out = await runRecipe(createJev(client), ladder(2), "x");
+    expect(out.run.status).toBe("error");
+    expect(out.failure).toBe("paused");
   });
 
   it("reads an ordinary 503 as no answer", async () => {
     const { client } = fakeJev(undefined, { status: 503, body: { error: { type: "overloaded", message: "Busy." } } });
-    const run = await runRecipe(createJev(client), ladder(2), "x");
-    expect(run.failure).toBe("no-answer");
+    const out = await runRecipe(createJev(client), ladder(2), "x");
+    expect(out.failure).toBe("no-answer");
   });
 
   it("resolves an already-aborted signal as aborted, with no failure", async () => {
     const { client, requests } = fakeJev();
-    const run = await runRecipe(createJev(client), ladder(2), "x", { signal: AbortSignal.abort() });
-    expect(run.result.status).toBe("aborted");
-    expect(run.verdict).toBeNull();
-    expect(run.failure).toBeNull();
+    const out = await runRecipe(createJev(client), ladder(2), "x", { signal: AbortSignal.abort() });
+    expect(out.run.status).toBe("aborted");
+    expect(out.result).toBeNull();
+    expect(out.failure).toBeNull();
     expect(requests).toEqual([]);
   });
 
   it("stops a run aborted part way and keeps the circuit so far", async () => {
     const { client } = fakeJev();
     const controller = new AbortController();
-    const run = await runRecipe(createJev(client), ladder(4), "x", {
+    const out = await runRecipe(createJev(client), ladder(4), "x", {
       signal: controller.signal,
       onTrace: (t) => {
         if (t.spans.some((s) => s.nodeId === "g2" && s.decision)) controller.abort();
       },
     });
-    expect(run.result.status).toBe("aborted");
-    expect(run.verdict).toBeNull();
-    expect(run.failure).toBeNull();
-    expect(run.result.trace.spans.map((s) => s.nodeId).slice(0, 2)).toEqual(["g1", "g2"]);
+    expect(out.run.status).toBe("aborted");
+    expect(out.result).toBeNull();
+    expect(out.failure).toBeNull();
+    expect(out.run.trace.spans.map((s) => s.nodeId).slice(0, 2)).toEqual(["g1", "g2"]);
   });
 
   it("times out after 60 seconds as an error with no answer", async () => {
@@ -122,13 +122,13 @@ describe("runRecipe", () => {
     await vi.advanceTimersByTimeAsync(RUN_TIMEOUT_MS - 1);
     expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
-    const run = await pending;
+    const out = await pending;
 
     expect(RUN_TIMEOUT_MS).toBe(60_000);
-    expect(run.result.status).toBe("error");
-    expect(run.result.error?.cause).toMatchObject({ code: "timeout" });
-    expect(run.verdict).toBeNull();
-    expect(run.failure).toBe("no-answer");
+    expect(out.run.status).toBe("error");
+    expect(out.run.error?.cause).toMatchObject({ code: "timeout" });
+    expect(out.result).toBeNull();
+    expect(out.failure).toBe("no-answer");
   });
 
   it("resolves instead of throwing when the client throws something odd", async () => {
@@ -137,9 +137,9 @@ describe("runRecipe", () => {
       usdPerMillionTokens: 0,
       ask: () => Promise.reject("not even an Error"),
     };
-    const run = await runRecipe(createJev(client), ladder(1), "x");
-    expect(run.result.status).toBe("error");
-    expect(run.failure).toBe("no-answer");
+    const out = await runRecipe(createJev(client), ladder(1), "x");
+    expect(out.run.status).toBe("error");
+    expect(out.failure).toBe("no-answer");
   });
 });
 
@@ -174,9 +174,9 @@ describe("runFailure", () => {
       usdPerMillionTokens: 0,
       ask: () => Promise.reject(new Error(COPY.paused)),
     };
-    const run = await runRecipe(createJev(client), ladder(1), "x");
-    expect(run.result.trace.error?.message).toContain(COPY.paused);
-    expect(run.failure).toBe("paused");
+    const out = await runRecipe(createJev(client), ladder(1), "x");
+    expect(out.run.trace.error?.message).toContain(COPY.paused);
+    expect(out.failure).toBe("paused");
   });
 
   it("survives a cyclic cause chain", () => {
