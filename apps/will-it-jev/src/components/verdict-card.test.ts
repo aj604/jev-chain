@@ -22,6 +22,14 @@ describe("VerdictCard", () => {
     expect(render(BASE)).toMatch(/^<section[^>]* aria-live="polite"/);
   });
 
+  it("leaves the live region to the page with live={false}", () => {
+    const html = renderToStaticMarkup(createElement(VerdictCard, { verdict: BASE, title: "t", live: false }));
+    expect(html).toMatch(/^<section /);
+    expect(html).not.toContain("aria-live");
+    expect(html).not.toContain("aria-atomic");
+    expect(html).toContain(">10 gates. 10 deep. 180ms.</p>");
+  });
+
   it("shows the title, the tier sentence, the rest of the line and the stat line", () => {
     const html = render(BASE);
     expect(html).toContain(">Will your plan for tonight jev?</p>");
