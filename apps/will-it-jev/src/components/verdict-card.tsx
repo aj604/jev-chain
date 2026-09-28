@@ -1,0 +1,27 @@
+import { COPY, TIER_TEXT, lineRest } from "@/lib/copy";
+import type { Verdict } from "@/lib/recipe/verdict";
+import type { Tier } from "@/lib/tiers";
+
+const TIER_COLOR: Record<Tier, string> = { jevs: "text-yes", kinda: "text-ink", nope: "text-no" };
+
+/**
+ * The verdict: the recipe title, the tier sentence very large, the rest of
+ * the line, and the stat line. The card is a polite live region, so screen
+ * readers announce it when it arrives.
+ */
+export function VerdictCard({ verdict, title }: { verdict: Verdict; title: string }) {
+  const rest = lineRest(verdict.line, verdict.tier);
+  const stats = COPY.stats(verdict.gates, verdict.depth, verdict.latencyMs);
+  return (
+    <section aria-live="polite" aria-atomic="true" className="min-w-0 border-y border-rule py-6">
+      <p className="wrap-break-word text-sm text-ink-2">{title}</p>
+      <p className={`mt-2 wrap-break-word text-5xl font-semibold tracking-tight ${TIER_COLOR[verdict.tier]}`}>
+        {TIER_TEXT[verdict.tier]}
+      </p>
+      {rest && <p className="mt-3 wrap-break-word text-lg text-ink">{rest}</p>}
+      <p className="mt-4 text-sm tabular-nums text-ink-3">
+        {verdict.score === null ? stats : `${stats} ${COPY.score(verdict.score)}`}
+      </p>
+    </section>
+  );
+}
