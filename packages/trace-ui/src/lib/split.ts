@@ -4,7 +4,7 @@
  * Compare mode runs two inputs once each and says where they parted: "diverged
  * at Should I reply?: a went “fallback”, b went “full-context”". That reads as
  * "the edit did it". But the same input asked twice can go two ways (see
- * `lib/trace/reask`), so one pull of each can't tell an input that changes the
+ * `lib/reask`), so one pull of each can't tell an input that changes the
  * road from a coin that landed differently. Asking each input again can:
  *
  *   const splits = splitsOf(a, reasksOfA, b, reasksOfB);

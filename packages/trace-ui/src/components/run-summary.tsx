@@ -6,12 +6,12 @@
  * badge that says the numbers are made up, here and on share links alike.
  */
 import type { Trace } from "jevchain";
-import { ChainLinks } from "@/components/brand/chain-links";
-import { Badge, type BadgeTone } from "@/components/ui/badge";
-import { cn } from "@/lib/cn";
-import { fmtMs, fmtTokens, fmtUsd } from "@/lib/trace/format";
-import { isRehearsal } from "@/lib/trace/rehearsal";
-import { forkLabel, forksOf } from "@/lib/trace/what-if";
+import { ChainLinks } from "../ui/chain-links";
+import { Badge, type BadgeTone } from "../ui/badge";
+import { cn } from "../ui/cn";
+import { fmtMs, fmtTokens, fmtUsd } from "../lib/format";
+import { isRehearsal } from "../lib/rehearsal";
+import { forkLabel, forksOf } from "../lib/what-if";
 
 const STATUS: Record<Trace["status"], { tone: BadgeTone; label: string }> = {
   running: { tone: "accent", label: "running" },

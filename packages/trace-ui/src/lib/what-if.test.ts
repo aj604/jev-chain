@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { ask, cascade, chain, choice, createJev, decisions, emit, gate, noul, route, score, spanAt, tier, type AnyNode, type Json, type JevClient, type Trace } from "jevchain";
 import { examples } from "jevchain-examples";
 import { isRehearsal, rehearsalClient } from "./rehearsal";
-import { decodeShare, encodeShare } from "./share";
 import { forkableEdges, forkOf, forksOf, isWhatIf, WHAT_IF_MODEL, whatIfClient } from "./what-if";
+
+/** What a share link or a saved run does to a trace: it's stored as JSON. */
+const throughJson = (t: Trace): Trace => JSON.parse(JSON.stringify(t)) as Trace;
 
 /** The rehearsal client, counting what reaches it. */
 function counted(): { client: JevClient; asked: string[] } {
@@ -105,11 +107,11 @@ describe("whatIfClient", () => {
     expect(tried).toBeGreaterThan(0);
   });
 
-  it("still explains itself after a trip through a share link", async () => {
+  it("still explains itself after a trip through JSON (a share link, a saved run)", async () => {
     const a = await base(triage, "refund please");
     const edge = forkableEdges(triage, a, TRIAGE)[0]!;
     const b = await fork(triage, a, TRIAGE, edge);
-    const back = await decodeShare(await encodeShare({ v: 1, chain: { example: "x" }, input: b.input, trace: b }));
+    const back = { trace: throughJson(b) };
     expect(forkOf(back.trace)).toEqual(forkOf(b));
   });
 
@@ -263,11 +265,11 @@ describe("forking a fork", () => {
     expect(forksOf(c)).toEqual([{ path: TRIAGE, nodeId: "triage", edge: "billing" }]);
   });
 
-  it("still lists every fork, and is still a rehearsal, after a trip through a share link", async () => {
+  it("still lists every fork, and is still a rehearsal, after a trip through JSON (a share link, a saved run)", async () => {
     const a = await runThat((t) => t !== "bug");
     const b = await fork(triage, a, TRIAGE, "bug");
     const c = await fork(triage, b, GATE, forkableEdges(triage, b, GATE)[0]!);
-    const back = await decodeShare(await encodeShare({ v: 1, chain: { example: "x" }, input: c.input, trace: c }));
+    const back = { trace: throughJson(c) };
     expect(forksOf(back.trace)).toEqual(forksOf(c));
     expect(forksOf(back.trace)).toHaveLength(2);
     expect(isRehearsal(back.trace)).toBe(true);

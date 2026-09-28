@@ -6,7 +6,7 @@
  * open; the menu swallows keys so global hotkeys don't fire underneath.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { KIND_GLYPH } from "@/components/trace/kinds";
+import { KIND_GLYPH } from "jevchain-trace-ui";
 import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/cn";
 import type { BuilderKind } from "@/lib/builder/doc-ops";

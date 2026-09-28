@@ -7,17 +7,11 @@
  */
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AnyNode, FlowGraph, Trace } from "jevchain";
-import { Inspector, type WhatIfControl } from "@/components/trace/inspector";
-import { RunSummary } from "@/components/trace/run-summary";
-import { Timeline } from "@/components/trace/timeline";
-import { TraceGraph, type TraceGraphProps } from "@/components/trace/trace-graph";
-import { WhyPanel, type ReaskControl } from "@/components/trace/why-panel";
+import { Inspector, type WhatIfControl, RunSummary, Timeline, TraceGraph, type TraceGraphProps, WhyPanel, type ReaskControl } from "jevchain-trace-ui";
 import { cn } from "@/lib/cn";
+import { useTheme } from "@/lib/use-theme";
 import type { ResolvedChain } from "@/lib/trace/chain-source";
-import type { RunIssue } from "@/lib/trace/run-error";
-import type { Traffic } from "@/lib/trace/sweep";
-import { forkableEdges, forksOf } from "@/lib/trace/what-if";
-import { hasReasks, splitHeadline } from "@/lib/trace/split";
+import { type RunIssue, type Traffic, forkableEdges, forksOf, hasReasks, splitHeadline } from "jevchain-trace-ui/helpers";
 import { CompareSummary, type CompareAskControl } from "./compare-summary";
 
 export type Target = "a" | "b" | "diff";
@@ -61,9 +55,9 @@ export interface WorkbenchProps {
    * trace, `aside` replaces the story / inspector and `summary` the run strip.
    */
   sweep?: { traffic: Traffic; aside: ReactNode; summary: ReactNode };
-  /** "Ask again" for run a: shown in its story and inspector (see `lib/trace/reask`). */
+  /** "Ask again" for run a: shown in its story and inspector (see `jevchain-trace-ui` (reask)). */
   reask?: ReaskControl;
-  /** "Ask both again" in compare mode: both inputs re-sent to Jev (see `lib/trace/split`). */
+  /** "Ask both again" in compare mode: both inputs re-sent to Jev (see `jevchain-trace-ui` (split)). */
   compareAsk?: CompareAskControl;
 }
 
@@ -100,6 +94,8 @@ export function Workbench({
   const [timelineH, setTimelineH] = useState(TIMELINE_DEFAULT);
   const [timelineOpen, setTimelineOpen] = useState(true);
   const drag = useRef<{ y: number; h: number } | null>(null);
+  // The graph follows the app's theme toggle, not the OS ("system" would ignore it).
+  const { resolved: resolvedTheme } = useTheme();
 
   const comparing = compare !== undefined && !sweep;
   const showB = comparing && target === "b";
@@ -179,6 +175,7 @@ export function Workbench({
             selected={selected}
             onSelect={select}
             fitSignal={fitSignal}
+            colorMode={resolvedTheme}
           />
           {canvasOverlay}
         </div>

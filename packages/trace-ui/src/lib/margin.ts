@@ -10,7 +10,7 @@
  * A decision's recorded numbers alone can't say this: a route that didn't go
  * unsure doesn't record the confidence bar it cleared, and a gate doesn't
  * record its unsure band. So this reads the rule off the chain node, the same
- * way a what-if does (`lib/trace/what-if`), and measures one number at a time:
+ * way a what-if does (`lib/what-if`), and measures one number at a time:
  *
  * - **route**: a label road is as close as the winner's lead over it (the
  *   runtime takes Jev's choice, so the lead is what would have to go); the

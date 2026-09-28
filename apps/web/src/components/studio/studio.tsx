@@ -14,27 +14,27 @@
  * mode, and the trace paints over the graph you just built.
  *
  * Rehearse (`r`, or `?rehearse=1`) swaps Jev for a local client that makes
- * its answers up (see `lib/trace/rehearsal`): no key, no network, every road
+ * its answers up (see `jevchain-trace-ui` (rehearsal)): no key, no network, every road
  * still walkable. Those traces are badged as rehearsals wherever they show.
  *
  * What if (from any road not taken in the inspector) re-runs run a's input
  * as run b with that one decision forced the other way (see
- * `lib/trace/what-if`), and opens the a-vs-b diff. Forking run b instead
+ * `jevchain-trace-ui` (what-if)), and opens the a-vs-b diff. Forking run b instead
  * stacks another what-if on top of b's (the chain of forks can be undone one
  * at a time), which is how you reach decisions that only exist on a road
  * run a never took.
  *
  * Sweep (`w`) runs every sample, your input and any extra lines through the
- * chain one after another (see `lib/trace/sweep`): the graph shows how many
+ * chain one after another (see `jevchain-trace-ui` (sweep)): the graph shows how many
  * inputs went down each road, the panel how each decision split them and
  * which roads none of them reach. Click an input to open its run.
  *
  * Ask again (`a`, or from the story) sends run a's input to Jev a few more
- * times (see `lib/trace/reask`): every decision says whether all the asks
+ * times (see `jevchain-trace-ui` (reask)): every decision says whether all the asks
  * took the same road, and an ask that went elsewhere opens as run b.
  *
  * Ask both again (compare mode, from the a-vs-b panel) does that for input a
- * and then input b (see `lib/trace/split`): the diff then says, per decision,
+ * and then input b (see `jevchain-trace-ui` (split)): the diff then says, per decision,
  * whether the two inputs stayed apart on every ask or one of them goes both
  * ways by itself, so a split on one pull isn't read as the edit's doing.
  */
@@ -50,20 +50,16 @@ import { Button, ButtonLink } from "@/components/ui/button";
 import { KbdCombo } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useChainRun, useRunClock } from "@/components/trace/use-chain-run";
-import type { ReaskControl } from "@/components/trace/why-panel";
+import type { ReaskControl } from "jevchain-trace-ui";
 import { cn } from "@/lib/cn";
 import { useHotkey } from "@/lib/hotkeys";
 import { newDocument } from "@/lib/builder/doc-ops";
 import { deleteDraft, renameDraft, type Draft } from "@/lib/builder/drafts";
 import { DEFAULT_SLUG, documentOf, resolveChain, type ChainSource, type ResolvedChain } from "@/lib/trace/chain-source";
 import { parseInput, toEditor } from "@/lib/trace/input";
-import { isRehearsal } from "@/lib/trace/rehearsal";
+import { isRehearsal, answeredReasks, reaskBlocker, REASKS, steadinessOf, sameInput, splitsOf, finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow, type Fork } from "jevchain-trace-ui/helpers";
 import { visitOrder, stepSelection } from "@/lib/trace/order";
-import { answeredReasks, reaskBlocker, REASKS, steadinessOf } from "@/lib/trace/reask";
 import { saveRun, type SavedRun } from "@/lib/trace/saved-runs";
-import { sameInput, splitsOf } from "@/lib/trace/split";
-import { finishedTraces, MAX_SWEEP, parseSweepLines, sweepInputs, trafficOf, type SweepRow } from "@/lib/trace/sweep";
-import type { Fork } from "@/lib/trace/what-if";
 import { ChainPicker } from "./chain-picker";
 import type { CompareAskControl } from "./compare-summary";
 import { ExportMenu } from "./export-menu";

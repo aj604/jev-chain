@@ -2,9 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 import { cn } from "@/lib/cn";
-import { fmtAgo, fmtMs, previewJson } from "@/lib/trace/format";
-import { isRehearsal } from "@/lib/trace/rehearsal";
-import { forksOf, isWhatIf } from "@/lib/trace/what-if";
+import { fmtAgo, fmtMs, previewJson, isRehearsal, forksOf, isWhatIf } from "jevchain-trace-ui/helpers";
 import { clearRuns, deleteRun, useSavedRuns, type SavedRun } from "@/lib/trace/saved-runs";
 
 const STATUS_DOT: Record<string, string> = {

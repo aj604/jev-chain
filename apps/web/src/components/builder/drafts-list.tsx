@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/cn";
-import { fmtAgo } from "@/lib/trace/format";
+import { fmtAgo } from "jevchain-trace-ui/helpers";
 import { useDrafts, type Draft } from "@/lib/builder/drafts";
 import { useMinuteNow } from "@/components/studio/saved-runs-list";
 

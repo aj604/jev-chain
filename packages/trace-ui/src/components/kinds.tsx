@@ -1,6 +1,6 @@
 import type { SpanStatus, VertexKind, VertexState } from "jevchain";
-import { ChainLinks } from "@/components/brand/chain-links";
-import { cn } from "@/lib/cn";
+import { ChainLinks } from "../ui/chain-links";
+import { cn } from "../ui/cn";
 
 /** A glyph per node kind, so kind never relies on color alone. */
 export const KIND_GLYPH: Record<VertexKind, string> = {

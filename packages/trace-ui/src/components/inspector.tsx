@@ -11,26 +11,26 @@
  * or a span path with no vertex (e.g. a `chain` span from the timeline).
  *
  * Pass `whatIf` and every road a decision didn't take gets a "what if?"
- * button that re-runs the chain forced down it (see `lib/trace/what-if`).
+ * button that re-runs the chain forced down it (see `lib/what-if`).
  * On a what-if trace that stacks: what it already forced stays forced.
  *
  * Pass `root` (the chain the trace ran on) and a decision also says how close
  * the call was: the nearest road it didn't take, and how far Jev's number
- * would have had to move to take it (see `lib/trace/margin`).
+ * would have had to move to take it (see `lib/margin`).
  *
  * Pass `reask` (the same input asked again) and a decision also says whether
  * every ask took the same road, and how far Jev's number moved between them
- * (see `lib/trace/reask`).
+ * (see `lib/reask`).
  */
 import type { ReactNode } from "react";
 import { spanAt, type AnyNode, type Decision, type FlowGraph, type JevCall, type Question, type Span, type Trace, type Vertex } from "jevchain";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/cn";
-import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "@/lib/trace/format";
-import { closestFlip, flipText } from "@/lib/trace/margin";
-import type { Steadiness } from "@/lib/trace/reask";
-import { edgeName, WHAT_IF_MODEL, type ForcedDecision } from "@/lib/trace/what-if";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { cn } from "../ui/cn";
+import { entryText, fmtMetric, fmtMs, fmtNum, fmtThreshold, fmtTokens, fmtUsd, questionLabels } from "../lib/format";
+import { closestFlip, flipText } from "../lib/margin";
+import type { Steadiness } from "../lib/reask";
+import { edgeName, WHAT_IF_MODEL, type ForcedDecision } from "../lib/what-if";
 import { Distribution } from "./distribution";
 import { JsonView } from "./json-view";
 import { KindTag, StateMark, type AnyState } from "./kinds";
@@ -55,7 +55,7 @@ export interface InspectorProps {
   whatIf?: WhatIfControl;
   /** The chain the trace ran on, for "how close was the call?". */
   root?: AnyNode;
-  /** The run asked again (see `lib/trace/reask`): did this decision hold, and open an ask that didn't. */
+  /** The run asked again (see `lib/reask`): did this decision hold, and open an ask that didn't. */
   reask?: { steadiness?: Steadiness[]; open: (index: number) => void };
   className?: string;
 }

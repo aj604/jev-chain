@@ -7,19 +7,19 @@
  *
  * Pass `reask` and the story can be asked again: the same input, sent to Jev
  * a few more times, and each decision says whether every ask took the same
- * road (see `lib/trace/reask`). An ask that went elsewhere opens as run b.
+ * road (see `lib/reask`). An ask that went elsewhere opens as run b.
  */
 import type { ReactNode } from "react";
 import { decisions, type Span, type Trace } from "jevchain";
-import { ChainLinks } from "@/components/brand/chain-links";
-import { Badge } from "@/components/ui/badge";
-import { KbdCombo } from "@/components/ui/kbd";
-import { cn } from "@/lib/cn";
-import { answerBrief, fmtMetric, fmtMs } from "@/lib/trace/format";
-import { steadyHeadline, steadyText, type Steadiness } from "@/lib/trace/reask";
-import { isRehearsal } from "@/lib/trace/rehearsal";
-import { edgeName, forksOf } from "@/lib/trace/what-if";
-import type { RunIssue } from "@/lib/trace/run-error";
+import { ChainLinks } from "../ui/chain-links";
+import { Badge } from "../ui/badge";
+import { KbdCombo } from "../ui/kbd";
+import { cn } from "../ui/cn";
+import { answerBrief, fmtMetric, fmtMs } from "../lib/format";
+import { steadyHeadline, steadyText, type Steadiness } from "../lib/reask";
+import { isRehearsal } from "../lib/rehearsal";
+import { edgeName, forksOf } from "../lib/what-if";
+import type { RunIssue } from "../lib/run-error";
 import { ForkList } from "./fork-list";
 import { JsonView } from "./json-view";
 import { KindTag } from "./kinds";
@@ -50,10 +50,21 @@ export interface WhyPanelProps {
   /** Rendered under the story when there's an issue (e.g. an "add key" button). */
   issueAction?: ReactNode;
   reask?: ReaskControl;
+  /**
+   * The "how to run it" line under the empty state. Defaults to a
+   * <kbd>mod+enter</kbd> "pull the chain" hint; pass `null` to hide it.
+   */
+  runHint?: ReactNode;
   className?: string;
 }
 
-export function WhyPanel({ trace, issue, onSelect, issueAction, reask, className }: WhyPanelProps) {
+const DEFAULT_RUN_HINT = (
+  <>
+    <KbdCombo combo="mod+enter" /> pull the chain
+  </>
+);
+
+export function WhyPanel({ trace, issue, onSelect, issueAction, reask, runHint = DEFAULT_RUN_HINT, className }: WhyPanelProps) {
   if (!trace) {
     return (
       <div className={cn("flex flex-col items-start gap-4 px-4 py-6", className)}>
@@ -64,9 +75,7 @@ export function WhyPanel({ trace, issue, onSelect, issueAction, reask, className
             run it and this panel tells the story: every decision jev made, the number that decided it, and the roads not taken.
           </p>
         </div>
-        <p className="flex items-center gap-2 font-mono text-[11px] lowercase text-ink-3">
-          <KbdCombo combo="mod+enter" /> pull the chain
-        </p>
+        {runHint != null && <p className="flex items-center gap-2 font-mono text-[11px] lowercase text-ink-3">{runHint}</p>}
         {issue && <IssueBox issue={issue}>{issueAction}</IssueBox>}
       </div>
     );

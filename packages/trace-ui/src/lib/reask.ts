@@ -5,7 +5,7 @@
  * slightly different numbers (a confidence of 0.43, then 0.47), and when a
  * decision sits near its bar that's enough to send the same input down a
  * different road. One trace can't show it: it's one sample. "Closest call"
- * (`lib/trace/margin`) says how far the number would have to move; this says
+ * (`lib/margin`) says how far the number would have to move; this says
  * how far it *does* move, by asking the same input again and reading every
  * decision the run made across all the asks.
  *

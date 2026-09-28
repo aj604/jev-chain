@@ -1,0 +1,217 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   jevchain-trace-ui: the styles the trace components need.
+
+   Wiring (Tailwind 4), in the app's CSS entry:
+
+     @import "tailwindcss";
+     @import "jevchain-trace-ui/trace.css";
+     @source "<relative path to>/packages/trace-ui/src";
+
+   The @source line makes Tailwind scan the package's components; without it
+   their utility classes are never generated. It's relative to the app's CSS
+   file: from apps/<app>/src/app/globals.css it's "../../../../packages/trace-ui/src".
+   The app must also list "jevchain-trace-ui" in next.config transpilePackages
+   (the package ships TypeScript source).
+
+   This file declares token *names* only. The app supplies the values, as
+   plain custom properties on :root (or any ancestor of the components):
+
+     surfaces   --paper  --surface  --surface-2
+     text       --ink  --ink-2  --ink-3
+     lines      --line (hard borders)  --line-soft (hairlines)
+     accent     --accent  --accent-2  --accent-ink (text on accent fills)
+                --accent-strong (accent as small text)  --accent-wash
+     signal     --pass  --pass-wash  --warn  --warn-wash
+                --fail  --fail-wash  --dim (roads not taken, dotted grid)
+     compare    --compare (run "b" in compare mode)
+     shape      --bw (border width, e.g. 1.2px)
+     motion     --ease-out  --dur-fast  --dur  --dur-slow
+
+   Optional:
+     --chain-bg        fill behind edge-on chain links (defaults to --paper)
+     font-display      a Tailwind theme font (`--font-display` in @theme) for
+                       the empty-state headline; font-mono / font-sans come
+                       from the app's theme as usual.
+
+   Everything here is safe to import next to an app that already declares
+   the same utilities: definitions are identical, so the last one wins.
+   ────────────────────────────────────────────────────────────────────────── */
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-wash: var(--accent-wash);
+  --color-pass: var(--pass);
+  --color-pass-wash: var(--pass-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-fail: var(--fail);
+  --color-fail-wash: var(--fail-wash);
+  --color-dim: var(--dim);
+  --color-compare: var(--compare);
+
+  --ease-snap: var(--ease-out);
+}
+
+/* ── hard borders: always --bw, always ink (or hairline for soft) ────────── */
+@utility border-hard {
+  border: var(--bw) solid var(--line);
+}
+@utility border-hard-t {
+  border-top: var(--bw) solid var(--line);
+}
+@utility border-hard-b {
+  border-bottom: var(--bw) solid var(--line);
+}
+@utility border-hard-l {
+  border-left: var(--bw) solid var(--line);
+}
+@utility border-hard-r {
+  border-right: var(--bw) solid var(--line);
+}
+@utility border-soft {
+  border: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-t {
+  border-top: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-b {
+  border-bottom: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-l {
+  border-left: var(--bw) solid var(--line-soft);
+}
+@utility border-soft-r {
+  border-right: var(--bw) solid var(--line-soft);
+}
+
+/* ── motion ─────────────────────────────────────────────────────────────── */
+
+/* the loading chain: links fill one after another, looping */
+@keyframes chain-link-fill {
+  0%,
+  12% {
+    fill: var(--chain-empty, transparent);
+    stroke: currentColor;
+  }
+  22%,
+  55% {
+    fill: var(--accent);
+    stroke: var(--ink);
+  }
+  70%,
+  100% {
+    fill: var(--chain-empty, transparent);
+    stroke: currentColor;
+  }
+}
+.chain-link-anim {
+  animation: chain-link-fill var(--chain-cycle, 1.4s) linear infinite;
+}
+
+/* the running node breathes: a hard accent ring that grows and fades */
+@keyframes node-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px color-mix(in oklab, var(--accent) 0%, transparent);
+  }
+}
+.node-running {
+  animation: node-pulse 1.1s var(--ease-out) infinite;
+}
+
+/* marching dashes on an edge whose target is still running */
+@keyframes edge-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+.edge-flow {
+  stroke-dasharray: 6 4;
+  animation: edge-flow 0.6s linear infinite;
+}
+
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+.bar-grow {
+  transform-origin: left;
+  animation: bar-grow var(--dur-slow) var(--ease-out);
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.fade-up {
+  animation: fade-up var(--dur-slow) var(--ease-out) both;
+}
+
+/* ── React Flow, minus its opinions ─────────────────────────────────────── */
+.trace-flow .react-flow__node {
+  cursor: default;
+}
+.trace-flow .react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+  min-width: 1px;
+  min-height: 1px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+}
+.trace-flow .react-flow__edge-path {
+  transition:
+    stroke var(--dur) var(--ease-out),
+    stroke-width var(--dur) var(--ease-out),
+    opacity var(--dur) var(--ease-out);
+}
+.trace-flow .react-flow__edgelabel-renderer {
+  z-index: 5;
+}
+
+/* React Flow's attribution, kept (as they ask) but dressed to match */
+.trace-flow .react-flow__attribution {
+  background: transparent;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.5;
+}
+.trace-flow .react-flow__attribution a {
+  color: var(--ink-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* the loading chain holds a calm, static half-fill instead of looping */
+  .chain-link-anim,
+  .node-running,
+  .edge-flow,
+  .bar-grow,
+  .fade-up {
+    animation: none !important;
+  }
+  .node-running {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 45%, transparent) !important;
+  }
+  .chain-link-anim[data-rm-fill="true"] {
+    fill: var(--accent) !important;
+    stroke: var(--ink) !important;
+  }
+}

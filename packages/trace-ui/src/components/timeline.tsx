@@ -9,9 +9,9 @@
  */
 import type { CSSProperties } from "react";
 import type { Span, Trace } from "jevchain";
-import { cn } from "@/lib/cn";
-import { fmtMs } from "@/lib/trace/format";
-import { pathDepth, timeTicks } from "@/lib/trace/ticks";
+import { cn } from "../ui/cn";
+import { fmtMs } from "../lib/format";
+import { pathDepth, timeTicks } from "../lib/ticks";
 import { KIND_GLYPH, StateMark } from "./kinds";
 
 export interface TimelineProps {

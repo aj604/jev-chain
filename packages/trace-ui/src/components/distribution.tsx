@@ -3,8 +3,8 @@
  * every probability: the point of a trace is that nothing is hidden.
  */
 import type { Answer, ChoiceAnswer, Entry, NoulAnswer, Question, ScoreAnswer } from "jevchain";
-import { cn } from "@/lib/cn";
-import { entryText, fmtNum, fmtPct } from "@/lib/trace/format";
+import { cn } from "../ui/cn";
+import { entryText, fmtNum, fmtPct } from "../lib/format";
 
 export interface DistributionMarks {
   /** Threshold to draw (in the answer's units: probability, noul or score). */

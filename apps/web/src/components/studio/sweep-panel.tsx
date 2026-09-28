@@ -13,18 +13,13 @@ import { spanAt, type AnyNode, type FlowGraph, type Trace } from "jevchain";
 import { ChainLinks } from "@/components/brand/chain-links";
 import { Badge } from "@/components/ui/badge";
 import { KbdCombo } from "@/components/ui/kbd";
-import { KindTag } from "@/components/trace/kinds";
-import { IssueBox } from "@/components/trace/why-panel";
-import { edgeName } from "@/lib/trace/what-if";
+import { KindTag, IssueBox } from "jevchain-trace-ui";
+import { edgeName, fmtUsd, previewJson, closestFlip, flipText, fmtBy, type RunIssue, closeCallsAt, finishedTraces, routeOf, tallyDecisions, trafficOf, unfinished, unreachedRoads, visits, type SweepInput, type SweepRow } from "jevchain-trace-ui/helpers";
 import { cn } from "@/lib/cn";
-import { fmtUsd, previewJson } from "@/lib/trace/format";
-import { closestFlip, flipText, fmtBy } from "@/lib/trace/margin";
-import type { RunIssue } from "@/lib/trace/run-error";
-import { closeCallsAt, finishedTraces, routeOf, tallyDecisions, trafficOf, unfinished, unreachedRoads, visits, type SweepInput, type SweepRow } from "@/lib/trace/sweep";
 
 export interface SweepPanelProps {
   graph: FlowGraph;
-  /** The chain that was swept: its rules say how close each call came (see `lib/trace/margin`). */
+  /** The chain that was swept: its rules say how close each call came (see `jevchain-trace-ui` (margin)). */
   root?: AnyNode;
   rows: SweepRow[];
   running: boolean;

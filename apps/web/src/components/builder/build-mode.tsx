@@ -11,9 +11,7 @@
  */
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ChainDocument, FlowGraph, Json } from "jevchain";
-import { KindTag } from "@/components/trace/kinds";
-import type { VertexDecoration } from "@/components/trace/graph-node";
-import type { TraceGraphProps } from "@/components/trace/trace-graph";
+import { KindTag, type VertexDecoration, type TraceGraphProps } from "jevchain-trace-ui";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";

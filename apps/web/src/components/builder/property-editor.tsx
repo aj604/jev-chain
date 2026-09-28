@@ -8,7 +8,7 @@
  */
 import { useId, type ReactNode } from "react";
 import { DEFAULT_MODEL, type Entry, type Handler, type Json } from "jevchain";
-import { KindTag } from "@/components/trace/kinds";
+import { KindTag } from "jevchain-trace-ui";
 import { cn } from "@/lib/cn";
 import { describeShape, inputFields, producerName, type FlowFix, type FlowWarning, type Input } from "@/lib/builder/data-flow";
 import { childEdges, isPlaceholder, syncRouteBranches, template, type NodeJson } from "@/lib/builder/doc-ops";

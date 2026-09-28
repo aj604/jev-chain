@@ -14,6 +14,7 @@
     "@next/env": "16.3.6",
     "@xyflow/react": "^12.12.0",
     "jevchain": "workspace:*",
+    "jevchain-trace-ui": "workspace:*",
     "next": "16.3.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",

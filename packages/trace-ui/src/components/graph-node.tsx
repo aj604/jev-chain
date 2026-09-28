@@ -3,9 +3,9 @@
 import { memo, type CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import type { Decision, Span, Vertex, VertexOverlay, VertexState } from "jevchain";
-import { cn } from "@/lib/cn";
-import { answerBrief, fmtMetric, fmtMs, fmtPct } from "@/lib/trace/format";
-import { chipRows, type Direction, type VertexHint } from "@/lib/trace/layout";
+import { cn } from "../ui/cn";
+import { answerBrief, fmtMetric, fmtMs, fmtPct } from "../lib/format";
+import { chipRows, type Direction, type VertexHint } from "../lib/layout";
 import { KIND_GLYPH, KindTag, StateMark } from "./kinds";
 
 /** Builder extras for one vertex. */

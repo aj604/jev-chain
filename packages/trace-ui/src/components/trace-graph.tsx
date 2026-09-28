@@ -25,10 +25,9 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { graphOf, overlayTrace, type AnyNode, type FlowGraph, type Trace, type Vertex } from "jevchain";
-import { cn } from "@/lib/cn";
-import { useTheme } from "@/lib/use-theme";
-import { trafficOverlay, type Traffic } from "@/lib/trace/sweep";
-import { layoutGraph, nodeSize, pickDirection, vertexHints, type Direction } from "@/lib/trace/layout";
+import { cn } from "../ui/cn";
+import { trafficOverlay, type Traffic } from "../lib/sweep";
+import { layoutGraph, nodeSize, pickDirection, vertexHints, type Direction } from "../lib/layout";
 import { EdgeMarkers, TraceEdge, type FlowEdge } from "./graph-edge";
 import { TraceNode, type FlowNode, type VertexDecoration } from "./graph-node";
 
@@ -59,6 +58,11 @@ export interface TraceGraphProps {
   decorations?: Record<string, VertexDecoration>;
   /** Right-click on a node (the builder's context menu). */
   onNodeContextMenu?: (id: string, at: { x: number; y: number }) => void;
+  /**
+   * React Flow's color mode. Pass the app's resolved theme so the canvas follows
+   * an in-app toggle; "system" (default) follows the OS.
+   */
+  colorMode?: "light" | "dark" | "system";
 }
 
 const nodeTypes: NodeTypes = { trace: TraceNode };
@@ -103,10 +107,9 @@ function TraceGraphInner({
   direction: directionProp = "auto",
   decorations,
   onNodeContextMenu,
+  colorMode = "system",
 }: TraceGraphProps) {
   const [boxRef, box] = useSize<HTMLDivElement>();
-  // Follow the app's theme toggle, not the OS ("system" would ignore it).
-  const { resolved: resolvedTheme } = useTheme();
   const rawId = useId();
   const markerPrefix = `m${rawId.replace(/[^a-zA-Z0-9]/g, "")}`;
 
@@ -223,7 +226,7 @@ function TraceGraphInner({
               },
             }
           : {})}
-        colorMode={resolvedTheme}
+        colorMode={colorMode}
         aria-label="chain graph"
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--dim)" />

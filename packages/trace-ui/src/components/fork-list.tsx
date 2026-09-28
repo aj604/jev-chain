@@ -4,8 +4,8 @@
  * The chain of "what ifs" behind a what-if trace: every decision that was
  * forced, in the order the run reached them, each one clickable.
  */
-import { cn } from "@/lib/cn";
-import { edgeName, type ForcedDecision } from "@/lib/trace/what-if";
+import { cn } from "../ui/cn";
+import { edgeName, type ForcedDecision } from "../lib/what-if";
 
 export function ForkList({ forks, onSelect, className }: { forks: ForcedDecision[]; onSelect?: (path: string) => void; className?: string }) {
   if (forks.length === 0) return null;

@@ -3,9 +3,9 @@
 import { memo } from "react";
 import { EdgeLabelRenderer, type Edge as RFEdge, type EdgeProps } from "@xyflow/react";
 import type { Edge, EdgeOverlay } from "jevchain";
-import { cn } from "@/lib/cn";
-import { fmtMetric } from "@/lib/trace/format";
-import { edgePath, type Direction, type Point } from "@/lib/trace/layout";
+import { cn } from "../ui/cn";
+import { fmtMetric } from "../lib/format";
+import { edgePath, type Direction, type Point } from "../lib/layout";
 
 export type FlowEdgeData = {
   edge: Edge;

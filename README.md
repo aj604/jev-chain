@@ -63,6 +63,7 @@ pnpm test                                # framework + web unit tests (live API 
 ```
 packages/jevchain     the framework (published as `jevchain`): zero dependencies
 packages/examples     six silly chains that each teach a real composition pattern, plus a CLI
+packages/trace-ui     the run visualization (`jevchain-trace-ui`): trace graph, why panel, inspector, timeline
 apps/web              Next.js studio, examples gallery, docs, and the API proxy
 apps/will-it-jev      Will it jev?: break anything into nested jev gates, get a shareable verdict
 ```

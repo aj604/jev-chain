@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { cn } from "@/lib/cn";
-import { CopyButton } from "@/components/ui/copy-button";
+import { cn } from "../ui/cn";
+import { CopyButton } from "../ui/copy-button";
 
 const TOKEN = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/gi;
 

@@ -4,7 +4,7 @@ import { useId } from "react";
 import type { Json } from "jevchain";
 import { cn } from "@/lib/cn";
 import { parseInput, toEditor, type InputMode } from "@/lib/trace/input";
-import { previewJson } from "@/lib/trace/format";
+import { previewJson } from "jevchain-trace-ui/helpers";
 
 export interface InputValue {
   text: string;
