@@ -44,7 +44,7 @@ import { TIERS, type Tier } from "./tiers";
 /** A shared input keeps its first 499 characters and then "…". */
 export const MAX_SHARED_INPUT = 500;
 /** The longest encoded hash `decodeBlob` looks at. */
-export const MAX_HASH_BYTES = 16 * 1024;
+export const MAX_HASH_BYTES = 64 * 1024;
 /** Decompression stops once the payload passes this. */
 export const MAX_PAYLOAD_BYTES = 64 * 1024;
 /** Where "Open in the studio" goes. No trailing slash. */

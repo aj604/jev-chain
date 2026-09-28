@@ -208,14 +208,18 @@ describe("encodeBlob and decodeBlob", () => {
     await expectBadLink(decodeBlob("A"));
   });
 
-  it("rejects a blob over 16 KB, even one that would decode", async () => {
+  it(`rejects a blob over ${MAX_HASH_BYTES} bytes, even one that would decode`, async () => {
     await expectBadLink(decodeBlob("A".repeat(MAX_HASH_BYTES + 1)));
-    // Pseudo-random hex hardly compresses: about 30 KB of JSON, over 16 KB encoded.
+    // Pseudo-random text from a wide, mostly-incompressible alphabet: the JSON
+    // stays under the payload cap, but base64url still pushes it past the hash cap.
+    const ALPHABET = Array.from({ length: 95 }, (_, i) => String.fromCharCode(33 + i))
+      .filter((c) => c !== '"' && c !== "\\")
+      .join("");
     let seed = 1;
-    const hex = Array.from({ length: 30_000 }, () => ((seed = (seed * 48271) % 0x7fffffff) % 16).toString(16)).join("");
-    const blob = await encodeBlob({ hex });
+    const text = Array.from({ length: 62_000 }, () => ALPHABET[(seed = (seed * 48271) % 0x7fffffff) % ALPHABET.length]).join("");
+    const blob = await encodeBlob({ text });
     expect(blob.length).toBeGreaterThan(MAX_HASH_BYTES);
-    expect(JSON.stringify({ hex }).length).toBeLessThan(MAX_PAYLOAD_BYTES);
+    expect(JSON.stringify({ text }).length).toBeLessThan(MAX_PAYLOAD_BYTES);
     await expectBadLink(decodeBlob(blob));
   });
 
@@ -549,7 +553,7 @@ describe("verdictHref and readVerdictPayload", () => {
       await expectBadLink(readVerdictPayload(hash.slice(0, -1)));
     });
 
-    it("that is over 16 KB encoded", async () => {
+    it(`that is over ${MAX_HASH_BYTES} bytes encoded`, async () => {
       await expectBadLink(readVerdictPayload("#" + "A".repeat(MAX_HASH_BYTES + 1)));
     });
 
@@ -869,11 +873,31 @@ describe("the every-cap recipe", () => {
   });
 
   /**
-   * Not met. The recipe and input alone encode to about 25.5 KB, over this
-   * budget and over the 16 KB hash cap, before any trace. See PR for #63.
+   * The every-cap recipe plus a 500-character input and its full trace is the
+   * worst case a share link can be: about 29.5 KB, well over 8192 but under
+   * the 64 KB (`MAX_HASH_BYTES`) budget the owner set for #63. It still
+   * decodes through the public `readVerdictPayload` path, same as any other
+   * link.
    */
-  it.fails("gives a link under 8192 characters", async () => {
-    const { href } = await shared();
+  it("gives a link under 65536 characters", async () => {
+    const { href, trace, verdict } = await shared();
+    expect(href.length).toBeLessThan(65536);
+    const payload = await readVerdictPayload(href.slice(href.indexOf("#")));
+    expect(payload.input).toHaveLength(MAX_SHARED_INPUT);
+    expect(payload.input.endsWith("…")).toBe(true);
+    expect(payload.recipe).toEqual(r);
+    // The live trace with its input trimmed the way the link trims it.
+    expect(asJson(payload.trace)).toStrictEqual(asJson(withInput(trace, payload.input)));
+    expect(recomputed(payload)).toEqual(verdict);
+  });
+});
+
+describe("every curated recipe's share link stays short", () => {
+  const runs = CURATED.flatMap((c) => c.samples.map((s) => [c.slug, s.label, c, s.input] as const));
+
+  it.each(runs)("%s, %s", async (_slug, _label, c, input) => {
+    const { trace, verdict } = await runRecipe(c.recipe, input);
+    const href = await verdictHref({ recipe: c.recipe, input, trace, verdict, slug: c.slug });
     expect(href.length).toBeLessThan(8192);
   });
 });
