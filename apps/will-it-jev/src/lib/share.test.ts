@@ -1,13 +1,16 @@
-import { constants as zlibConstants, createInflateRaw } from "node:zlib";
-import { run, type ChainDocument, type Trace } from "jevchain";
+import { constants as zlibConstants, createInflateRaw, inflateRawSync } from "node:zlib";
+import { run, type Answer, type ChainDocument, type Trace } from "jevchain";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { tonight } from "@/recipes";
+import { CURATED, tonight } from "@/recipes";
+import { everyCapRecipe, Words } from "@/test/every-cap";
 import { fakeJev, type Oracle } from "@/test/fake-jev";
 import { ladder } from "@/test/fixtures";
 import { COPY } from "./copy";
-import { gate, rate, recipe, verdict, yesNo } from "./recipe/build";
+import { gate, pick, rate, recipe, route, scale, verdict, yesNo } from "./recipe/build";
 import { compileRecipe } from "./recipe/compile";
-import type { Recipe } from "./recipe/types";
+import { recipeShape } from "./recipe/tree";
+import { CAPS, LIMITS, type Recipe, type RecipeNode } from "./recipe/types";
+import { validateRecipe } from "./recipe/validate";
 import { verdictOf, type Verdict } from "./recipe/verdict";
 import {
   MAX_HASH_BYTES,
@@ -25,6 +28,7 @@ import {
   studioHref,
   truncateInput,
   verdictHref,
+  type VerdictPayload,
 } from "./share";
 
 afterEach(() => {
@@ -68,6 +72,99 @@ async function expectBadLink(promise: Promise<unknown>) {
   );
   expect(error).toBeInstanceOf(ShareError);
   expect((error as ShareError).message).toBe(COPY.badLink);
+}
+
+/**
+ * `value`'s JSON, padded with trailing spaces and stored uncompressed in one
+ * deflate-raw stored block (BTYPE=00), so the blob is exactly `length`
+ * base64url characters. The same bytes whatever the JSON, so the length is
+ * exact without searching. `length % 4` can't be 1: base64 has no such length.
+ */
+function storedBlob(value: unknown, length: number): string {
+  // A stored block is a 1-byte header, then LEN and NLEN (2 bytes each), then the bytes.
+  const size = Math.floor((length * 3) / 4) - 5;
+  const json = new TextEncoder().encode(JSON.stringify(value));
+  if (length % 4 === 1 || json.byteLength > size || size > 0xffff) throw new Error(`no stored blob is ${length} characters`);
+  const bytes = new Uint8Array(5 + size).fill(0x20);
+  bytes.set([0x01, size & 0xff, size >> 8, ~size & 0xff, (~size >> 8) & 0xff]);
+  bytes.set(json, 5);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const blob = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  expect(blob).toHaveLength(length);
+  // It would decode: it inflates to the padded JSON, under the payload cap.
+  const inflated = inflateRawSync(Buffer.from(bytes));
+  expect(inflated.byteLength).toBe(size);
+  expect(inflated.byteLength).toBeLessThan(MAX_PAYLOAD_BYTES);
+  expect(JSON.parse(inflated.toString("utf8"))).toEqual(value);
+  return blob;
+}
+
+/** Every noul says 0.9, every score the top level, every choice the last label. As in the recipes' tests. */
+const agreeable: Oracle = (q) => {
+  if (q.type === "noul") return { noul: 0.9 };
+  if (q.type === "score") {
+    const top = q.criteria.length - 1;
+    const probabilities = Object.fromEntries(q.criteria.map((_, i) => [String(i), i === top ? 1 : 0]));
+    return { score: top, probabilities } as Partial<Answer>;
+  }
+  const labels = Object.keys(q.criteria);
+  return { choice: labels[labels.length - 1] } as Partial<Answer>;
+};
+
+/** `value` as JSON sees it: what a link can carry. */
+function asJson(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value));
+}
+
+/** `trace` with every copy of its input (trace, span inputs, call states) set to `input`. */
+function withInput(trace: Trace, input: string): Trace {
+  return {
+    ...trace,
+    input,
+    spans: trace.spans.map((span) => ({ ...span, input, calls: span.calls.map((call) => ({ ...call, state: input })) })),
+  };
+}
+
+/** Every string in a recipe by what it is, and its node count. */
+function everyString(r: Recipe) {
+  const out = { nodes: 0, keys: [] as string[], questions: [] as string[], labels: [] as string[] };
+  const more = { descriptions: [] as string[], levels: [] as string[], lines: [] as string[] };
+  const labelled = (labels: Record<string, string>) => {
+    out.labels.push(...Object.keys(labels));
+    more.descriptions.push(...Object.values(labels));
+  };
+  const visit = (node: RecipeNode) => {
+    out.nodes++;
+    switch (node.kind) {
+      case "verdict":
+        more.lines.push(node.line);
+        return;
+      case "rate":
+        out.keys.push(node.key);
+        more.lines.push(...Object.values(node.verdicts));
+        for (const q of node.questions) {
+          out.keys.push(q.key);
+          out.questions.push(q.question);
+          if (q.kind === "choice") labelled(q.labels);
+          if (q.kind === "score") more.levels.push(...q.levels);
+        }
+        return;
+      case "gate":
+        out.keys.push(node.key);
+        out.questions.push(node.question);
+        visit(node.then);
+        visit(node.otherwise);
+        return;
+      case "route":
+        out.keys.push(node.key);
+        out.questions.push(node.question);
+        labelled(node.labels);
+        Object.values(node.branches).forEach(visit);
+    }
+  };
+  visit(r.root);
+  return { ...out, ...more };
 }
 
 /** A generated recipe: one rate leaf, whatever the title. */
@@ -136,14 +233,26 @@ describe("encodeBlob and decodeBlob", () => {
     await expectBadLink(decodeBlob("A"));
   });
 
-  it("rejects a blob over 16 KB, even one that would decode", async () => {
-    await expectBadLink(decodeBlob("A".repeat(MAX_HASH_BYTES + 1)));
-    // Pseudo-random hex hardly compresses: about 30 KB of JSON, over 16 KB encoded.
+  it(`accepts a blob of exactly ${MAX_HASH_BYTES} bytes`, async () => {
+    // The owner's decision on #63: 64 KB, so the site's own links for large valid recipes are accepted.
+    expect(MAX_HASH_BYTES).toBe(64 * 1024);
+    const value = { v: 1, text: "at the cap" };
+    expect(await decodeBlob(storedBlob(value, MAX_HASH_BYTES))).toEqual(value);
+  });
+
+  it(`rejects a blob over ${MAX_HASH_BYTES} bytes, even one that would decode`, async () => {
+    // The next length base64url can have after the cap.
+    await expectBadLink(decodeBlob(storedBlob({ v: 1, text: "past the cap" }, MAX_HASH_BYTES + 2)));
+    // Pseudo-random text from a wide, mostly-incompressible alphabet: the JSON
+    // stays under the payload cap, but base64url still pushes it past the hash cap.
+    const ALPHABET = Array.from({ length: 95 }, (_, i) => String.fromCharCode(33 + i))
+      .filter((c) => c !== '"' && c !== "\\")
+      .join("");
     let seed = 1;
-    const hex = Array.from({ length: 30_000 }, () => ((seed = (seed * 48271) % 0x7fffffff) % 16).toString(16)).join("");
-    const blob = await encodeBlob({ hex });
+    const text = Array.from({ length: 62_000 }, () => ALPHABET[(seed = (seed * 48271) % 0x7fffffff) % ALPHABET.length]).join("");
+    const blob = await encodeBlob({ text });
     expect(blob.length).toBeGreaterThan(MAX_HASH_BYTES);
-    expect(JSON.stringify({ hex }).length).toBeLessThan(MAX_PAYLOAD_BYTES);
+    expect(JSON.stringify({ text }).length).toBeLessThan(MAX_PAYLOAD_BYTES);
     await expectBadLink(decodeBlob(blob));
   });
 
@@ -365,11 +474,39 @@ describe("verdictHref and readVerdictPayload", () => {
     }
   });
 
+  it("slims the hash: no titles, call questions or outputs, which the recipe has", async () => {
+    const { hash, trace } = await share(tonight.recipe, TONIGHT_INPUT, "tonight");
+    const wire = (await decodeBlob(hash.slice(1))) as { trace: { spans: Record<string, unknown>[] } };
+    expect(wire.trace).not.toHaveProperty("output");
+    expect(wire.trace.spans).toHaveLength(trace.spans.length);
+    for (const span of wire.trace.spans) {
+      expect(span).not.toHaveProperty("title");
+      expect(span).not.toHaveProperty("output");
+      for (const call of span.calls as Record<string, unknown>[]) expect(call).not.toHaveProperty("questions");
+    }
+    // The lines and questions are in the hash once: in the recipe.
+    const json = JSON.stringify(wire);
+    const line = "It jevs. This is a plan, not a night out.";
+    expect(json.split(line)).toHaveLength(2);
+    expect(json.split("Does the plan end at karaoke?")).toHaveLength(2);
+  });
+
   it("restores the trace input from the payload's input, not the trace's own", async () => {
     const { hash } = await share(tonight.recipe, TONIGHT_INPUT, "tonight");
     const wire = (await decodeBlob(hash.slice(1))) as Record<string, unknown> & { trace: Record<string, unknown> };
     const forged = await encodeBlob({ ...wire, trace: { ...wire.trace, input: "forged" } });
     expect((await readVerdictPayload(forged)).trace.input).toBe(TONIGHT_INPUT);
+  });
+
+  it("restores outputs from the recipe and the answers, not the trace's own", async () => {
+    const { hash, verdict } = await share(tonight.recipe, TONIGHT_INPUT, "tonight");
+    const wire = (await decodeBlob(hash.slice(1))) as Record<string, unknown> & { trace: { spans: object[] } };
+    const forgedOutput = { tier: "nope", line: "Forged." };
+    const spans = wire.trace.spans.map((span) => ({ ...span, title: "Forged.", output: forgedOutput }));
+    const payload = await readVerdictPayload(await encodeBlob({ ...wire, trace: { ...wire.trace, output: forgedOutput, spans } }));
+    expect(payload.trace.output).toEqual({ tier: "jevs", line: "It jevs. This is a plan, not a night out." });
+    expect(payload.trace.spans.every((s) => s.output !== undefined && s.title !== "Forged.")).toBe(true);
+    expect(recomputed(payload)).toEqual(verdict);
   });
 
   it("accepts the hash without its #", async () => {
@@ -449,8 +586,11 @@ describe("verdictHref and readVerdictPayload", () => {
       await expectBadLink(readVerdictPayload(hash.slice(0, -1)));
     });
 
-    it("that is over 16 KB encoded", async () => {
-      await expectBadLink(readVerdictPayload("#" + "A".repeat(MAX_HASH_BYTES + 1)));
+    it(`that is over ${MAX_HASH_BYTES} bytes encoded, though it would decode`, async () => {
+      const wire = await goodWire();
+      // The same payload at exactly the cap is a good link.
+      expect(recomputed(await readVerdictPayload("#" + storedBlob(wire, MAX_HASH_BYTES)))).not.toBeNull();
+      await expectBadLink(readVerdictPayload("#" + storedBlob(wire, MAX_HASH_BYTES + 2)));
     });
 
     it("that isn't JSON", async () => {
@@ -500,13 +640,289 @@ describe("verdictHref and readVerdictPayload", () => {
       const wire = await goodWire();
       const trace = wire.trace;
       await expectBadLink(readVerdictPayload(await encodeBlob({ ...wire, trace: { ...trace, status: "error" } })));
-      await expectBadLink(readVerdictPayload(await encodeBlob({ ...wire, trace: { ...trace, output: { tier: "jevs", line: "Forged." } } })));
       await expectBadLink(readVerdictPayload(await encodeBlob({ ...wire, trace: { ...trace, output: undefined, spans: [] } })));
-      // Junk spans and calls don't throw, they just score nothing.
       await expectBadLink(
         readVerdictPayload(await encodeBlob({ ...wire, trace: { ...trace, output: null, spans: [1, null, { calls: [2] }] } })),
       );
     });
+  });
+});
+
+describe("every curated run round-trips", () => {
+  const runs = CURATED.flatMap((c) =>
+    c.samples.flatMap((s) => [
+      [c.slug, s.label, "default", c, s.input, undefined] as const,
+      [c.slug, s.label, "agreeable", c, s.input, agreeable] as const,
+    ]),
+  );
+
+  it.each(runs)("%s, %s, %s answers", async (_slug, _label, _answers, c, input, oracle) => {
+    expect(input.length).toBeLessThanOrEqual(MAX_SHARED_INPUT);
+    const { trace, verdict } = await runRecipe(c.recipe, input, oracle);
+    const href = await verdictHref({ recipe: c.recipe, input, trace, verdict, slug: c.slug });
+    const payload = await readVerdictPayload(href.slice(href.indexOf("#")));
+    // Restored, it is exactly the trace the run returned.
+    expect(asJson(payload.trace)).toStrictEqual(asJson(trace));
+    expect(recomputed(payload)).toEqual(verdict);
+  });
+});
+
+describe("readVerdictPayload checks the trace against its recipe", () => {
+  /** Every question kind: a gate, a route, then a rate with a choice, a score and a noul. */
+  const mixed = recipe(
+    "Will the mix jev?",
+    "the mix",
+    gate(
+      "first",
+      "Is it the first try?",
+      "no",
+      route(
+        "which",
+        "Which way does it go?",
+        { left: "It goes left", right: "It goes right" },
+        {
+          left: rate(
+            "vibes",
+            [
+              pick("colour", "What colour is it?", 2, { red: "Red", blue: "Blue", green: "Green" }, ["red"]),
+              scale("size", "How big is it?", 1, ["small", "big", "huge"], "high"),
+              yesNo("fun", "Is it fun?", 1, true),
+            ],
+            { jevs: "It jevs.", kinda: "It sort of jevs.", nope: "It does not jev." },
+          ),
+          right: verdict("kinda", "It goes right, sort of."),
+        },
+      ),
+      verdict("nope", "It is not the first try."),
+    ),
+  );
+
+  type WireSpan = Record<string, unknown> & {
+    decision?: Record<string, unknown> & { edges: Record<string, unknown>[] };
+    calls: (Record<string, unknown> & { answers: Record<string, Record<string, unknown>> })[];
+  };
+  type Wire = Record<string, unknown> & { trace: Record<string, unknown> & { spans: WireSpan[] } };
+
+  /** The hash's JSON for `r` run with default answers: for `mixed`, gate, route, rate. */
+  async function wireOf(r: Recipe = mixed): Promise<Wire> {
+    const { hash } = await share(r, "Some input.");
+    return (await decodeBlob(hash.slice(1))) as Wire;
+  }
+
+  /** Reads the wire after `edit` changes a copy of it in place. Untouched, the wire must be accepted. */
+  async function edited(edit: (wire: Wire) => void, r?: Recipe): Promise<VerdictPayload> {
+    const wire = await wireOf(r);
+    expect(recomputed(await readVerdictPayload(await encodeBlob(wire)))).not.toBeNull();
+    const copy = structuredClone(wire);
+    edit(copy);
+    return readVerdictPayload(await encodeBlob(copy));
+  }
+
+  const rejects = (edit: (wire: Wire) => void, r?: Recipe) => expectBadLink(edited(edit, r));
+
+  it("accepts the untouched run of every question kind", async () => {
+    const wire = await wireOf();
+    expect(wire.trace.spans.map((s) => s.kind)).toEqual(["gate", "route", "ask"]);
+    const payload = await readVerdictPayload(await encodeBlob(wire));
+    expect(recomputed(payload)).toMatchObject({ gates: 5, depth: 2 });
+  });
+
+  describe("rejects a trace of the wrong shape", () => {
+    it.each<[string, (wire: Wire) => void]>([
+      ["version not 1", (w) => (w.trace.version = 2)],
+      ["status not a string", (w) => (w.trace.status = 1)],
+      ["durationMs missing", (w) => delete w.trace.durationMs],
+      ["durationMs not a number", (w) => (w.trace.durationMs = "34")],
+      ["usage missing", (w) => delete w.trace.usage],
+      ["usage.requests not a number", (w) => ((w.trace.usage as Record<string, unknown>).requests = "3")],
+      ["models not a list", (w) => (w.trace.models = "jev-fake")],
+      ["spans not a list", (w) => (w.trace.spans = {} as never)],
+      ["a span not an object", (w) => (w.trace.spans[0] = 1 as never)],
+      ["span path not a string", (w) => (w.trace.spans[0]!.path = 0)],
+      ["span nodeId not a string", (w) => (w.trace.spans[0]!.nodeId = null)],
+      ["span kind not a string", (w) => (w.trace.spans[0]!.kind = 1)],
+      ["span start not a number", (w) => (w.trace.spans[0]!.start = "0")],
+      ["span calls not a list", (w) => (w.trace.spans[0]!.calls = {} as never)],
+      ["span retries not a list", (w) => (w.trace.spans[0]!.retries = null)],
+      ["span logs not a list", (w) => delete w.trace.spans[0]!.logs],
+      ["a call not an object", (w) => (w.trace.spans[0]!.calls[0] = "call" as never)],
+      ["call answers not an object", (w) => (w.trace.spans[0]!.calls[0]!.answers = [] as never)],
+      ["call costUsd not a number", (w) => (w.trace.spans[0]!.calls[0]!.costUsd = "0.01")],
+      ["decision missing", (w) => delete w.trace.spans[0]!.decision],
+      ["decision value not a number", (w) => (w.trace.spans[0]!.decision!.value = "0.1")],
+      ["decision value infinite", (w) => (w.trace.spans[0]!.decision!.value = 1e999)],
+      ["decision edges not a list", (w) => (w.trace.spans[0]!.decision!.edges = {} as never)],
+      ["an edge value not a number", (w) => (w.trace.spans[0]!.decision!.edges[0]!.value = "0.1")],
+      ["an edge's taken not a boolean", (w) => (w.trace.spans[0]!.decision!.edges[0]!.taken = "yes")],
+    ])("%s", async (_, edit) => {
+      await rejects(edit);
+    });
+  });
+
+  describe("rejects a trace that doesn't fit the recipe", () => {
+    const answers = (w: Wire, span: number) => w.trace.spans[span]!.calls[0]!.answers;
+
+    it.each<[string, (wire: Wire) => void]>([
+      ["a node the recipe doesn't have", (w) => (w.trace.spans[1]!.nodeId = "elsewhere")],
+      ["a rated question's key as a node", (w) => (w.trace.spans[2]!.nodeId = "colour")],
+      ["a span of another kind than its node", (w) => (w.trace.spans[0]!.kind = "route")],
+      ["a decision of another kind than its node", (w) => (w.trace.spans[0]!.decision!.kind = "route")],
+      ["a decision on another question", (w) => (w.trace.spans[0]!.decision!.question = "fun")],
+      ["a decision taking an edge the node doesn't have", (w) => (w.trace.spans[1]!.decision!.taken = "up")],
+      [
+        "a decision taking an edge the node doesn't have, no edge marked taken",
+        (w) => {
+          w.trace.spans[1]!.decision!.taken = "up";
+          for (const e of w.trace.spans[1]!.decision!.edges) e.taken = false;
+        },
+      ],
+      ["a decision whose edges aren't the node's", (w) => (w.trace.spans[1]!.decision!.edges[1]!.edge = "up")],
+      ["a decision with an edge missing", (w) => w.trace.spans[1]!.decision!.edges.pop()],
+      ["a decision marking another edge taken", (w) => (w.trace.spans[1]!.decision!.edges[1]!.taken = true)],
+      ["a decision on a rate", (w) => (w.trace.spans[2]!.decision = w.trace.spans[1]!.decision)],
+      ["a decision that took the other edge", (w) => (w.trace.spans[0]!.decision!.taken = "otherwise")],
+      ["no call on a gate", (w) => (w.trace.spans[0]!.calls = [])],
+      ["a second call on a rate", (w) => w.trace.spans[2]!.calls.push(w.trace.spans[2]!.calls[0]!)],
+      ["a span that isn't ok", (w) => (w.trace.spans[1]!.status = "error")],
+      ["no spans", (w) => (w.trace.spans = [])],
+      ["the root span missing", (w) => w.trace.spans.shift()],
+      ["the leaf span missing", (w) => w.trace.spans.pop()],
+      ["a span after the leaf", (w) => w.trace.spans.push(w.trace.spans[2]!)],
+      ["spans out of order", (w) => w.trace.spans.reverse()],
+      ["a span at another path", (w) => (w.trace.spans[1]!.path = "$/otherwise")],
+      ["a span under another parent", (w) => (w.trace.spans[2]!.parentPath = "$")],
+      ["a span on another edge", (w) => (w.trace.spans[2]!.edge = "right")],
+      ["a missing answer", (w) => delete answers(w, 2).size],
+      [
+        "an answer under another key",
+        (w) => {
+          answers(w, 2).other = answers(w, 2).size!;
+          delete answers(w, 2).size;
+        },
+      ],
+      ["an answer of another kind, otherwise fitting", (w) => (answers(w, 2).fun!.type = "score")],
+      ["an extra answer", (w) => (answers(w, 2).extra = { type: "noul", noul: 0.5 })],
+      ["an extra answer on a gate", (w) => (answers(w, 0).fun = { type: "noul", noul: 0.5 })],
+      ["an answer that isn't an object", (w) => (answers(w, 2).fun = 0.5 as never)],
+      ["a noul answer to a choice", (w) => (answers(w, 1).decision = { type: "noul", noul: 0.5 })],
+      ["a choice answer to a noul", (w) => (answers(w, 2).fun = answers(w, 2).colour!)],
+      ["a noul over 1", (w) => (answers(w, 0).decision!.noul = 1.5)],
+      ["a noul that isn't a number", (w) => (answers(w, 2).fun!.noul = "0.5")],
+      ["a route's choice of an unknown label", (w) => (answers(w, 1).decision!.choice = "up")],
+      ["a rated choice of an unknown label", (w) => (answers(w, 2).colour!.choice = "purple")],
+      ["a choice of an inherited key", (w) => (answers(w, 2).colour!.choice = "constructor")],
+      ["a probability for an unknown label", (w) => ((answers(w, 2).colour!.probabilities as Record<string, number>).purple = 0)],
+      ["a probability that isn't a number", (w) => ((answers(w, 2).colour!.probabilities as Record<string, unknown>).red = "0.9")],
+      ["probabilities that aren't an object", (w) => delete answers(w, 2).colour!.probabilities],
+      ["a score over the top level", (w) => (answers(w, 2).size!.score = 3)],
+      ["a negative score", (w) => (answers(w, 2).size!.score = -0.5)],
+      ["a score that isn't a number", (w) => (answers(w, 2).size!.score = "2")],
+    ])("%s", async (_, edit) => {
+      await rejects(edit);
+    });
+
+    it("rejects an own __proto__ answer, which JSON can carry", async () => {
+      await rejects((w) => {
+        Object.defineProperty(answers(w, 2), "__proto__", { value: { type: "noul", noul: 1 }, enumerable: true });
+      });
+    });
+
+    it("rejects calls on a verdict's emit", async () => {
+      const ladderWire = await wireOf(ladder(2));
+      expect(ladderWire.trace.spans.at(-1)!.kind).toBe("emit");
+      await rejects((w) => w.trace.spans.at(-1)!.calls.push(w.trace.spans[0]!.calls[0]!), ladder(2));
+    });
+
+    it("accepts a score between levels and any label's probability", async () => {
+      const payload = await edited((w) => {
+        answers(w, 2).size!.score = 1.5;
+        answers(w, 0).decision!.noul = 0;
+        (answers(w, 2).colour!.probabilities as Record<string, number>).blue = 1;
+      });
+      expect(recomputed(payload)).not.toBeNull();
+    });
+  });
+});
+
+describe("the every-cap recipe", () => {
+  const r = everyCapRecipe();
+  /** Over 500 characters, so it is trimmed. Words, like the recipe, so it doesn't compress by repeating. */
+  const input = new Words(500).text(CAPS.input);
+
+  /** The recipe's run along its deepest path, shared, with the hash's bytes inflated without any cap. */
+  async function shared() {
+    const { trace, verdict } = await runRecipe(r, input);
+    const href = await verdictHref({ recipe: r, input, trace, verdict });
+    const b64 = href.slice(href.indexOf("#") + 1).replace(/-/g, "+").replace(/_/g, "/");
+    return { trace, verdict, href, inflated: inflateRawSync(Buffer.from(b64, "base64")) };
+  }
+
+  it("is valid and at every cap", () => {
+    const check = validateRecipe(r);
+    expect(check.ok && check.recipe).toEqual(r);
+    expect(recipeShape(r)).toEqual({ decisions: LIMITS.depth, maxDepth: LIMITS.depth, questions: LIMITS.questions });
+    const strings = everyString(r);
+    expect(strings.nodes).toBe(LIMITS.nodes);
+    expect(r.title).toHaveLength(CAPS.title);
+    expect(r.thing).toHaveLength(CAPS.thing);
+    for (const [cap, values] of [
+      [CAPS.key, strings.keys],
+      [CAPS.question, strings.questions],
+      [CAPS.label, strings.labels],
+      [CAPS.labelDescription, strings.descriptions],
+      [CAPS.level, strings.levels],
+      [CAPS.line, strings.lines],
+    ] as const) {
+      expect(values.length).toBeGreaterThan(0);
+      expect(values.every((s) => s.length === cap)).toBe(true);
+    }
+    expect(strings.questions).toHaveLength(LIMITS.questions);
+    // Nothing repeats, so the link isn't small by compressing repeats.
+    const all = [...strings.questions, ...strings.descriptions, ...strings.levels, ...strings.lines];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("runs along its deepest path: 10 decisions, then a 6-question rate", async () => {
+    const { trace, verdict } = await runRecipe(r, input);
+    expect(trace.spans).toHaveLength(LIMITS.depth + 1);
+    expect(verdict).toMatchObject({ depth: LIMITS.depth, gates: LIMITS.depth + CAPS.rateQuestions.max });
+  });
+
+  it("adds little to the link beyond the recipe and the input", async () => {
+    const { href } = await shared();
+    const bare = await encodeBlob({ v: 1, recipe: r, input: truncateInput(input) });
+    // The deepest run's trace: 11 spans and 16 answers, most of them six-label choices.
+    expect(href.length - bare.length).toBeLessThan(4_500);
+  });
+
+  /**
+   * The every-cap recipe plus a 500-character input and its full trace is the
+   * worst case a share link can be: about 29.5 KB, well over 8192 but under
+   * the 64 KB (`MAX_HASH_BYTES`) budget the owner set for #63. It still
+   * decodes through the public `readVerdictPayload` path, same as any other
+   * link, and round-trips exactly, under the 64 KB inflate cap.
+   */
+  it("gives a link under 65536 characters that round-trips exactly, under the 64 KB inflate cap", async () => {
+    const { href, trace, verdict, inflated } = await shared();
+    expect(href.length).toBeLessThan(65536);
+    expect(inflated.byteLength).toBeLessThan(MAX_PAYLOAD_BYTES);
+    const payload = await readVerdictPayload(href.slice(href.indexOf("#")));
+    expect(payload.input).toHaveLength(MAX_SHARED_INPUT);
+    expect(payload.input.endsWith("…")).toBe(true);
+    expect(payload.recipe).toEqual(r);
+    // The live trace with its input trimmed the way the link trims it.
+    expect(asJson(payload.trace)).toStrictEqual(asJson(withInput(trace, payload.input)));
+    expect(recomputed(payload)).toEqual(verdict);
+  });
+});
+
+describe("every curated recipe's share link stays short", () => {
+  const runs = CURATED.flatMap((c) => c.samples.map((s) => [c.slug, s.label, c, s.input] as const));
+
+  it.each(runs)("%s, %s", async (_slug, _label, c, input) => {
+    const { trace, verdict } = await runRecipe(c.recipe, input);
+    const href = await verdictHref({ recipe: c.recipe, input, trace, verdict, slug: c.slug });
+    expect(href.length).toBeLessThan(8192);
   });
 });
 
